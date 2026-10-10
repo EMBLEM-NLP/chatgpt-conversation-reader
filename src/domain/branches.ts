@@ -13,6 +13,12 @@
  * zone-less strings). No clock or randomness is used.
  *
  * Extra warning codes beyond the contract list (all id-only): DUPLICATE_NODE_ID and CURRENT_NODE_NOT_LEAF.
+ *
+ * Untrusted arguments: every public function type-checks its arguments (`messages` must be an array of objects with
+ * string ids; parentId null/undefined/string; childIds an array of strings, or absent) and throws GcrError
+ * INVALID_ARGUMENT otherwise, with content-free details (an index and a field name). Nothing here can throw a raw
+ * TypeError because of a wrong-typed JSON value. (Objects whose property ACCESSORS throw are out of scope: this module
+ * works on plain data, not on exotic proxies.)
  */
 import { GcrError } from '../errors.js';
 import type { Warning } from '../errors.js';
@@ -49,6 +55,52 @@ export interface ThreadOptions {
 }
 
 export type BranchPolicy = 'last_child' | 'latest_leaf';
+
+// ------------------------------------------------------------------------------------------
+// Argument guards (untrusted input: JSON-shaped garbage must end in INVALID_ARGUMENT, not a raw TypeError)
+// ------------------------------------------------------------------------------------------
+
+function invalidArgument(message: string, details: Record<string, unknown>): never {
+  throw new GcrError('INVALID_ARGUMENT', message, { details });
+}
+
+/** Content-free: reports an index and a field NAME, never a value. */
+function assertMessageList(messages: unknown): asserts messages is readonly MessageRecord[] {
+  if (!Array.isArray(messages)) invalidArgument('messages must be an array of message records.', { argument: 'messages' });
+  for (let i = 0; i < messages.length; i++) {
+    const msg: unknown = messages[i]; // a hole in a sparse array reads as undefined and is rejected here
+    if (typeof msg !== 'object' || msg === null) invalidArgument('messages must contain only message records (objects).', { argument: 'messages', index: i, field: 'record' });
+    const r = msg as { id?: unknown; parentId?: unknown; childIds?: unknown };
+    if (typeof r.id !== 'string') invalidArgument('Every message needs a string id.', { argument: 'messages', index: i, field: 'id' });
+    if (r.parentId !== null && r.parentId !== undefined && typeof r.parentId !== 'string') {
+      invalidArgument('A message parentId must be a string or null.', { argument: 'messages', index: i, field: 'parentId' });
+    }
+    // An absent or non-array childIds is tolerated (= "declares nothing"); an array must hold only strings.
+    if (Array.isArray(r.childIds)) {
+      for (const c of r.childIds as unknown[]) {
+        if (typeof c !== 'string') invalidArgument('A message childIds list must contain only strings.', { argument: 'messages', index: i, field: 'childIds' });
+      }
+    }
+  }
+}
+
+function assertOptionsObject(opts: unknown, name: string): void {
+  if (typeof opts !== 'object' || opts === null) invalidArgument(`${name} must be an object.`, { argument: name });
+}
+
+/** A TreeAnalysis as produced by analyzeTree: only the parts the callers read are checked, all in O(#branches). */
+function assertAnalysis(analysis: unknown, needRootIds: boolean): asserts analysis is TreeAnalysis {
+  const a = analysis as { branches?: unknown; rootIds?: unknown } | null | undefined;
+  if (typeof analysis !== 'object' || a === null || a === undefined || !Array.isArray(a.branches) || (needRootIds && !Array.isArray(a.rootIds))) {
+    invalidArgument('analysis must be a TreeAnalysis returned by analyzeTree.', { argument: 'analysis' });
+  }
+  for (const b of a.branches as unknown[]) {
+    const br = b as { branchId?: unknown; leafId?: unknown; path?: unknown } | null | undefined;
+    if (typeof b !== 'object' || br === null || br === undefined || typeof br.branchId !== 'string' || typeof br.leafId !== 'string' || !Array.isArray(br.path)) {
+      invalidArgument('analysis.branches must hold branches returned by analyzeTree.', { argument: 'analysis' });
+    }
+  }
+}
 
 // ------------------------------------------------------------------------------------------
 // Node index and the single total order
@@ -91,16 +143,50 @@ function compareStrings(a: string, b: string): number {
 
 /**
  * Duplicate ids cannot occur in a validated record (validate.ts rejects them) but analyzeTree is also fed raw data.
- * Pick one deterministically (independent of input order) by comparing content-free fields; true clones are
- * interchangeable for structure purposes.
+ * Which duplicate wins must not depend on the order of the input array, so the preference is a total preorder over
+ * every field that can change an analysis or a thread (structure first, then flags, then the remaining scalar fields
+ * and the text). Only records that agree on ALL of these (true clones) are tie-broken by input order, and for those the
+ * choice is unobservable except through blocks/attachments/rawSource. The comparison reads content but never emits it.
  */
+const DUPLICATE_TIEBREAK_FIELDS = ['createdAt', 'updatedAt', 'authorRole', 'authorName', 'modelSlug', 'channel', 'recipient', 'contentType', 'status', 'text'] as const;
+
+/** null/non-strings first, then plain code-unit order. */
+function compareNullableText(a: unknown, b: unknown): number {
+  const sa = typeof a === 'string' ? a : null;
+  const sb = typeof b === 'string' ? b : null;
+  if (sa === null || sb === null) return sa === sb ? 0 : sa === null ? -1 : 1;
+  return compareStrings(sa, sb);
+}
+
+function compareStringLists(a: readonly string[], b: readonly string[]): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const d = compareStrings(a[i] as string, b[i] as string);
+    if (d !== 0) return d;
+  }
+  return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
+}
+
+/** Negative when `a` is the record to keep, positive when `b` is, 0 for interchangeable clones. */
+function compareDuplicates(a: TreeNode, b: TreeNode): number {
+  if (a.ordinal !== b.ordinal) return a.ordinal < b.ordinal ? -1 : 1;
+  if (a.key !== b.key) return a.key < b.key ? -1 : 1;
+  let d = compareNullableText(a.msg.parentId, b.msg.parentId); // null parent (a root) before any named parent
+  if (d !== 0) return d;
+  d = compareStringLists(declaredChildren(a), declaredChildren(b));
+  if (d !== 0) return d;
+  if (a.isMessage !== b.isMessage) return a.isMessage ? -1 : 1;
+  const aHidden = a.msg.hidden === true;
+  if (aHidden !== (b.msg.hidden === true)) return aHidden ? 1 : -1;
+  for (const field of DUPLICATE_TIEBREAK_FIELDS) {
+    d = compareNullableText(a.msg[field], b.msg[field]);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 function prefersOver(a: TreeNode, b: TreeNode): boolean {
-  if (a.ordinal !== b.ordinal) return a.ordinal < b.ordinal;
-  if (a.key !== b.key) return a.key < b.key;
-  const ap = a.msg.parentId ?? '';
-  const bp = b.msg.parentId ?? '';
-  if (ap !== bp) return ap < bp;
-  return declaredChildren(a).join('\u0000') < declaredChildren(b).join('\u0000');
+  return compareDuplicates(a, b) < 0;
 }
 
 /** The declared child list, tolerating a missing/garbled field in unvalidated input. */
@@ -334,6 +420,9 @@ type CurrentState =
  * holds only the enumerated ones. `unreachableIds` holds only nodes no root can reach (cycles and their descendants).
  */
 export function analyzeTree(conversationId: string, messages: readonly MessageRecord[], currentNodeId: string | null, opts: AnalyzeOptions = {}): TreeAnalysis {
+  if (typeof conversationId !== 'string') invalidArgument('conversationId must be a string.', { argument: 'conversationId' });
+  assertOptionsObject(opts, 'opts');
+  assertMessageList(messages);
   const maxBranches = resolveLimit('maxBranches', opts.maxBranches, DEFAULT_MAX_BRANCHES);
   const maxTotalPathNodes = resolveLimit('maxTotalPathNodes', opts.maxTotalPathNodes, DEFAULT_MAX_TOTAL_PATH_NODES);
   const s = buildStructure(messages);
@@ -577,14 +666,22 @@ export function analyzeTree(conversationId: string, messages: readonly MessageRe
  * Returns the caller's own message objects (no copies).
  */
 export function threadForBranch(analysis: TreeAnalysis, messages: readonly MessageRecord[], branchId: string, opts: ThreadOptions = {}): MessageRecord[] {
+  assertAnalysis(analysis, false);
   if (typeof branchId !== 'string') {
     throw new GcrError('INVALID_ARGUMENT', 'branchId must be a string.', { details: { option: 'branchId' } });
   }
+  assertMessageList(messages);
+  assertOptionsObject(opts, 'opts');
   const branch = analysis.branches.find((b) => b.branchId === branchId);
   if (branch === undefined) {
-    throw new GcrError('BRANCH_NOT_FOUND', 'No such branch in this conversation.', {
-      remedy: 'List the branches first and pass one of the returned branch ids (a branch id is the id of its leaf message).',
-      details: { branchId: echoId(branchId) },
+    // A truncated analysis (BRANCH_LIMIT_EXCEEDED) lists every leaf in leafIds but only enumerates some of them: tell the
+    // caller that a real leaf was skipped by the limits instead of claiming that no such branch exists.
+    const skippedByLimits = Array.isArray(analysis.leafIds) && analysis.leafIds.includes(branchId);
+    throw new GcrError('BRANCH_NOT_FOUND', skippedByLimits ? 'This leaf exists but its branch was not enumerated: the analysis was truncated by its branch limits.' : 'No such branch in this conversation.', {
+      remedy: skippedByLimits
+        ? 'Run analyzeTree again with a higher maxBranches / maxTotalPathNodes (the BRANCH_LIMIT_EXCEEDED warning lists the skipped leaves).'
+        : 'List the branches first and pass one of the returned branch ids (a branch id is the id of its leaf message).',
+      details: { branchId: echoId(branchId), reason: skippedByLimits ? 'not_enumerated' : 'unknown_branch' },
     });
   }
   const includeHidden = opts.includeHidden === true;
@@ -632,6 +729,8 @@ export function selectBranchByPolicy(analysis: TreeAnalysis, messages: readonly 
   if (policy !== 'last_child' && policy !== 'latest_leaf') {
     throw new GcrError('INVALID_ARGUMENT', "policy must be 'last_child' or 'latest_leaf'.", { details: { option: 'policy' } });
   }
+  assertAnalysis(analysis, true);
+  assertMessageList(messages);
   let branch: Branch | undefined;
   if (policy === 'last_child') {
     const firstRoot = analysis.rootIds[0];

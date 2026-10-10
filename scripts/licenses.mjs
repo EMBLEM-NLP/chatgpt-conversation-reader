@@ -64,12 +64,14 @@ if (parsed.help) {
         process.stdout.write(tool.formatLicenseReport(result));
       }
       if (blocking.length > 0) {
-        process.stderr.write(`licenses: ${blocking.length} runtime package(s) with an unknown or non-permissive license: ${blocking.join(', ')}\n`);
+        // Package names and versions are untrusted metadata: never let them write escape sequences or extra lines to the log.
+        const named = blocking.map((label) => tool.sanitizeForTerminal(label)).join(', ');
+        process.stderr.write(`licenses: ${blocking.length} runtime package(s) with an unknown or non-permissive license: ${named}\n`);
         process.exitCode = 1;
       }
     } catch (error) {
       const remedy = typeof error?.remedy === 'string' ? ` ${error.remedy}` : '';
-      fail(`${error instanceof Error ? error.message : String(error)}${remedy}`);
+      fail(tool.sanitizeForTerminal(`${error instanceof Error ? error.message : String(error)}${remedy}`));
     }
   }
 }

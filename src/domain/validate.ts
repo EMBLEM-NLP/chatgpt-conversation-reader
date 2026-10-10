@@ -116,8 +116,16 @@ export function parseIsoUtcToEpochMs(s: unknown): number | null {
   return daysFromCivil(year, month, day) * 86_400_000 + hour * 3_600_000 + minute * 60_000 + second * 1000 + millis;
 }
 
-/** true iff `s` is a string in the strict `YYYY-MM-DDTHH:MM:SS(.fff)Z` form AND a real calendar instant. */
-export function isIso8601Utc(s: unknown): s is string {
+/**
+ * true iff `s` is a string in the strict `YYYY-MM-DDTHH:MM:SS(.fff)Z` form AND a real calendar instant.
+ *
+ * Two signatures on purpose (see isUuid in ids.ts): a `string` argument gets a plain boolean, because a type predicate
+ * would narrow a string that is NOT a timestamp to `never` in the false branch; any other argument (e.g. `unknown`) is
+ * narrowed to `string` on success.
+ */
+export function isIso8601Utc(s: string): boolean;
+export function isIso8601Utc(s: unknown): s is string;
+export function isIso8601Utc(s: unknown): boolean {
   return parseIsoUtcToEpochMs(s) !== null;
 }
 

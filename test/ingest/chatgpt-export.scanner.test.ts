@@ -241,6 +241,29 @@ describe('scanConversationElement: differential property tests', () => {
   });
 });
 
+describe('scanConversationElement: nesting depth', () => {
+  it('maxDepth counts container nesting; the conversation object itself is depth 1', () => {
+    assert.equal(scanConversationElement('{}').maxDepth, 1);
+    assert.equal(scanConversationElement('{"a":1}').maxDepth, 1);
+    assert.equal(scanConversationElement('{"a":[]}').maxDepth, 2);
+    assert.equal(scanConversationElement('{"mapping":{"n":{"m":{"c":{"parts":["x"]}}}}}').maxDepth, 6);
+    assert.equal(scanConversationElement('{"a":{"b":{}},"c":[[[1]]]}').maxDepth, 4);
+    assert.equal(scanConversationElement('{"a":"{[[[[[[[[[[[[[[[[[[[[[[[[[[["}').maxDepth, 1, 'brackets inside strings do not count');
+  });
+  it('is exact beyond the tracked depth (million-level nesting)', () => {
+    const d = 1_000_000;
+    assert.equal(scanConversationElement(`{"x":${'['.repeat(d)}${']'.repeat(d)}}`).maxDepth, d + 1);
+  });
+  it('matches an independent depth computation on random JSON', () => {
+    const depthOf = (v: unknown): number => (typeof v === 'object' && v !== null ? 1 + Math.max(0, ...Object.values(v).map(depthOf)) : 0);
+    runProperty(
+      fc.property(fc.object({ maxDepth: 6 }), (o) => {
+        assert.equal(scanConversationElement(JSON.stringify(o)).maxDepth, depthOf(o));
+      }),
+    );
+  });
+});
+
 describe('resolveNodeOrder', () => {
   it('uses the scan order when it agrees with the parsed object', () => {
     const o = { b: 1, a: 2 };
@@ -263,7 +286,7 @@ describe('resolveNodeOrder', () => {
 
 describe('adapter: duplicates and ordering end to end', () => {
   it('KEY_ORDER_FALLBACK: an inconsistent scanner result falls back to the engine order and says so', () => {
-    const bad: ElementScan = { mappingKeys: ['b'], duplicateMappingKeys: [], duplicateBodySha256: new Map(), nodeKeyDuplicates: new Map(), conversationKeyDuplicates: 0 };
+    const bad: ElementScan = { mappingKeys: ['b'], duplicateMappingKeys: [], duplicateBodySha256: new Map(), nodeKeyDuplicates: new Map(), conversationKeyDuplicates: 0, maxDepth: 1 };
     const adapter = new ChatGPTExportAdapter({ scanner: () => bad });
     const text = '{"id":"c","mapping":{"b":{"id":"b","parent":null,"message":null},"1":{"id":"1","parent":null,"message":null}}}';
     const out = adapter.normalizeElementText(text, ctx, 0);

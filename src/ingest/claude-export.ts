@@ -24,6 +24,10 @@
  *  - `thinking` blocks become `thoughts` blocks with `metadata.hidden === true` (ContentBlock is a strict schema with
  *    no `hidden` key, so the flag lives in metadata); they are never part of `message.text`.
  *  - Attachment `extracted_content` is kept as an `attachment_text` block and is NOT merged into `message.text`.
+ *  - Ids with control characters or unpaired surrogates are unusable and get deterministic replacements; they are never
+ *    "repaired" (a lossy repair would merge distinct ids). Duplicate message uuids get `~dupN` suffixes in linear time.
+ *  - Output is bounded per conversation (MAX_ITEMS_PER_CONVERSATION blocks/attachments) as well as per message, and the
+ *    text composed from several text blocks is capped like every other body.
  *
  * Security: the element is untrusted DATA. All object access is by own-property lookup; keys that come from the
  * input are never used to build objects or SQL; ids are looked up in Maps/Sets (so `__proto__` is just a string);
@@ -51,6 +55,12 @@ export const MAX_JSON_DEPTH = 128;
 export const MAX_MESSAGES_PER_CONVERSATION = 500_000;
 export const MAX_BLOCKS_PER_MESSAGE = 50_000;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 5_000;
+/**
+ * Content blocks + attachment refs + attachment-text blocks converted per CONVERSATION. The per-message caps alone
+ * leave the product unbounded (500 000 messages x 50 000 blocks): a 15 MB element of `1`s measured ~550 MB of block
+ * objects (~36x), so a 256 MiB element would need ~9 GB. Beyond the budget the content is only in `rawSource`.
+ */
+export const MAX_ITEMS_PER_CONVERSATION = 2_000_000;
 /** Purely informational warnings start with this prefix (same convention as src/ingest/chatgpt-export.ts). */
 export const INFO_PREFIX = '[info] ';
 /** At most this many ids are listed per warning code (the total count is always reported). */
@@ -95,6 +105,7 @@ export const CLAUDE_WARNING_CODES = {
   TEXT_TRUNCATED: 'TEXT_TRUNCATED',
   BLOCKS_TRUNCATED: 'BLOCKS_TRUNCATED',
   ATTACHMENTS_TRUNCATED: 'ATTACHMENTS_TRUNCATED',
+  FOREIGN_PROVIDER_MARKER: 'FOREIGN_PROVIDER_MARKER',
 } as const;
 
 const W = CLAUDE_WARNING_CODES;
@@ -214,6 +225,9 @@ export function truncateUtf8(s: string, maxBytes: number, marker: string = TEXT_
   return { value: buf.subarray(0, end).toString('utf8') + marker, truncated: true };
 }
 
+/** Room left for "~dupNNNNNN" (10 units) under the 512-unit id limit; ids sharing this stem share one suffix counter. */
+const DUP_STEM_UNITS = MAX_ID_LENGTH - 16;
+
 const SANITIZED_NOTE = 'the original value is kept in rawSource/rawMetadata';
 
 /** Strip NUL, repair surrogates and report. Does not cap. */
@@ -239,12 +253,17 @@ function cleanBody(log: WarningLog, raw: string, id: string): string {
 }
 
 /**
- * A usable identifier: non-empty, <= 512 units, no control characters (NUL included). Lone surrogates are repaired.
+ * A usable identifier: non-empty, <= 512 units, no control characters (NUL included) and no unpaired surrogates.
  * Returns null when `raw` cannot be an id; the caller decides between "missing" and "invalid".
+ *
+ * WHY unpaired surrogates are NOT repaired (unlike text): repairing maps many different ids to the same U+FFFD string
+ * ("a\uD800" and "a\uD801" would both become "a\uFFFD"), which would silently merge two conversations (or make a
+ * parent pointer match the wrong message). An unusable id gets a deterministic distinct replacement instead, exactly
+ * like the ChatGPT adapter's isSafeId().
  */
 function cleanId(raw: unknown): string | null {
-  if (typeof raw !== 'string' || raw.length === 0 || raw.length > MAX_ID_LENGTH || CONTROL_RE.test(raw)) return null;
-  return LONE_SURROGATE_TEST.test(raw) ? raw.replace(LONE_SURROGATE_ALL, '\uFFFD') : raw;
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > MAX_ID_LENGTH || CONTROL_RE.test(raw) || LONE_SURROGATE_TEST.test(raw)) return null;
+  return raw;
 }
 
 /** `base` + `suffix` within the id length limit (the base is shortened, never the suffix, so ids stay unique). */
@@ -434,11 +453,17 @@ function buildBlock(log: WarningLog, raw: unknown, id: string): ContentBlock {
   }
 }
 
-function buildBlocks(log: WarningLog, content: readonly unknown[], id: string): ContentBlock[] {
-  const limit = Math.min(content.length, MAX_BLOCKS_PER_MESSAGE);
+/** Items (blocks, attachment refs, attachment-text blocks) still allowed for the rest of the conversation (MAX_ITEMS_PER_CONVERSATION). */
+interface ItemBudget {
+  remaining: number;
+}
+
+function buildBlocks(log: WarningLog, content: readonly unknown[], id: string, budget: ItemBudget): ContentBlock[] {
+  const limit = Math.min(content.length, MAX_BLOCKS_PER_MESSAGE, budget.remaining);
   const out: ContentBlock[] = [];
   for (let i = 0; i < limit; i++) out.push(buildBlock(log, content[i], id));
-  if (content.length > limit) log.add(W.BLOCKS_TRUNCATED, 'A message has more content blocks than the limit; the rest are only in rawSource.', id);
+  budget.remaining -= out.length;
+  if (content.length > limit) log.add(W.BLOCKS_TRUNCATED, 'A message has more content blocks than the per-message or per-conversation limit allows; the rest are only in rawSource.', id);
   return out;
 }
 
@@ -478,7 +503,7 @@ function firstString(log: WarningLog, a: JsonObject, keys: readonly string[], ma
 function attachmentSize(log: WarningLog, a: JsonObject, msgId: string): number | null {
   const raw = own(a, 'file_size');
   if (raw === undefined || raw === null) return null;
-  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) return raw;
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) return raw === 0 ? 0 : raw; // JSON "-0" parses to -0: store a plain 0
   log.add(W.INVALID_ATTACHMENT_FIELD, 'An attachment field had an unusable value and was recorded as null.', msgId);
   return null;
 }
@@ -488,7 +513,7 @@ function attachmentSize(log: WarningLog, a: JsonObject, msgId: string): number |
  * null because Claude exports are not known to contain attachment bytes and matching on a file name could falsely
  * claim a file is present (ctx.availableAssetNames is deliberately ignored; see docs/ADAPTERS.md).
  */
-function buildAttachments(log: WarningLog, el: JsonObject, msgId: string): { refs: AttachmentRef[]; blocks: ContentBlock[] } {
+function buildAttachments(log: WarningLog, el: JsonObject, msgId: string, budget: ItemBudget): { refs: AttachmentRef[]; blocks: ContentBlock[] } {
   const refs: AttachmentRef[] = [];
   const blocks: ContentBlock[] = [];
   for (const key of ['attachments', 'files'] as const) {
@@ -503,10 +528,11 @@ function buildAttachments(log: WarningLog, el: JsonObject, msgId: string): { ref
         log.add(W.INVALID_ATTACHMENT, 'An attachment entry is not an object; it is kept only in rawSource.', msgId);
         continue;
       }
-      if (refs.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
-        log.add(W.ATTACHMENTS_TRUNCATED, 'A message has more attachments than the limit; the rest are only in rawSource.', msgId);
+      if (refs.length >= MAX_ATTACHMENTS_PER_MESSAGE || budget.remaining <= 0) {
+        log.add(W.ATTACHMENTS_TRUNCATED, 'A message has more attachments than the per-message or per-conversation limit allows; the rest are only in rawSource.', msgId);
         break;
       }
+      budget.remaining--;
       const ref: AttachmentRef = {
         id: firstUsableId(log, a, ['id', 'uuid', 'file_uuid', 'file_id'], msgId),
         name: firstString(log, a, ['file_name', 'name'], MAX_ATTACHMENT_STRING, msgId),
@@ -518,12 +544,17 @@ function buildAttachments(log: WarningLog, el: JsonObject, msgId: string): { ref
       refs.push(ref);
       const extracted = own(a, 'extracted_content');
       if (typeof extracted === 'string' && extracted !== '') {
-        // Kept as its own block so it stays searchable by block type, but never merged into message.text (FR-15: metadata by default).
-        blocks.push({
-          type: 'attachment_text',
-          text: cleanBody(log, extracted, msgId),
-          metadata: { sourceType: `${key}.extracted_content`, attachmentIndex: refs.length - 1, fileName: ref.name },
-        });
+        if (budget.remaining > 0) {
+          budget.remaining--;
+          // Kept as its own block so it stays searchable by block type, but never merged into message.text (FR-15: metadata by default).
+          blocks.push({
+            type: 'attachment_text',
+            text: cleanBody(log, extracted, msgId),
+            metadata: { sourceType: `${key}.extracted_content`, attachmentIndex: refs.length - 1, fileName: ref.name },
+          });
+        } else {
+          log.add(W.ATTACHMENTS_TRUNCATED, 'A message has more attachments than the per-message or per-conversation limit allows; the rest are only in rawSource.', msgId);
+        }
       }
     }
   }
@@ -583,13 +614,23 @@ function composeText(log: WarningLog, el: JsonObject, id: string, blocks: Conten
   if (topText !== '' && !blocks.some((b) => b.type === 'text')) {
     return { text: topText, blocks: [{ type: 'text', text: topText, metadata: { derivedFrom: 'text' } }, ...blocks] };
   }
-  return { text: topText !== '' ? topText : joined, blocks };
+  if (topText !== '') return { text: topText, blocks };
+  // The joined text is NOT bounded by the per-block caps (many blocks of up to 64 MiB each): cap it like every other body,
+  // or the record would fail validation (text_too_large) and the whole conversation would be lost.
+  return { text: capJoined(log, joined, id), blocks };
+}
+
+function capJoined(log: WarningLog, joined: string, id: string): string {
+  const t = truncateUtf8(joined, MAX_TEXT_BYTES);
+  if (t.truncated) log.add(W.TEXT_TRUNCATED, `A text longer than the size limit was truncated and marked (${SANITIZED_NOTE}).`, id);
+  return t.value;
 }
 
 function assignMessageIds(log: WarningLog, chatMessages: readonly unknown[], convId: string): { sources: Array<{ ordinal: number; source: JsonObject; id: string }>; firstIdByOriginal: Map<string, string> } {
   const sources: Array<{ ordinal: number; source: JsonObject; id: string }> = [];
   const used = new Set<string>();
   const firstIdByOriginal = new Map<string, string>();
+  const nextDupSuffix = new Map<string, number>();
   for (let ordinal = 0; ordinal < chatMessages.length; ordinal++) {
     const el = chatMessages[ordinal];
     if (!isRecord(el)) {
@@ -608,8 +649,17 @@ function assignMessageIds(log: WarningLog, chatMessages: readonly unknown[], con
       base = original;
     }
     // Message ids must be unique per conversation or content would be silently dropped/overwritten downstream.
+    // The next suffix to try is remembered per STEM: restarting at ~dup2 for every duplicate is quadratic (k copies of one
+    // uuid cost k^2/2 probes: 16 000 copies took 10 s) and so is a family of long ids whose truncated candidates collide.
+    // Every number below the remembered one is already taken, so the result equals "smallest unused n >= 2".
     let id = base;
-    for (let n = 2; used.has(id); n++) id = withSuffix(base, `~dup${n}`);
+    if (used.has(id)) {
+      const stem = capUnits(base, DUP_STEM_UNITS).value;
+      let n = nextDupSuffix.get(stem) ?? 2;
+      do id = withSuffix(base, `~dup${n++}`);
+      while (used.has(id));
+      nextDupSuffix.set(stem, n);
+    }
     if (id !== base) log.add(W.DUPLICATE_MESSAGE_ID, 'A message uuid occurs more than once; later occurrences received a deterministic suffix (the original uuid is in rawSource).', base);
     used.add(id);
     if (original !== null && !firstIdByOriginal.has(original)) firstIdByOriginal.set(original, id);
@@ -652,15 +702,16 @@ function buildDrafts(log: WarningLog, chatMessages: readonly unknown[], convId: 
   // Explicit mode as soon as ANY message carries the key: "explicit pointers win" (task rule), decided per conversation.
   const explicit = sources.some((s) => Object.hasOwn(s.source, 'parent_message_uuid'));
   const drafts: Draft[] = [];
+  const budget: ItemBudget = { remaining: MAX_ITEMS_PER_CONVERSATION };
   let previousId: string | null = null;
   sources.forEach((s, position) => {
     const el = s.source;
     const rawContent = own(el, 'content');
     let blocks: ContentBlock[] = [];
-    if (Array.isArray(rawContent)) blocks = buildBlocks(log, rawContent, s.id);
+    if (Array.isArray(rawContent)) blocks = buildBlocks(log, rawContent, s.id, budget);
     else if (rawContent !== undefined && rawContent !== null) log.add(W.INVALID_CONTENT, 'A message "content" value is not an array; it is kept only in rawSource.', s.id);
     const composed = composeText(log, el, s.id, blocks);
-    const attachments = buildAttachments(log, el, s.id);
+    const attachments = buildAttachments(log, el, s.id, budget);
     drafts.push({
       ordinal: s.ordinal,
       source: el,
@@ -823,6 +874,12 @@ function normalizeElement(text: string, ctx: AdapterContext, rawElementIndex: nu
   if (identity.problem === 'missing') log.add(W.CONVERSATION_ID_MISSING, 'The conversation has no "uuid"; an id derived from the element hash and position was assigned.', convId);
   if (identity.problem === 'case') log.add(W.ID_CASE_NORMALIZED, `${INFO_PREFIX}An upper-case UUID conversation id was lower-cased (the raw value is kept in rawMetadata).`, convId);
   if (identity.problem === 'invalid') log.add(W.CONVERSATION_ID_INVALID, 'The conversation "uuid" was not a usable identifier; an id derived from the element hash and position was assigned.', convId);
+  // A ChatGPT-style object `mapping` next to `chat_messages` is the registry's "ambiguous" case. This adapter was chosen by the
+  // operator (or by a caller that ignored the registry's null), so it still converts `chat_messages`, but it must not hide
+  // that a second provider's message tree exists in the element and was NOT read (it stays in rawMetadata).
+  if (isRecord(own(parsed, 'mapping'))) {
+    log.add(W.FOREIGN_PROVIDER_MARKER, 'The element also has a ChatGPT-style object "mapping"; only chat_messages was converted and the mapping was not read (it is kept in rawMetadata).', convId);
+  }
 
   const drafts = buildDrafts(log, chatMessages, convId);
   const explicit = drafts.some((d) => Object.hasOwn(d.source, 'parent_message_uuid'));

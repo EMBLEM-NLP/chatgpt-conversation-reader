@@ -42,8 +42,13 @@ const MAX_CURSOR_CHARS = 4096;
 export const SNIPPET_MAX_CHARS = 160;
 const SNIPPET_LEAD_CHARS = 40;
 const SNIPPET_SCAN_SPAN = 640;
-/** Text beyond this many UTF-16 units is not scanned for a highlight (the snippet then falls back to the start of the text). */
-const SNIPPET_SCAN_LIMIT = 1_000_000;
+/**
+ * Only the first SNIPPET_SOURCE_CHARS characters of a message are fetched for snippet building (SQL substr), so a page of
+ * hits on enormous messages cannot exhaust memory. A match located only beyond that point still produces a hit; its
+ * snippet then falls back to the start of the text without highlight.
+ */
+const SNIPPET_SOURCE_CHARS = 200_000;
+const SNIPPET_SCAN_LIMIT = SNIPPET_SOURCE_CHARS;
 const MARK_START = '\u0001';
 const MARK_END = '\u0002';
 const ELLIPSIS = '…';
@@ -72,7 +77,10 @@ export interface SearchQuery {
   limit?: number;
   /** Offset pagination (mutually exclusive with `cursor`). */
   offset?: number;
-  /** Opaque keyset cursor from a previous page's `nextCursor`; must be used with the same query and filters. */
+  /**
+   * Opaque keyset cursor from a previous page's `nextCursor`; must be used with the same query and filters (limit may
+   * differ). In cursor mode `offset` stays 0 and `nextOffset` is always null: continue with `nextCursor`.
+   */
   cursor?: string;
 }
 
@@ -410,7 +418,8 @@ export function buildSnippet(text: string, terms: readonly QueryTerm[], maxLen: 
   const hit = first[0];
   if (hit === undefined) return renderWindow(text, 0, [], budget);
   const ws = chooseWindowStart(text, hit.start);
-  const regions = mergeRegions(findRegions(text, terms, ws, ws + SNIPPET_SCAN_SPAN, false).filter((r) => r.start >= ws));
+  // The first hit is always included, even if re-scanning from a window start that fell inside a word misses it.
+  const regions = mergeRegions([hit, ...findRegions(text, terms, ws, ws + SNIPPET_SCAN_SPAN, false).filter((r) => r.start >= ws)]);
   return renderWindow(text, ws, regions, budget);
 }
 
@@ -524,7 +533,8 @@ export function searchMessages(db: DatabaseSync, q: SearchQuery): Page<SearchHit
 
   // SQL text below is assembled from FIXED fragments only; every value is a bound parameter.
   const where: string[] = ["m.node_kind = 'message' "];
-  const params: SQLInputValue[] = [compiled.match];
+  // Bound parameters in textual order: MATCH expression, snippet source length, then the WHERE/cursor values, LIMIT, OFFSET.
+  const params: SQLInputValue[] = [compiled.match, SNIPPET_SOURCE_CHARS];
   const add = (fragment: string, ...values: SQLInputValue[]): void => {
     where.push(fragment);
     params.push(...values);
@@ -545,7 +555,7 @@ export function searchMessages(db: DatabaseSync, q: SearchQuery): Page<SearchHit
     'WITH h AS MATERIALIZED (SELECT rowid AS rid, bm25(messages_fts) AS rank FROM messages_fts WHERE messages_fts MATCH ?) ' +
     'SELECT m.provider AS provider, m.account_label AS account_label, m.conversation_id AS conversation_id, c.title AS title, ' +
     'm.message_id AS message_id, m.author_role AS author_role, m.model_slug AS model_slug, m.channel AS channel, ' +
-    'm.created_at AS created_at, m.hidden AS hidden, m.text AS text, h.rank AS rank, m.source_batch AS source_batch ' +
+    'm.created_at AS created_at, m.hidden AS hidden, substr(m.text, 1, ?) AS text, h.rank AS rank, m.source_batch AS source_batch ' +
     'FROM h JOIN messages m ON m.rowid = h.rid ' +
     'JOIN conversations c ON c.provider = m.provider AND c.account_label = m.account_label AND c.conversation_id = m.conversation_id AND c.source_batch = m.source_batch ' +
     (allBatches ? '' : HEAD_JOIN) +

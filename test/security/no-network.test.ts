@@ -14,9 +14,16 @@
  *  - It covers first-party src/ only. The MCP SDK dependency itself contains network code in node_modules
  *    (HTTP/SSE/WebSocket transports, OAuth); that is why importing the SDK is restricted to an allow-list of
  *    stdio/in-memory subpaths, and why the dependency allow-list is asserted. Transitive code is not scanned.
- *  - It is a tripwire against accidents and lazy shortcuts, not a sandbox. Determined obfuscation (aliasing
- *    globalThis, reading code from disk and evaluating it, ...) can only be partly anticipated. The runtime
- *    guarantee comes from there being no network code to call, plus code review of this allow-list.
+ *  - It is a tripwire against accidents and lazy shortcuts, not a sandbox. Determined obfuscation (reading code
+ *    from disk and evaluating it, strings assembled from computed pieces, base64, ...) can only be partly
+ *    anticipated. The runtime guarantee comes from there being no network code to call, plus code review of this
+ *    allow-list.
+ *  - src/devtools may import { execFile } from child_process (SPEC: devtools are allow-listed for child_process
+ *    only). The scan cannot tell WHICH executable it runs: `execFile('curl', ...)` there would pass. Reviewers must
+ *    keep devtools to fixed, local programs (today: git).
+ *  - Sources are read as UTF-8 only (a BOM is fine). UTF-16 files, invalid UTF-8 and NUL bytes fail the scan,
+ *    because the TypeScript compiler decodes UTF-16 and a UTF-8 text scan would not see what it emits.
+ *  - A relative import must stay inside src/: whatever it reaches outside is code this scan never read.
  *
  * All sources analysed here are synthetic strings. Strings that name private endpoints or cookie names are
  * assembled from fragments at runtime so this file never contains them literally (they would otherwise trip
@@ -24,7 +31,7 @@
  */
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, symlink, truncate, writeFile } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
 import { dirname, extname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,6 +87,9 @@ const PUNCTUATORS: readonly string[] = [
   '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '%=', '&=', '|=', '^=', '<<', '>>', '**',
 ];
 
+/** ECMAScript LineTerminator: a `//` comment and a hashbang end at any of these, and a regex literal cannot contain one. */
+const isLineTerminator = (ch: string | undefined): boolean => ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029';
+
 const ID_START = /[\p{ID_Start}$_]/u;
 const ID_PART = /[\p{ID_Continue}$\u200c\u200d]/u;
 const isDigit = (ch: string | undefined): boolean => ch !== undefined && ch >= '0' && ch <= '9';
@@ -106,8 +116,24 @@ function readEscape(src: string, i: number): Escape {
     case 'f': return { value: '\f', length: 2, newlines: 0 };
     case 'v': return { value: '\v', length: 2, newlines: 0 };
     case '0':
-      if (!isDigit(src[i + 2])) return { value: '\0', length: 2, newlines: 0 };
-      break;
+    case '1':
+    case '2':
+    case '3':
+    case '4':
+    case '5':
+    case '6':
+    case '7': {
+      // Legacy octal escape (sloppy-mode scripts): \0-\3 take up to two more octal digits, \4-\7 up to one more.
+      // Not decoding it would let `'\57...'` hide a character that the engine sees (\0 alone stays NUL).
+      let j = i + 2;
+      let digits = c;
+      const extra = c <= '3' ? 2 : 1;
+      while (digits.length <= extra && src[j] !== undefined && src[j]! >= '0' && src[j]! <= '7') {
+        digits += src[j];
+        j++;
+      }
+      return { value: String.fromCharCode(parseInt(digits, 8)), length: j - i, newlines: 0 };
+    }
     case 'x': {
       const h = src.slice(i + 2, i + 4);
       if (/^[0-9a-fA-F]{2}$/.test(h)) return { value: String.fromCharCode(parseInt(h, 16)), length: 4, newlines: 0 };
@@ -115,7 +141,10 @@ function readEscape(src: string, i: number): Escape {
     }
     case 'u': {
       if (src[i + 2] === '{') {
-        const close = src.indexOf('}', i + 3);
+        // At most 6 hex digits and the closing brace: look in a window, not to the end of the file (a file made of
+        // `\u{` repeats would otherwise cost O(n^2)).
+        const rel = src.slice(i + 3, i + 10).indexOf('}');
+        const close = rel < 0 ? -1 : i + 3 + rel;
         const h = close > 0 ? src.slice(i + 3, close) : '';
         if (/^[0-9a-fA-F]{1,6}$/.test(h) && parseInt(h, 16) <= 0x10ffff) {
           return { value: String.fromCodePoint(parseInt(h, 16)), length: close - i + 1, newlines: 0 };
@@ -174,7 +203,11 @@ class Lexer {
       case 'tmpl':
         return p.subst;
       case 'ident':
-        return !p.afterDot && REGEX_PRECEDING_WORDS.has(p.text);
+        if (p.afterDot) return false;
+        // `of` is an ordinary identifier outside a for-head: `of / 2` is a division. Treating it as a keyword there
+        // would turn everything up to the next slash on the line into a "regex" and hide it from the rules.
+        if (p.text === 'of') return this.parenStack[this.parenStack.length - 1] === true;
+        return REGEX_PRECEDING_WORDS.has(p.text);
       case 'punct':
         if (p.text === ')') return p.closesCond;
         if (p.text === ']') return false;
@@ -243,6 +276,7 @@ class Lexer {
         this.line += esc.newlines;
         continue;
       }
+      if (ch === '\u2028' || ch === '\u2029') this.line++; // legal unescaped in a string since ES2019
       buf += ch;
       this.i++;
     }
@@ -276,7 +310,7 @@ class Lexer {
         this.line += esc.newlines;
         continue;
       }
-      if (ch === '\n' || (ch === '\r' && src[this.i + 1] !== '\n')) this.line++;
+      if (ch === '\n' || ch === '\u2028' || ch === '\u2029' || (ch === '\r' && src[this.i + 1] !== '\n')) this.line++;
       buf += ch;
       this.i++;
     }
@@ -289,10 +323,14 @@ class Lexer {
     let inClass = false;
     for (;;) {
       const ch = src[j];
-      if (ch === undefined || ch === '\n' || ch === '\r') throw this.err('unterminated regular expression literal');
+      if (ch === '\u2028' || ch === '\u2029') {
+        // tsc 7 accepts this and emits it verbatim, but Node refuses to load the module ("Invalid regular expression: missing /").
+        throw this.err('regular expression literal contains a raw U+2028/U+2029 line separator (a SyntaxError at load time; write it as \\u2028 or \\u2029)');
+      }
+      if (ch === undefined || isLineTerminator(ch)) throw this.err('unterminated regular expression literal');
       if (ch === '\\') {
         const nx = src[j + 1];
-        if (nx === undefined || nx === '\n' || nx === '\r') throw this.err('unterminated regular expression literal');
+        if (nx === undefined || isLineTerminator(nx)) throw this.err('unterminated regular expression literal');
         j += 2;
         continue;
       }
@@ -325,6 +363,8 @@ class Lexer {
     while (j < src.length) {
       const ch = src[j] ?? '';
       if (/[0-9A-Za-z_]/.test(ch)) {
+        // After an exponent (`1e3`) or a BigInt suffix (`10n`) a dot is member access, never a fraction.
+        if ((!radix && (ch === 'e' || ch === 'E')) || ch === 'n') seenDot = true;
         if (!radix && (ch === 'e' || ch === 'E') && (src[j + 1] === '+' || src[j + 1] === '-')) {
           j += 2;
           continue;
@@ -348,7 +388,7 @@ class Lexer {
     const { src } = this;
     const n = src.length;
     if (src.startsWith('#!')) {
-      while (this.i < n && src[this.i] !== '\n' && src[this.i] !== '\r') this.i++;
+      while (this.i < n && !isLineTerminator(src[this.i])) this.i++;
     }
     while (this.i < n) {
       const c = src[this.i] ?? '';
@@ -362,6 +402,11 @@ class Lexer {
         this.i++;
         continue;
       }
+      if (c === '\u2028' || c === '\u2029') {
+        this.line++;
+        this.i++;
+        continue;
+      }
       if (/\s/.test(c)) {
         this.i++;
         continue;
@@ -369,14 +414,15 @@ class Lexer {
       if (c === '/') {
         const d = src[this.i + 1];
         if (d === '/') {
-          while (this.i < n && src[this.i] !== '\n' && src[this.i] !== '\r') this.i++;
+          // U+2028 / U+2029 end a line comment too (the compiler agrees); a \n-only scan would hide the code after them.
+          while (this.i < n && !isLineTerminator(src[this.i])) this.i++;
           continue;
         }
         if (d === '*') {
           const end = src.indexOf('*/', this.i + 2);
           if (end < 0) throw this.err('unterminated block comment');
           for (let k = this.i; k < end; k++) {
-            if (src[k] === '\n' || (src[k] === '\r' && src[k + 1] !== '\n')) this.line++;
+            if (src[k] === '\n' || src[k] === '\u2028' || src[k] === '\u2029' || (src[k] === '\r' && src[k + 1] !== '\n')) this.line++;
           }
           this.i = end + 2;
           continue;
@@ -499,6 +545,7 @@ type Rule =
   | 'forbidden-literal'
   | 'child-process-usage'
   | 'devtools-import'
+  | 'outside-src'
   | 'scanner';
 
 interface Finding {
@@ -586,14 +633,24 @@ const FORBIDDEN_LITERALS: readonly string[] = [
   ['chatgpt', '.com/back', 'end-api'].join(''),
   ['/back', 'end-api', '/'].join(''),
   ['__Secure-', 'next-auth'].join(''),
+  // Superset spellings: the three above miss `https://host/backend-api` (no trailing slash) and the CSRF cookie, which
+  // carries a __Host- prefix instead of __Secure-. A bare `next-auth` is deliberately NOT a marker: src/devtools/privacy-scan.ts
+  // must name that cookie to detect it. Reported once per literal.
+  ['/back', 'end-api'].join(''),
+  ['__Host-', 'next-auth'].join(''),
 ];
 
 const GLOBAL_OBJECT_NAMES: ReadonlySet<string> = new Set(['globalThis', 'global', 'window', 'self']);
 /** Receivers of computed lookups (`x['name']`) that are checked for dynamic access to forbidden members. */
 const COMPUTED_LOOKUP_RECEIVERS: ReadonlySet<string> = new Set(['globalThis', 'global', 'window', 'self', 'process', 'navigator']);
 const COMPUTED_FORBIDDEN_NAMES: ReadonlySet<string> = new Set([
-  'fetch', 'WebSocket', 'XMLHttpRequest', 'EventSource', 'sendBeacon', 'binding', 'dlopen', 'getBuiltinModule', 'mainModule', 'createRequire',
+  'fetch', 'WebSocket', 'XMLHttpRequest', 'EventSource', 'sendBeacon', 'binding', 'dlopen', '_linkedBinding', 'getBuiltinModule', 'mainModule', 'createRequire',
+  'loadExtension', 'enableLoadExtension', 'eval', 'Function', '_load',
 ]);
+/** Identifiers that, however they are reached (destructuring, aliases, named imports), load native code or process internals. */
+const NATIVE_LOADER_NAMES: ReadonlySet<string> = new Set(['dlopen', '_linkedBinding', 'mainModule', 'loadExtension', 'enableLoadExtension', 'allowExtension']);
+/** A binding of these words declares a new name, so a following/preceding occurrence is not a use of the global object. */
+const DECLARATION_WORDS: ReadonlySet<string> = new Set(['const', 'let', 'var', 'function', 'class', 'interface', 'type', 'enum', 'namespace', 'import', 'as', 'typeof', 'declare']);
 
 function packageNameOf(bare: string): string {
   const parts = bare.split('/');
@@ -738,6 +795,9 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
     else add('dynamic-specifier', t.line, `${what} with a non-literal specifier (assembled at runtime) cannot be audited`);
   };
 
+  const mentionsProcess = toks.some(
+    (tk) => (tk.kind === 'ident' && !tk.afterDot && tk.text === 'process') || (tk.kind === 'str' && (tk.text === 'process' || tk.text === 'node:process')),
+  );
   for (let k = 0; k < toks.length; k++) {
     const t = toks[k];
     if (t === undefined) continue;
@@ -790,29 +850,76 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
           add('forbidden-global', t.line, 'createRequire yields a require function under another name, bypassing the require() check');
           break;
         case 'binding':
-        case 'dlopen':
-        case 'mainModule':
-          if (recv === 'process') add('forbidden-global', t.line, `reference to process.${t.text}`);
+          // process.binding(...), p.binding(...) through any alias, and a bare `binding` (destructured from process or
+          // imported from node:process) in a file that touches process at all. A first-party variable that happens to be
+          // called `binding` in a file that never mentions process is fine.
+          if (recv === 'process' || (t.afterDot && isPunct(next, '(')) || (!t.afterDot && mentionsProcess)) {
+            add('forbidden-global', t.line, 'process.binding reaches Node internals (tcp_wrap, tls_wrap, ...) without an import the scan can see');
+          }
+          break;
+        case 'globalThis':
+        case 'global': {
+          if (t.afterDot) break;
+          const before = toks[k - 1];
+          const declares = before !== undefined && before.kind === 'ident' && !before.afterDot && DECLARATION_WORDS.has(before.text);
+          const member = isPunct(next, '.') || isPunct(next, '?.') || isPunct(next, '[');
+          const key = (isPunct(next, ':') || isPunct(next, '?')) && before !== undefined && before.kind === 'punct' && ['{', ',', ';'].includes(before.text);
+          if (!declares && !member && !key) {
+            add('forbidden-global', t.line, `${t.text} used as a value: an alias or reflection target hides fetch/WebSocket/... from this scan (use ${t.text}.name directly)`);
+          }
+          break;
+        }
+        case '_load':
+          // Module._load / module.constructor._load: the CommonJS loader, which loads any builtin by a runtime name.
+          if (t.afterDot) add('forbidden-global', t.line, 'the CommonJS loader (_load) loads modules by a runtime name');
+          break;
+        case 'constructor':
+          if (t.afterDot) {
+            const recvTok = toks[k - 2];
+            if (recvTok !== undefined && recvTok.kind === 'ident' && recvTok.text === 'module') {
+              add('forbidden-global', t.line, 'module.constructor is the CommonJS loader');
+            }
+            const chained = recvTok !== undefined && recvTok.kind === 'ident' && recvTok.text === 'constructor' && recvTok.afterDot;
+            const onExpression = isPunct(next, '(') && recvTok !== undefined && recvTok.kind === 'punct' && recvTok.text === ')';
+            if (chained || onExpression) add('forbidden-global', t.line, 'the Function constructor reached through .constructor defeats static analysis');
+          }
           break;
         case 'eval':
-          if (!t.afterDot && isPunct(next, '(')) add('forbidden-global', t.line, 'eval() defeats static analysis');
+          // Any reference, not only a direct call: `(0, eval)(src)` and `const run = eval` are indirect evals.
+          if (!t.afterDot || (recv !== undefined && GLOBAL_OBJECT_NAMES.has(recv))) add('forbidden-global', t.line, 'eval defeats static analysis');
           break;
         case 'Function': {
           const before = toks[k - 1];
           const afterNew = before !== undefined && before.kind === 'ident' && before.text === 'new';
-          if (!t.afterDot && (isPunct(next, '(') || afterNew)) add('forbidden-global', t.line, 'the Function constructor defeats static analysis');
-          break;
-        }
-        case 'shell':
-          // devtools only ever run a fixed executable with an argument array; a shell would reintroduce string injection.
-          if (ctx.allowChildProcess && isPunct(next, ':')) {
-            const value = toks[k + 2];
-            if (value === undefined || value.kind !== 'ident' || value.text !== 'false') add('child-process-usage', t.line, 'a `shell` option other than literal false');
+          if ((!t.afterDot && (isPunct(next, '(') || afterNew)) || (t.afterDot && recv !== undefined && GLOBAL_OBJECT_NAMES.has(recv))) {
+            add('forbidden-global', t.line, 'the Function constructor defeats static analysis');
+          } else if (!t.afterDot && before !== undefined && !isPunct(next, '.') && !isPunct(next, '?.') && !isPunct(next, '[')) {
+            // `Reflect.construct(Function, ...)`, `const F = Function`: the constructor as a value. Type positions
+            // (`: Function`, `as Function`, `<Function>`, `Record<string, Function>`, `type T = Function`, `instanceof Function`)
+            // are not value positions, hence the short list of tokens that may precede a value.
+            const valueBefore =
+              (before.kind === 'punct' && ['(', '=', '||', '&&', '??'].includes(before.text)) || (before.kind === 'ident' && before.text === 'return');
+            const typeAlias = isPunct(before, '=') && toks[k - 3]?.kind === 'ident' && toks[k - 3]?.text === 'type';
+            if (valueBefore && !typeAlias) add('forbidden-global', t.line, 'Function used as a value (alias, Reflect.construct) defeats static analysis');
           }
           break;
+        }
         default:
           break;
       }
+      // Native-code loaders and process internals, however they are reached (destructuring, alias, named import).
+      if (NATIVE_LOADER_NAMES.has(t.text)) add('forbidden-global', t.line, `reference to ${t.text} (loads native code or exposes process internals)`);
+    }
+    // devtools only ever run a fixed executable with an argument array; a shell would reintroduce string injection. Every spelling
+    // of the option must be `shell: false` exactly: shorthand `{ shell }`, quoted/computed keys, member assignment and expressions fail.
+    if (ctx.allowChildProcess && ((t.kind === 'ident' && t.text === 'shell') || (t.kind === 'str' && t.text === 'shell'))) {
+      let j = k + 1;
+      if (isPunct(toks[j], ']')) j++;
+      const value = toks[j + 1];
+      const after = toks[j + 2];
+      const literalFalse =
+        isPunct(toks[j], ':') && value !== undefined && value.kind === 'ident' && value.text === 'false' && (isPunct(after, ',') || isPunct(after, '}'));
+      if (!literalFalse) add('child-process-usage', t.line, 'a `shell` option other than the literal `shell: false`');
     }
     // x['name'] on global-ish receivers: a non-literal or forbidden name is a dynamic lookup of a forbidden member.
     if (isPunct(t, '[')) {
@@ -832,7 +939,10 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
   const checkLiteralText = (text: string, line: number): void => {
     const lower = text.toLowerCase();
     for (const needle of FORBIDDEN_LITERALS) {
-      if (lower.includes(needle.toLowerCase())) add('forbidden-literal', line, `string literal contains a forbidden marker (${needle.length} chars, starts ${show(needle.slice(0, 6))})`);
+      if (lower.includes(needle.toLowerCase())) {
+        add('forbidden-literal', line, `string literal contains a forbidden marker (${needle.length} chars, starts ${show(needle.slice(0, 6))})`);
+        break;
+      }
     }
   };
   let run: { text: string; line: number } | null = null;
@@ -880,6 +990,8 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
 const SCANNED_EXTENSIONS: ReadonlySet<string> = new Set(['.ts', '.mts', '.cts', '.js', '.mjs', '.cjs']);
 /** The tokenizer has no JSX grammar: refuse such files rather than mis-scan them. */
 const UNSUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set(['.tsx', '.jsx']);
+/** Real source files are far smaller; a bigger one cannot be audited within bounded memory, so it fails the scan instead of being read. */
+const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 /** Native or wasm binaries would be code the text scan cannot see. */
 const OPAQUE_EXTENSIONS: ReadonlySet<string> = new Set(['.node', '.wasm']);
 
@@ -911,6 +1023,22 @@ async function listFiles(root: string, rel: string, files: string[], problems: T
   }
 }
 
+/**
+ * Decodes a source file the way this scan can vouch for: UTF-8 only (a BOM is allowed). The TypeScript compiler also
+ * decodes BOM-marked UTF-16 files and emits their imports, so a UTF-16 `evil.ts` would be invisible to a UTF-8 text
+ * scan while still reaching dist/. Anything that is not clean UTF-8 text (invalid sequences, NUL bytes) fails closed.
+ */
+function decodeSource(buf: Buffer): string | { problem: string } {
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf);
+  } catch {
+    return { problem: 'not valid UTF-8 (UTF-16 and legacy encodings are decoded by the TypeScript compiler but cannot be audited here)' };
+  }
+  if (text.includes('\u0000')) return { problem: 'contains NUL characters, so it is not plain UTF-8 text and cannot be audited' };
+  return text.replace(/^\uFEFF/, '');
+}
+
 /** Scans every source file below `srcRoot`. src/devtools/ is the only place child_process may appear (and only as { execFile }). */
 async function scanTree(srcRoot: string): Promise<TreeScan> {
   const files: string[] = [];
@@ -918,17 +1046,28 @@ async function scanTree(srcRoot: string): Promise<TreeScan> {
   await listFiles(srcRoot, '', files, findings);
   for (const file of files) {
     const inDevtools = file.startsWith('devtools/');
-    const text = (await readFile(join(srcRoot, file), 'utf8')).replace(/^\uFEFF/, '');
-    const result = scanSource(text, { allowChildProcess: inDevtools });
+    const size = (await stat(join(srcRoot, file))).size;
+    if (size > MAX_SOURCE_BYTES) {
+      findings.push({ file, rule: 'scanner', line: 0, detail: `source file is ${size} bytes (limit ${MAX_SOURCE_BYTES}); it cannot be audited` });
+      continue;
+    }
+    const decoded = decodeSource(await readFile(join(srcRoot, file)));
+    if (typeof decoded !== 'string') {
+      findings.push({ file, rule: 'scanner', line: 0, detail: decoded.problem });
+      continue;
+    }
+    const result = scanSource(decoded, { allowChildProcess: inDevtools });
     for (const f of result.findings) findings.push({ ...f, file });
-    if (!inDevtools) {
+    for (const { spec, line } of result.specifiers) {
+      if (!spec.startsWith('.')) continue;
+      const resolved = posix.normalize(posix.join(posix.dirname(file), spec));
+      // A relative import that leaves the scanned tree loads code this scan never read (scripts/, test/, a sibling checkout).
+      if (resolved === '..' || resolved.startsWith('../')) {
+        findings.push({ file, rule: 'outside-src', line, detail: `relative import ${show(spec)} resolves outside the scanned source tree` });
+      }
       // src/devtools is a dev tool (it may spawn git): the product (SDK, CLI, MCP) must never be able to load it.
-      for (const { spec, line } of result.specifiers) {
-        if (!spec.startsWith('.')) continue;
-        const resolved = posix.normalize(posix.join(posix.dirname(file), spec));
-        if (resolved === 'devtools' || resolved.startsWith('devtools/')) {
-          findings.push({ file, rule: 'devtools-import', line, detail: `product code imports the dev tool ${show(spec)}` });
-        }
+      if (!inDevtools && (resolved === 'devtools' || resolved.startsWith('devtools/'))) {
+        findings.push({ file, rule: 'devtools-import', line, detail: `product code imports the dev tool ${show(spec)}` });
       }
     }
   }
@@ -962,6 +1101,20 @@ function runtimeDependencyProblems(pkg: unknown): string[] {
     const spec = deps[name];
     // URL, git, file and alias specifiers bypass the registry and the lockfile integrity story.
     if (typeof spec !== 'string' || /[:/]/.test(spec)) problems.push(`Dependency ${name} uses a non-registry version specifier (${show(String(spec))}).`);
+  }
+  // npm `overrides` can replace any package in the tree, including an allow-listed one, by an alias or URL.
+  const nonRegistry: string[] = [];
+  const walkOverrides = (node: unknown, depth: number): void => {
+    if (depth > 20) return;
+    if (typeof node === 'string') {
+      if (/[:/]/.test(node)) nonRegistry.push(node);
+    } else if (typeof node === 'object' && node !== null) {
+      for (const child of Object.values(node)) walkOverrides(child, depth + 1);
+    }
+  };
+  walkOverrides(record['overrides'], 0);
+  if (nonRegistry.length > 0) {
+    problems.push(`"overrides" contains non-registry specifier(s) (${nonRegistry.map((v) => show(v)).join(', ')}): an override can swap an allow-listed dependency for different code.`);
   }
   for (const key of ['optionalDependencies', 'peerDependencies', 'bundledDependencies', 'bundleDependencies']) {
     const v = record[key];
@@ -1617,6 +1770,337 @@ describe('tree scan (synthetic src/ trees)', () => {
       await writeTree(dir, { 'broken.ts': "const s = 'unterminated\n" });
       assert.deepEqual(summarize(await scanTree(dir)), ['broken.ts:1:scanner']);
     });
+  });
+});
+
+// ===================================================================================================
+// 5. Adversarial regressions (independent review). Each block pins a bypass or false positive that
+//    the first version of this scanner got wrong; the comment above each says what the evasion was.
+// ===================================================================================================
+
+/** Private-endpoint / cookie markers assembled from fragments so this file never contains them literally. */
+const PATH_MARKER = ['/back', 'end-api'].join('');
+const CSRF_COOKIE_MARKER = ['__Host-', 'next-auth'].join('');
+const summarizeFiles = (scan: TreeScan): string[] => scan.findings.map((f) => `${f.file}:${f.line}:${f.rule}`);
+
+describe('adversarial: U+2028 / U+2029 terminate a // comment (the compiler agrees, a \\n-only scanner does not)', () => {
+  for (const [name, ch] of [['U+2028', '\u2028'], ['U+2029', '\u2029']] as const) {
+    it(`${name} ends a line comment, so a static import after it is still found`, () => {
+      assert.ok(rulesOf(`// harmless${ch}import http from 'node:http';`).includes('forbidden-module'));
+    });
+    it(`${name} ends a line comment, so a global after it is still found`, () => {
+      assert.ok(rulesOf(`export const a = 1; // harmless${ch}await fetch(u);`).includes('forbidden-global'));
+    });
+    it(`${name} ends a hashbang line`, () => {
+      assert.ok(rulesOf(`#!/usr/bin/env node${ch}import http from 'node:http';`).includes('forbidden-module'));
+    });
+    it(`${name} counts as a line break in reported line numbers`, () => {
+      const found = scanSource(`// a${ch}import http from 'node:http';`, NO_CP).findings;
+      assert.deepEqual(found.map((f) => [f.rule, f.line]), [['forbidden-module', 2]]);
+    });
+    it(`${name} inside a string literal is data (allowed since ES2019)`, () => {
+      assert.deepEqual(sig(`'a${ch}b' x`), [`s:a${ch}b`, 'i:x']);
+    });
+    it(`${name} cannot appear inside a regular expression literal (fail closed)`, () => {
+      assert.throws(() => tokenize(`x = /a${ch}b/`), (e: unknown) => e instanceof ScanError && /raw U\+202[89]/.test(e.message));
+    });
+  }
+});
+
+describe('adversarial: numeric literals end before a member access', () => {
+  it('an exponent literal followed by .member is two tokens', () => {
+    assert.deepEqual(sig('1e3.toString()'), ['n:1e3', 'p:.', 'i:toString', 'p:(', 'p:)']);
+    assert.deepEqual(sig('1.5e-3.toFixed(1)'), ['n:1.5e-3', 'p:.', 'i:toFixed', 'p:(', 'n:1', 'p:)']);
+  });
+  it('a BigInt literal followed by .member is two tokens', () => {
+    assert.deepEqual(sig('10n.toString()'), ['n:10n', 'p:.', 'i:toString', 'p:(', 'p:)']);
+    assert.deepEqual(sig('0xFFn.valueOf()'), ['n:0xFFn', 'p:.', 'i:valueOf', 'p:(', 'p:)']);
+  });
+  it('an ordinary decimal still takes exactly one dot', () => {
+    assert.deepEqual(sig('1.5.toFixed(1)'), ['n:1.5', 'p:.', 'i:toFixed', 'p:(', 'n:1', 'p:)']);
+  });
+});
+
+describe('adversarial: `of` is an ordinary identifier outside a for-head', () => {
+  it('division after a variable named `of` does not start a regex that swallows code', () => {
+    const src = 'const of = 4; const z = of / 2; fetch(u); const q = 6 / 3;';
+    assert.ok(rulesOf(src).includes('forbidden-global'), JSON.stringify(sig(src)));
+  });
+  it('a regex after `of` in a for-of head is still a regex', () => {
+    assert.deepEqual(sig('for (const x of /"/.exec(s)) y').filter((s) => s.startsWith('r:')), ['r:"']);
+    assert.deepEqual(sig('for await (const x of /\'/.exec(s)) y').filter((s) => s.startsWith('r:')), ["r:'"]);
+    assert.deepEqual(sig('for (const [a, b] of /"/.exec(s)) y').filter((s) => s.startsWith('r:')), ['r:"']);
+  });
+});
+
+describe('adversarial: legacy octal escapes decode like the engine (sloppy-mode .js/.cjs)', () => {
+  it('decodes \\0nn, \\nn and \\n escapes', () => {
+    assert.deepEqual(sig("'\\150\\164tp \\57 \\101\\60 \\8\\9 \\0'"), ['s:http / A0 89 \0']);
+  });
+  it('an octal-escaped private-endpoint marker is still found', () => {
+    assert.ok(rulesOf(`const p = '\\57${PATH_MARKER.slice(1)}';`).includes('forbidden-literal'));
+  });
+  it('an octal-escaped module specifier is still found', () => {
+    assert.ok(rulesOf("const m = require('\\150ttp');").includes('forbidden-module'));
+  });
+});
+
+describe('adversarial: process / globalThis laundering', () => {
+  const positives: ReadonlyArray<readonly [string, string]> = [
+    ['destructured binding', "const { binding } = process; binding('tcp_wrap');"],
+    ['destructured binding with a rename', "const { binding: b } = process; b('tcp_wrap');"],
+    ['named import of binding', "import { binding } from 'node:process';"],
+    ['binding called through an alias', "const p = process; p.binding('tcp_wrap');"],
+    ['binding called through a default import', "import proc from 'node:process'; proc.binding('tcp_wrap');"],
+    ['dlopen through an alias', 'const p = process; p.dlopen(m, f);'],
+    ['destructured dlopen', 'const { dlopen } = process;'],
+    ['process._linkedBinding', "process._linkedBinding('x');"],
+    ['destructured mainModule', 'const { mainModule } = process; mainModule.require(x);'],
+    ['globalThis alias', 'const g = globalThis; g.fetch(u);'],
+    ['global alias', 'const g = global; g.fetch(u);'],
+    ['Reflect.get on globalThis', "Reflect.get(globalThis, 'fetch')(u);"],
+    ['property descriptor of globalThis', "Object.getOwnPropertyDescriptor(globalThis, 'fetch');"],
+    ['spread of globalThis', 'const copy = { ...globalThis };'],
+    ['globalThis passed as an argument', 'inspect(globalThis);'],
+  ];
+  for (const [name, src] of positives) {
+    it(`flags: ${name}`, () => {
+      assert.ok(rulesOf(src).includes('forbidden-global'), `expected forbidden-global for: ${src}`);
+    });
+  }
+  const negatives: ReadonlyArray<readonly [string, string]> = [
+    ['plain member access on process', "process.stdout.write('x'); process.exitCode = 1; const a = process.argv.slice(2);"],
+    ['destructuring ordinary members of process', 'const { argv, env, platform } = process;'],
+    ['default import of node:process', "import process from 'node:process'; process.exit(1);"],
+    ['named imports of ordinary process members', "import { argv, env } from 'node:process';"],
+    ['typeof process', "const hasProcess = typeof process !== 'undefined';"],
+    ['an object key named process', 'const o = { process: 1 }; o.process;'],
+    ['member access on globalThis with a literal name', "const c = globalThis.structuredClone(x); const d = globalThis['structuredClone'];"],
+    ['typeof globalThis', "const ok = typeof globalThis === 'object';"],
+    ['a member called binding on a first-party object (not a call)', 'const b = stmt.binding;'],
+    ['the word in comments and strings', "// const { binding } = process; globalThis\nconst s = 'const g = globalThis; p.dlopen(x)';"],
+  ];
+  for (const [name, src] of negatives) {
+    it(`ignores: ${name}`, () => {
+      assert.deepEqual(scanSource(src, NO_CP).findings, []);
+    });
+  }
+});
+
+describe('adversarial: Function constructor reached without writing `Function(`', () => {
+  const positives: ReadonlyArray<readonly [string, string]> = [
+    ['.constructor.constructor', "[].constructor.constructor('return 1')();"],
+    ['constructor call on a function expression', "(function () {}).constructor('return 1')();"],
+    ['Reflect.construct(Function, ...)', "Reflect.construct(Function, ['return 1']);"],
+    ['alias of Function', "const F = Function; new F('return 1');"],
+    ['Function as a call argument', "make(Function, 'return 1');"],
+  ];
+  for (const [name, src] of positives) {
+    it(`flags: ${name}`, () => {
+      assert.ok(rulesOf(src).includes('forbidden-global'), `expected forbidden-global for: ${src}`);
+    });
+  }
+  const negatives: ReadonlyArray<readonly [string, string]> = [
+    ['Function as a type', 'let f: Function | undefined; const g = (h: Function): boolean => h === f;'],
+    ['type alias of Function', 'type Handler = Function;'],
+    ['Function inside generic arguments and tuple types', 'type R = Record<string, Function>; type T = [number, Function]; type E = Exclude<A[0], Function>;'],
+    ['instanceof Function', 'const ok = x instanceof Function;'],
+    ['members of Function', 'const s = Function.prototype.toString.call(f);'],
+    ['constructor.name for diagnostics', 'const n = err.constructor.name; const m = this.constructor.name;'],
+    ['new this.constructor(...) for subclass-aware copies', 'class A { clone() { return new this.constructor(1); } }'],
+    ['a class constructor declaration', 'class A { constructor() {} }'],
+  ];
+  for (const [name, src] of negatives) {
+    it(`ignores: ${name}`, () => {
+      assert.deepEqual(scanSource(src, NO_CP).findings, []);
+    });
+  }
+});
+
+describe('adversarial: eval and the Function constructor through an alias, an indirect call or the global object', () => {
+  const positives: ReadonlyArray<readonly [string, string]> = [
+    ['indirect eval (0, eval)(...)', "(0, eval)('1');"],
+    ['eval stored in a variable', "const run = eval; run('1');"],
+    ['globalThis.eval', "globalThis.eval('1');"],
+    ['global?.eval', "global?.eval('1');"],
+    ["globalThis['eval']", "globalThis['eval']('1');"],
+    ['globalThis.Function', "globalThis.Function('return 1')();"],
+    ['new globalThis.Function', "const f = new globalThis.Function('a', 'return a');"],
+    ["globalThis['Function']", "globalThis['Function']('return 1')();"],
+    ['module.constructor._load (CommonJS loader)', "module.constructor._load('node:http', module, false);"],
+    ['a _load call on any receiver', "loader._load('node:http');"],
+    ['module.constructor', 'const M = module.constructor;'],
+  ];
+  for (const [name, src] of positives) {
+    it(`flags: ${name}`, () => {
+      assert.ok(rulesOf(src).includes('forbidden-global'), `expected forbidden-global for: ${src}`);
+    });
+  }
+  const negatives: ReadonlyArray<readonly [string, string]> = [
+    ['a first-party method called eval', "sandbox.eval('x'); db.eval(sql);"],
+    ['lookalike identifiers', 'const evaluator = 1; const evaluate = () => 2; const functional = 3;'],
+    ['_load as a plain name', 'function _load() {} const load_ = 1; _load();'],
+    ['the words in comments and strings', "// eval('x'); globalThis.Function\nconst s = '(0, eval)(1)';"],
+  ];
+  for (const [name, src] of negatives) {
+    it(`ignores: ${name}`, () => {
+      assert.deepEqual(scanSource(src, NO_CP).findings, []);
+    });
+  }
+});
+
+describe('adversarial: hostile input cannot make the tokenizer quadratic', () => {
+  it('many unterminated \\u{ escapes in one string stay fast', () => {
+    const src = `const s = '${'\\u{'.repeat(800000)}';`;
+    const started = Date.now();
+    scanSource(src, NO_CP);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 3000, `scanning 2.4 MB of \\u{ escapes took ${elapsed} ms`);
+  });
+  it('a source file above the size cap is refused without being read into memory', async () => {
+    await withTempDir(async (dir) => {
+      const big = join(dir, 'big.ts');
+      await writeFile(big, '');
+      await truncate(big, 16 * 1024 * 1024 + 1); // sparse: no disk is used
+      assert.deepEqual(summarizeFiles(await scanTree(dir)), ['big.ts:0:scanner']);
+    });
+  });
+});
+
+describe('adversarial: native code through node:sqlite extensions', () => {
+  for (const [name, src] of [
+    ['loadExtension', "db.loadExtension('/tmp/x.so');"],
+    ['enableLoadExtension', 'db.enableLoadExtension(true);'],
+    ['allowExtension option', "new DatabaseSync(path, { allowExtension: true });"],
+  ] as const) {
+    it(`flags ${name}`, () => {
+      assert.ok(rulesOf(src).includes('forbidden-global'), `expected forbidden-global for: ${src}`);
+    });
+  }
+});
+
+describe('adversarial: private-endpoint markers beyond the three literal spellings', () => {
+  it('a base URL that ends right after the path segment (no trailing slash)', () => {
+    assert.ok(rulesOf(`const base = 'https://chat.example.test${PATH_MARKER}';`).includes('forbidden-literal'));
+    assert.ok(rulesOf(`const p = new URL('${PATH_MARKER}', host);`).includes('forbidden-literal'));
+  });
+  it('the __Host- prefixed CSRF cookie name', () => {
+    assert.ok(rulesOf(`const c = '${CSRF_COOKIE_MARKER}.csrf-token';`).includes('forbidden-literal'));
+    assert.ok(rulesOf(`const c = '__Host-' + 'next-' + 'auth.csrf-token';`).includes('forbidden-literal'));
+  });
+  it('a pattern that merely names the library (as the privacy scanner does) is not a marker', () => {
+    assert.deepEqual(rulesOf("const lib = 'next-auth';"), []);
+  });
+  it('the documented consumer URL form and unrelated words stay allowed', () => {
+    assert.deepEqual(rulesOf("const re = 'https://chatgpt.com/c/<uuid>'; const a = 'backend'; const b = '/api/v1/';"), []);
+  });
+});
+
+describe('adversarial: src/devtools `shell` option must be literal false in every spelling', () => {
+  const exec = "import { execFile } from 'node:child_process';\n";
+  const bad: ReadonlyArray<readonly [string, string]> = [
+    ['shorthand property', `${exec}const shell = true;\nexecFile('git', [], { shell });`],
+    ['quoted key', `${exec}execFile('git', [], { 'shell': true });`],
+    ['computed literal key', `${exec}execFile('git', [], { ['shell']: true });`],
+    ['member assignment', `${exec}const o = {};\no.shell = true;\nexecFile('git', [], o);`],
+    ['false with a fallback expression', `${exec}execFile('git', [], { shell: false || flag });`],
+    ['negated number', `${exec}execFile('git', [], { shell: !0 });`],
+    ['a shell path', `${exec}execFile('git', [], { shell: '/bin/sh' });`],
+    ['conditional', `${exec}execFile('git', [], { shell: ok ? false : true });`],
+  ];
+  for (const [name, src] of bad) {
+    it(`devtools may not: ${name}`, () => {
+      assert.ok(rulesOf(src, DEVTOOLS).includes('child-process-usage'), `expected child-process-usage for: ${src}`);
+    });
+  }
+  const good: ReadonlyArray<readonly [string, string]> = [
+    ['literal false, last', `${exec}execFile('git', [], { cwd, shell: false });`],
+    ['literal false, first', `${exec}execFile('git', [], { shell: false, cwd });`],
+    ['literal false, only', `${exec}execFile('git', [], { shell: false });`],
+    ['quoted key with literal false', `${exec}execFile('git', [], { 'shell': false });`],
+    ['the word in a comment or string', `${exec}// shell: true is forbidden\nconst s = 'shell: true';`],
+  ];
+  for (const [name, src] of good) {
+    it(`devtools may: ${name}`, () => {
+      assert.deepEqual(scanSource(src, DEVTOOLS).findings, []);
+    });
+  }
+});
+
+describe('adversarial: source files are scanned as the compiler reads them', () => {
+  const body = "import http from 'node:http';\nexport const x = typeof http.get;\n";
+
+  it('refuses UTF-16 sources (the TypeScript compiler decodes a BOM-marked UTF-16 file and emits its imports)', async () => {
+    await withTempDir(async (dir) => {
+      const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(body, 'utf16le')]);
+      const beBody = Buffer.from(body, 'utf16le');
+      beBody.swap16();
+      const be = Buffer.concat([Buffer.from([0xfe, 0xff]), beBody]);
+      await writeFile(join(dir, 'le.ts'), le);
+      await writeFile(join(dir, 'be.ts'), be);
+      await writeFile(join(dir, 'nobom.ts'), Buffer.from(body, 'utf16le'));
+      assert.deepEqual(summarizeFiles(await scanTree(dir)), ['be.ts:0:scanner', 'le.ts:0:scanner', 'nobom.ts:0:scanner']);
+    });
+  });
+
+  it('refuses invalid UTF-8 and NUL bytes instead of guessing how the compiler will decode them', async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, 'bad8.ts'), Buffer.from([0x2f, 0x2f, 0x20, 0xc3, 0x28, 0x0a]));
+      await writeFile(join(dir, 'nul.ts'), Buffer.from("export const a = 1;\u0000\n", 'utf8'));
+      assert.deepEqual(summarizeFiles(await scanTree(dir)), ['bad8.ts:0:scanner', 'nul.ts:0:scanner']);
+    });
+  });
+
+  it('still accepts plain UTF-8 with or without a BOM, including non-ASCII text', async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, 'bom.ts'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('export const a = 1;\n')]));
+      await writeFile(join(dir, 'uni.ts'), 'export const café = "日本語 \u{1f600}";\n');
+      assert.deepEqual((await scanTree(dir)).findings, []);
+    });
+  });
+});
+
+describe('adversarial: a relative import may not leave src/ (unscanned code)', () => {
+  it('flags imports, re-exports, dynamic imports and require() that resolve outside the scanned tree', async () => {
+    await withTempDir(async (dir) => {
+      await mkdir(join(dir, 'src', 'a'), { recursive: true });
+      await mkdir(join(dir, 'src', 'c'), { recursive: true });
+      await mkdir(join(dir, 'src', 'ok'), { recursive: true });
+      const files: Record<string, string> = {
+        'a/b.ts': "import x from '../../scripts/net.mjs';\nexport const b = x;\n",
+        'top.ts': "import y from './../up.js';\nexport const t = y;\n",
+        'c/d.ts': "export * from '../../../far.js';\n",
+        'c/e.ts': "const m = await import('../../outside/net.js');\n",
+        'c/f.cjs': "const m = require('../../x');\n",
+        'ok/inside.ts': "import z from '../a/b.js';\nimport w from './sibling.js';\nexport const i = [z, w];\n",
+        'ok/sibling.ts': 'export const s = 1;\n',
+      };
+      for (const [rel, text] of Object.entries(files)) await writeFile(join(dir, 'src', rel), text);
+      const scan = await scanTree(join(dir, 'src'));
+      assert.deepEqual(summarizeFiles(scan), [
+        'a/b.ts:1:outside-src',
+        'c/d.ts:1:outside-src',
+        'c/e.ts:1:outside-src',
+        'c/f.cjs:1:outside-src',
+        'top.ts:1:outside-src',
+      ]);
+    });
+  });
+});
+
+describe('adversarial: package.json overrides cannot swap an allow-listed dependency', () => {
+  const base = { dependencies: { '@modelcontextprotocol/sdk': '1.32.1', zod: '4.6.5' } };
+  it('rejects an override that aliases a package to another source', () => {
+    for (const spec of ['npm:other@1.0.0', 'https://example.test/z.tgz', 'git+https://example.test/z.git', 'user/repo', 'file:../z']) {
+      assert.ok(runtimeDependencyProblems({ ...base, overrides: { zod: spec } }).some((p) => p.includes('overrides')), spec);
+    }
+  });
+  it('rejects a nested override with a non-registry specifier', () => {
+    assert.ok(runtimeDependencyProblems({ ...base, overrides: { express: { qs: 'npm:x@1' } } }).some((p) => p.includes('overrides')));
+  });
+  it('allows version-only overrides (security pins) and absent overrides', () => {
+    assert.deepEqual(runtimeDependencyProblems({ ...base, overrides: { qs: '6.13.0', express: { 'path-to-regexp': '^8.2.0' } } }), []);
+    assert.deepEqual(runtimeDependencyProblems(base), []);
   });
 });
 

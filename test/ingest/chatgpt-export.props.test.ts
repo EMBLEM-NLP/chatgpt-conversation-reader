@@ -280,11 +280,9 @@ describe('random mapping graphs (cycles, dangling parents, random children, dupl
         if (out instanceof Error || out.kind !== 'record') return assert.fail('expected a record');
         const t = analyzeTree(out.record.id, out.record.messages, out.record.currentNodeId);
         assert.ok(!t.warnings.some((w) => w.code === 'CHILD_PARENT_MISMATCH'), JSON.stringify(t.warnings.filter((w) => w.code === 'CHILD_PARENT_MISMATCH')));
-        const withEdges = out.record.messages.some((m) => m.parentId !== null);
         const absent = out.record.warnings.filter((w) => w.code === 'CHILDREN_ABSENT').length;
         assert.ok(absent <= 1, 'never more than one CHILDREN_ABSENT');
         if (out.record.messages.length > 0) assert.equal(absent, 1);
-        void withEdges;
       }),
     );
   });
@@ -421,7 +419,6 @@ describe('random message content', () => {
           assert.ok(b.type.length > 0);
         }
         assert.ok(!m.text.includes('[object Object]') && !m.text.includes('undefined'));
-        // pointers never reach text: any "://" in the text must come from a real string part, which the generator only produces via strings
         for (const a of m.attachments) {
           assert.ok(a.presentInExportAs === null, 'no container was supplied');
         }

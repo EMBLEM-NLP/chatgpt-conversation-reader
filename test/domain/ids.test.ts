@@ -142,13 +142,13 @@ describe('parseChatGptUrl: rejection classes with exact codes', () => {
     ['dot-dot segment that WHATWG would resolve into a valid link', `https://chatgpt.com/c/../c/${U}`, 'UNSUPPORTED_URL', 'extra_path_segments'],
     ['dot-dot that WHATWG would resolve from a share path', `https://chatgpt.com/share/../c/${U}`, 'UNSUPPORTED_URL', 'path'],
     ['dot-dot after the uuid', `${BASE}/../${U}`, 'UNSUPPORTED_URL', 'extra_path_segments'],
-    // --- UNSUPPORTED_URL: percent-encoding ---------------------------------------------------------------------
-    ['encoded "c"', `https://chatgpt.com/%63/${U}`, 'UNSUPPORTED_URL', 'percent_encoding'],
-    ['encoded hex digit inside the uuid', `https://chatgpt.com/c/%36ac95b6e-9fa0-83e8-bbb0-8107079a8720`, 'UNSUPPORTED_URL', 'percent_encoding'],
-    ['encoded slash after uuid', `${BASE}%2Fextra`, 'UNSUPPORTED_URL', 'percent_encoding'],
-    ['encoded space after uuid', `${BASE}%20`, 'UNSUPPORTED_URL', 'percent_encoding'],
-    ['encoded dot-dot', `https://chatgpt.com/c/%2e%2e/${U}`, 'UNSUPPORTED_URL', 'percent_encoding'],
-    ['encoded slash between c and uuid', `https://chatgpt.com/c%2F${U}`, 'UNSUPPORTED_URL', 'percent_encoding'],
+    // --- INVALID_URL: percent-encoding (module spec: "percent-encoded or backslash path tricks" are INVALID_URL) ---------
+    ['encoded "c"', `https://chatgpt.com/%63/${U}`, 'INVALID_URL', 'percent_encoding'],
+    ['encoded hex digit inside the uuid', `https://chatgpt.com/c/%36ac95b6e-9fa0-83e8-bbb0-8107079a8720`, 'INVALID_URL', 'percent_encoding'],
+    ['encoded slash after uuid', `${BASE}%2Fextra`, 'INVALID_URL', 'percent_encoding'],
+    ['encoded space after uuid', `${BASE}%20`, 'INVALID_URL', 'percent_encoding'],
+    ['encoded dot-dot', `https://chatgpt.com/c/%2e%2e/${U}`, 'INVALID_URL', 'percent_encoding'],
+    ['encoded slash between c and uuid', `https://chatgpt.com/c%2F${U}`, 'INVALID_URL', 'percent_encoding'],
     // --- UNSUPPORTED_URL: other hosts ---------------------------------------------------------------------------
     ['legacy chat.openai.com', `https://chat.openai.com/c/${U}`, 'UNSUPPORTED_URL', 'host'],
     ['www subdomain', `https://www.chatgpt.com/c/${U}`, 'UNSUPPORTED_URL', 'host'],

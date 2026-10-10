@@ -235,7 +235,7 @@ describe('chatgpt-conversation-url', () => {
       `https://${CHATGPT}/share/${uuid(54)}`,
       `https://example.com/c/${uuid(55)}`,
       `https://${CHATGPT}.example.org/c/${uuid(56)}`,
-      `${CHATGPT}/c/${uuid(57)}`,
+      // (a link written without its scheme IS flagged: see privacy-scan.content.adversarial.test.ts)
     ]) {
       assert.deepEqual(rules('a.md', line), [], line);
     }
@@ -358,7 +358,7 @@ describe('scanContent behaviour', () => {
     assert.deepEqual(
       [...CONTENT_RULE_IDS].sort(),
       [
-        'asset-pointer', 'aws-access-key-id', 'bearer-token', 'chatgpt-conversation-url', 'cloudflare-clearance-cookie', 'cookie-header',
+        'asset-pointer', 'aws-access-key-id', 'bearer-token', 'chatgpt-conversation-url', 'cloudflare-clearance-cookie', 'cookie-header', 'cookie-jar-entry',
         'device-id', 'github-token', 'high-entropy-blob', 'jwt', 'openai-api-key', 'pem-private-key', 'session-cookie-name', 'slack-token', 'user-id-cookie',
       ],
     );

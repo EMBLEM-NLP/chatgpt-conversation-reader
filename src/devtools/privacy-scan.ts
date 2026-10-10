@@ -4,33 +4,46 @@
  *
  * This is NOT product code. It is the only place in the repository that spawns a child process (git, via
  * `execFile` with an argument array, never a shell string) and it must never be imported by the SDK, CLI or MCP
- * server. It performs no network access of any kind.
+ * server. It performs no network access of any kind (git runs with every transport and lazy fetching disabled, so a
+ * partial clone fails closed instead of being completed from its remote) and it never writes to the scanned repository.
  *
  * What it checks
- *  - PATH rules: databases, archives, key material, HAR files, env files, raw export files and "export"/"private"
- *    directories, at any depth, case-insensitively.
+ *  - PATH rules: databases (and their WAL/SHM/journal sidecars), archives, key material, HAR files, logs, env files,
+ *    cookie jars, raw export files and "export"/"private"/".gcr" directories, at any depth, case-insensitively, also
+ *    when the name carries a backup suffix (`.bak`, `~`, ...).
+ *  - SIGNATURE rule: the first bytes of every file (even one too large to read) identify a SQLite database or an
+ *    archive that was renamed; ZIP-based document/package formats are told apart by extension.
  *  - CONTENT rules: PEM private keys, API keys/tokens, JWTs, Authorization/Cookie headers, ChatGPT session cookie
- *    names, real conversation URLs, asset pointers and long high-entropy blobs. Every pattern is linear-time (no
- *    nested or overlapping quantifiers; unbounded runs are anchored by a lookbehind so each run is scanned once).
+ *    names and cookie-jar entries, real conversation URLs, asset pointers and long high-entropy blobs. Lines that
+ *    contain escaped quotes or slashes are also judged unescaped. Every pattern is linear-time (no nested or
+ *    overlapping quantifiers; unbounded runs are anchored by a lookbehind so each run is scanned once). UTF-16 text
+ *    with a byte-order mark is decoded; any other file with NUL bytes is binary and gets the path/signature rules only.
  *  - FIXTURE rules: raw-export-shaped files may only live under the root `fixtures/` directory, must carry the
- *    literal marker below, and must stay small.
+ *    literal marker below, and must stay small. A data file (json/jsonl/ndjson/txt/dat or extension-less) that has the
+ *    SHAPE of a ChatGPT or Claude export needs the marker wherever it is, whatever it is called.
  *
  * Secrets are never reproduced: a finding's `detail` shows at most the first 4 characters of a match (fewer for
- * short matches) plus its length, and line CONTENT is never copied into any output.
+ * short matches) plus its length, and line CONTENT is never copied into any output. At most `MAX_FINDINGS_PER_FILE`
+ * content findings are listed per file (and per file section of a patch); a `too-many-findings` entry says so.
  *
  * Exceptions: an optional `.privacy-scan-allow` file at the repository root lists exact repo-relative paths, one
  * per line (`#` starts a comment line, no globs). An allow-listed path is exempt from every rule, so the file is
  * the single, reviewable place where exceptions live.
  *
- * Bounds: files are read up to `maxFileBytes`; the staged-diff and history passes read git's own patch text and are
- * bounded by `maxHistoryBytes` instead, so an oversized staged file still has its added lines scanned (up to the cap).
+ * Bounds: files are read up to `maxFileBytes`; the staged-diff and history passes read git's own patch text (with
+ * `--text`, so .gitattributes cannot hide a file) and are bounded by `maxHistoryBytes` instead, so an oversized staged
+ * file still has its added lines scanned (up to the cap).
  *
- * Known limits (reported, not hidden): the allow-file is read from the working tree only; unreachable objects, the
- * reflog and content that exists only inside a merge-commit resolution are not scanned; history scanning is capped
- * (see `maxHistoryBytes`) and reports when it truncated.
+ * Known limits (reported, not hidden): the allow-file is read from the working tree only and an allow-listed path is
+ * exempt in history too; unreachable objects, the reflog, stashes, commit messages and content that exists only inside
+ * a merge-commit resolution are not scanned; committed content that differs from an unstaged work-tree edit is only
+ * seen by `--history`; history scanning is capped (see `maxHistoryBytes`) and reports when it truncated, and it cannot
+ * recognise a renamed database by signature (only the work-tree copy of a file is sniffed); credentials without
+ * a distinctive shape (passwords, AWS secret keys, Basic-auth strings, base64 wrapped over several short lines) are not
+ * found.
  */
 import { execFile } from 'node:child_process';
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { lstat, open, readFile, realpath } from 'node:fs/promises';
 import { join, posix, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { GcrError } from '../errors.js';
@@ -88,6 +101,8 @@ export const FIXTURE_MAX_BYTES = 1024 * 1024;
 /** Literal that every raw-export-shaped file under fixtures/ must contain to prove it is synthetic. */
 export const SYNTHETIC_MARKER = 'GCR-SYNTHETIC-FIXTURE';
 export const ALLOW_FILE_NAME = '.privacy-scan-allow';
+/** Findings listed per file (per scanned unit) before the rest are summarised by one `too-many-findings` entry. */
+export const MAX_FINDINGS_PER_FILE = 1000;
 
 const MAX_ALLOW_FILE_BYTES = 256 * 1024;
 const FILE_READ_CONCURRENCY = 8;
@@ -169,24 +184,42 @@ function pathContext(path: string): PathContext {
 
 const FORBIDDEN_EXTENSIONS: readonly string[] = [
   '.sqlite', '.sqlite3', '.db', '.db-wal', '.db-shm',
-  // WAL/SHM sidecars of .sqlite files hold the same private rows; .gitignore already lists them.
-  '.sqlite-wal', '.sqlite-shm',
+  // WAL/SHM sidecars of .sqlite files hold the same private rows; .gitignore already lists them. Rollback journals and
+  // the sidecars of .sqlite3 databases are the same data under names the list above does not end with.
+  '.sqlite-wal', '.sqlite-shm', '.sqlite3-wal', '.sqlite3-shm', '.db-journal', '.sqlite-journal', '.sqlite3-journal',
   '.zip', '.tar', '.tgz', '.gz', '.7z', '.rar', '.har',
+  // Other compressors people archive an export with.
+  '.xz', '.bz2', '.zst', '.tbz', '.tbz2', '.txz',
   '.pem', '.key', '.p12', '.pfx', '.jks', '.kdbx',
+  // SPEC FR-08 lists logs next to exports, databases and secrets (and .gitignore ignores them).
+  '.log',
 ];
 
 const FORBIDDEN_BASENAMES: ReadonlySet<string> = new Set([
   'cookies.json', 'cookie.json', 'session.json', 'storage_state.json', 'auth.json',
+  // Netscape-format cookie jars (curl, yt-dlp, browser extensions).
+  'cookies.txt', 'cookie.txt',
   // Files that make up an official ChatGPT export besides conversations*.json.
   'user.json', 'user_settings.json', 'message_feedback.json', 'shared_conversations.json', 'model_comparisons.json',
   'group_chats.json', 'conversation_asset_file_names.json', 'library_files.json', 'export_manifest.json', 'chat.html',
 ]);
 
 const EXPORT_DIRECTORY_NAMES: ReadonlySet<string> = new Set(['export', 'exports', 'private']);
-const CONVERSATIONS_FILE = /^conversations(?:-[0-9]+)?\.json$/;
+/** The local GCR data directory (databases, drafts, annotations); `.gitignore` keeps it out of Git. */
+const PRIVATE_DATA_DIRECTORY = '.gcr';
+// `conversations.json`, the numbered parts of newer exports, and the names a browser or file manager gives a second copy.
+const CONVERSATIONS_FILE = /^conversations(?:-[0-9]+|_[0-9]+| \([0-9]+\))?\.json$/;
+const BACKUP_SUFFIXES: readonly string[] = ['.bak', '.old', '.orig', '.backup', '.copy', '.save', '.tmp'];
+
+/** `chats.sqlite.bak` -> `chats.sqlite`, `user.json~` -> `user.json`: a backup copy holds exactly the same data. */
+function foldBackupSuffix(base: string): string {
+  if (base.length > 1 && base.endsWith('~')) return base.slice(0, -1);
+  for (const suffix of BACKUP_SUFFIXES) if (base.length > suffix.length && base.endsWith(suffix)) return base.slice(0, -suffix.length);
+  return base;
+}
 
 function isConversationExportName(base: string): boolean {
-  return CONVERSATIONS_FILE.test(base);
+  return CONVERSATIONS_FILE.test(foldBackupSuffix(base));
 }
 
 /** Raw-export-shaped file in the one place such names are tolerated: it must then prove it is synthetic. */
@@ -197,26 +230,30 @@ function requiresSyntheticMarker(ctx: PathContext): boolean {
 function pathRuleFindings(path: string): Finding[] {
   const ctx = pathContext(path);
   const { base } = ctx;
+  const core = foldBackupSuffix(base); // rules below also judge the name with one backup/copy suffix removed
   const out: Finding[] = [];
 
-  const ext = FORBIDDEN_EXTENSIONS.find((e) => base.endsWith(e));
+  const ext = FORBIDDEN_EXTENSIONS.find((e) => core.endsWith(e));
   if (ext !== undefined) {
     out.push({ rule: 'forbidden-extension', path, detail: `files with extension ${ext} (database, archive, capture or key material) must not be committed` });
   }
 
   if (base === '.env' || (base.startsWith('.env.') && base !== '.env.example')) {
     out.push({ rule: 'forbidden-filename', path, detail: 'environment files must not be committed (only .env.example is allowed)' });
-  } else if (FORBIDDEN_BASENAMES.has(base)) {
-    out.push({ rule: 'forbidden-filename', path, detail: `${base} is a credential, session or raw-export file name` });
+  } else if (FORBIDDEN_BASENAMES.has(core)) {
+    out.push({ rule: 'forbidden-filename', path, detail: `${core} is a credential, session or raw-export file name` });
   }
 
   if (isConversationExportName(base) && !ctx.underFixtures) {
     out.push({ rule: 'export-file-outside-fixtures', path, detail: 'conversation export files are only allowed under fixtures/ and only when synthetic' });
   }
 
-  const inExportDir = ctx.segments.slice(0, -1).some((s) => EXPORT_DIRECTORY_NAMES.has(s.toLowerCase()));
-  if (inExportDir && (base.endsWith('.json') || base.endsWith('.zip'))) {
+  const directories = ctx.segments.slice(0, -1).map((s) => s.toLowerCase());
+  if (directories.some((s) => EXPORT_DIRECTORY_NAMES.has(s)) && (core.endsWith('.json') || core.endsWith('.zip'))) {
     out.push({ rule: 'export-directory', path, detail: 'json/zip files inside an export/exports/private directory are presumed to be raw exports' });
+  }
+  if (directories.includes(PRIVATE_DATA_DIRECTORY)) {
+    out.push({ rule: 'private-data-directory', path, detail: 'files inside the local GCR data directory (.gcr/) hold private conversation data and must not be committed' });
   }
   return out;
 }
@@ -302,6 +339,16 @@ const CLEARANCE_COOKIE = new RegExp(String.raw`(?<![A-Za-z0-9_])cf_` + 'clearanc
 const DEVICE_ID = new RegExp(String.raw`(?<![A-Za-z0-9_-])oai-(?:device-` + 'id|d' + 'id)' + String.raw`["']?[ \t]*[=:][ \t]*["'` + '`' + String.raw`]?([A-Za-z0-9-]{8,})`, 'gi');
 const PUID_COOKIE = new RegExp(String.raw`(?<![A-Za-z0-9_])_pu` + 'id=' + String.raw`([^\s;"'` + '`' + String.raw`]*)`, 'g');
 
+// Cookie JARS (as opposed to header lines): a browser-automation storage state or extension export names the cookie in
+// a `"name": "<cookie>"` field with the value on another line, a Netscape cookies.txt separates name and value with a
+// TAB, and a Python/JS dict quotes both. The names are assembled from fragments for the same reason as above.
+const JAR_COOKIE_NAMES = ['cf_' + 'clearance', '_pu' + 'id', 'oai-' + 'did', 'oai-device-' + 'id'].join('|');
+// The device-id rule above already reads `"<name>": "<value>"` pairs, so the quoted-pair form only adds the other two.
+const JAR_PAIR_NAMES = ['cf_' + 'clearance', '_pu' + 'id'].join('|');
+const JAR_NAME_FIELD = new RegExp(String.raw`["']name["']\s*:\s*["'](${JAR_COOKIE_NAMES})["']`, 'gi');
+const JAR_NETSCAPE_LINE = new RegExp(String.raw`(?<![A-Za-z0-9_-])(${JAR_COOKIE_NAMES})\t(\S{8,})`, 'g');
+const JAR_QUOTED_PAIR = new RegExp(String.raw`["'](${JAR_PAIR_NAMES})["']\s*:\s*["']([^\s"']{8,})`, 'gi');
+
 const CONTENT_RULES: readonly ContentRule[] = [
   {
     id: 'pem-private-key',
@@ -343,7 +390,8 @@ const CONTENT_RULES: readonly ContentRule[] = [
   },
   {
     id: 'cookie-header',
-    pattern: /(?<![A-Za-z0-9_-])(?:set-)?cookie["']?[ \t]*:[ \t]*["'`]?[A-Za-z0-9_.%-]{1,128}=([^\s;"'`]{1,4096})/gi,
+    // The value may be wrapped in quotes (RFC 6265 allows a DQUOTE-wrapped cookie-value).
+    pattern: /(?<![A-Za-z0-9_-])(?:set-)?cookie["']?[ \t]*:[ \t]*["'`]?[A-Za-z0-9_.%-]{1,128}=["']?([^\s;"'`]{1,4096})/gi,
     detail: (m) => {
       const value = m[1] ?? '';
       // A template/placeholder value ("${token}", "<value>", "{{ value }}") is code or documentation that builds a
@@ -360,9 +408,14 @@ const CONTENT_RULES: readonly ContentRule[] = [
   },
   { id: 'device-id', pattern: DEVICE_ID, detail: (m) => `OpenAI device id value ${maskSecret(m[1] ?? '')}` },
   { id: 'user-id-cookie', pattern: PUID_COOKIE, detail: (m) => `ChatGPT user-id cookie assignment, value ${maskSecret(m[1] ?? '')}` },
+  { id: 'cookie-jar-entry', pattern: JAR_NAME_FIELD, detail: (m) => `cookie jar entry for ${m[1] ?? 'a ChatGPT session cookie'}` },
+  { id: 'cookie-jar-entry', pattern: JAR_NETSCAPE_LINE, detail: (m) => `cookie jar entry for ${m[1] ?? ''}, value ${maskSecret(m[2] ?? '')}` },
+  { id: 'cookie-jar-entry', pattern: JAR_QUOTED_PAIR, detail: (m) => `cookie jar entry for ${m[1] ?? ''}, value ${maskSecret(m[2] ?? '')}` },
   {
     id: 'chatgpt-conversation-url',
-    pattern: /https?:\/\/(?:www\.)?(chatgpt\.com|chat\.openai\.com)(?:\/g\/[A-Za-z0-9_-]{1,100})?\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f])/gi,
+    // The scheme is optional: a link pasted without it identifies the same private conversation. The lookbehind keeps
+    // look-alike hosts ("notchatgpt.com", "sub.chatgpt.com", "user@chatgpt.com") out and limits starts to one per host.
+    pattern: /(?<![A-Za-z0-9.@-])(?:https?:\/\/)?(?:www\.)?(chatgpt\.com|chat\.openai\.com)(?:\/g\/[A-Za-z0-9_-]{1,100})?\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f])/gi,
     detail: (m) => {
       const id = (m[2] ?? '').toLowerCase();
       if (id === REFERENCE_CONVERSATION_ID || SYNTHETIC_ID.test(id)) return null;
@@ -414,11 +467,19 @@ function activeRules(ctx: PathContext): readonly ContentRule[] {
   return CONTENT_RULES.filter((r) => !(r.exempt?.(ctx) ?? false));
 }
 
-/** Apply the already path-filtered rules to ONE line. Never retains or returns the line text. */
-function lineHits(rules: readonly ContentRule[], line: string): RuleHit[] {
+/** True when any character of [start, end) was already claimed by an earlier match on the line. */
+function overlapsClaimed(claimed: Uint8Array, start: number, end: number): boolean {
+  for (let i = start; i < end; i++) if (claimed[i] === 1) return true;
+  return false;
+}
+
+/** Apply the already path-filtered rules to ONE line as written. Never retains or returns the line text. */
+function scanLine(rules: readonly ContentRule[], line: string): RuleHit[] {
   if (line.length < 6) return []; // shortest meaningful token is the 6-char cookie assignment
   const hits: RuleHit[] = [];
-  const spans: Array<[number, number]> = [];
+  // One byte per character instead of a list of spans: a candidate is compared with the claimed characters it covers
+  // (cost proportional to its own length), not with every earlier match on the line (quadratic on a minified file).
+  let claimed: Uint8Array | undefined;
   for (const rule of rules) {
     const re = rule.pattern;
     re.lastIndex = 0;
@@ -426,14 +487,62 @@ function lineHits(rules: readonly ContentRule[], line: string): RuleHit[] {
       if (m[0].length === 0) re.lastIndex++; // defensive: no rule can match empty, but never loop forever
       const start = m.index;
       const end = start + m[0].length;
-      if (rule.yieldsToOthers === true && spans.some(([s, e]) => start < e && s < end)) continue;
+      if (rule.yieldsToOthers === true && claimed !== undefined && overlapsClaimed(claimed, start, end)) continue;
       const detail = rule.detail(m);
       if (detail === null) continue;
       hits.push({ rule: rule.id, detail });
-      spans.push([start, end]);
+      claimed ??= new Uint8Array(line.length);
+      claimed.fill(1, start, end);
     }
   }
   return hits;
+}
+
+// Backslash-escaped delimiters: `\"` (JSON inside JSON, header text inside a string literal), `\\\"` (twice escaped)
+// and `\/` (PHP-style JSON). The lookbehind starts the match at the FIRST backslash of a run so the scan stays linear.
+const ESCAPED_DELIMITER = /(?<!\\)\\+(["'/])/g;
+
+/**
+ * Apply the rules to one line and, when the line contains escaped quotes or slashes, to its unescaped form as well, so
+ * `{\"Authorization\": \"Bearer ...\"}` is judged like the header it encodes. Duplicates are dropped.
+ */
+function lineHits(rules: readonly ContentRule[], line: string): RuleHit[] {
+  const hits = scanLine(rules, line);
+  if (!line.includes('\\')) return hits;
+  const plain = line.replace(ESCAPED_DELIMITER, '$1');
+  if (plain === line) return hits;
+  const seen = new Set(hits.map((h) => `${h.rule}\u0000${h.detail}`));
+  for (const h of scanLine(rules, plain)) {
+    const k = `${h.rule}\u0000${h.detail}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    hits.push(h);
+  }
+  return hits;
+}
+
+const TOO_MANY_FINDINGS_DETAIL = `more than ${MAX_FINDINGS_PER_FILE} findings in this file; further findings in this file were not listed`;
+
+// ---- export-shaped data -------------------------------------------------------------------------------------------------
+
+const DATA_EXTENSIONS: ReadonlySet<string> = new Set(['.json', '.jsonl', '.ndjson', '.txt', '.dat', '.data']);
+
+/** Data-like file names: JSON/text/data files and extension-less files, optionally with a backup suffix. */
+function isDataLikeName(base: string): boolean {
+  const core = foldBackupSuffix(base);
+  const dot = core.lastIndexOf('.');
+  return dot <= 0 || DATA_EXTENSIONS.has(core.slice(dot));
+}
+
+/**
+ * Official ChatGPT exports carry `mapping` + `current_node`/`create_time`; Claude exports carry `chat_messages` +
+ * `uuid`/`sender`. A data file with that shape is a conversation export whatever it is called, so it must prove it is
+ * synthetic. Source code and documents only MENTION these keys, which is why only data-like names are judged.
+ */
+function looksLikeConversationExport(ctx: PathContext, content: string): boolean {
+  if (!isDataLikeName(ctx.base)) return false;
+  const has = (key: string): boolean => content.includes(`"${key}"`);
+  return (has('mapping') && (has('current_node') || has('create_time'))) || (has('chat_messages') && (has('uuid') || has('sender')));
 }
 
 function textFindings(path: string, content: string, byteLength: number): Finding[] {
@@ -441,17 +550,30 @@ function textFindings(path: string, content: string, byteLength: number): Findin
   const out: Finding[] = [];
   const sizeFinding = fixtureSizeFinding(path, byteLength);
   if (sizeFinding !== null) out.push(sizeFinding);
-  if (requiresSyntheticMarker(ctx) && !content.includes(SYNTHETIC_MARKER)) {
-    out.push(markerMissingFinding(path, 'raw-export-shaped fixture does not contain the synthetic-fixture marker'));
+  if (!content.includes(SYNTHETIC_MARKER)) {
+    if (requiresSyntheticMarker(ctx)) {
+      out.push(markerMissingFinding(path, 'raw-export-shaped fixture does not contain the synthetic-fixture marker'));
+    } else if (looksLikeConversationExport(ctx, content)) {
+      out.push(markerMissingFinding(path, 'file has the shape of a raw conversation export but does not contain the synthetic-fixture marker'));
+    }
   }
   const rules = activeRules(ctx);
   let pos = 0;
   let lineNo = 0;
-  while (pos <= content.length) {
+  let listed = 0;
+  scan: while (pos <= content.length) {
     let nl = content.indexOf('\n', pos);
     if (nl === -1) nl = content.length;
     lineNo++;
-    for (const hit of lineHits(rules, content.slice(pos, nl))) out.push({ rule: hit.rule, path, line: lineNo, detail: hit.detail });
+    for (const hit of lineHits(rules, content.slice(pos, nl))) {
+      if (listed === MAX_FINDINGS_PER_FILE) {
+        // Bounded output and memory: a file can match hundreds of thousands of times; one summary replaces the rest.
+        out.push({ rule: 'too-many-findings', path, detail: TOO_MANY_FINDINGS_DETAIL });
+        break scan;
+      }
+      out.push({ rule: hit.rule, path, line: lineNo, detail: hit.detail });
+      listed++;
+    }
     pos = nl + 1;
   }
   return out;
@@ -528,6 +650,9 @@ function gitEnv(): NodeJS.ProcessEnv {
     env[k] = v;
   }
   env['GIT_TERMINAL_PROMPT'] = '0';
+  // A partial clone (--filter=blob:none) would otherwise fetch missing blobs from its remote while `git log -p` or
+  // `git diff` runs: network access, and objects written into the repository being scanned. Fail instead (see runGit).
+  env['GIT_NO_LAZY_FETCH'] = '1';
   return env;
 }
 
@@ -535,7 +660,8 @@ function gitEnv(): NodeJS.ProcessEnv {
 async function runGit(root: string, args: readonly string[], maxBytes: number): Promise<{ stdout: Buffer; truncated: boolean }> {
   // core.fsmonitor from the repository's own config is EXECUTED by ls-files/diff/status; forcing it off means scanning
   // an untrusted clone cannot run code. --no-optional-locks keeps the scan from writing to the index.
-  const full = ['--no-optional-locks', '-C', root, '-c', 'core.quotePath=false', '-c', 'core.fsmonitor=false', ...args];
+  // protocol.allow=never blocks every transport, so even a git that predates GIT_NO_LAZY_FETCH cannot reach a remote.
+  const full = ['--no-optional-locks', '-C', root, '-c', 'core.quotePath=false', '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never', ...args];
   try {
     const { stdout } = await execFileAsync('git', full, { encoding: 'buffer', maxBuffer: Math.max(1, maxBytes), env: gitEnv(), windowsHide: true });
     return { stdout, truncated: false };
@@ -544,7 +670,11 @@ async function runGit(root: string, args: readonly string[], maxBytes: number): 
       const partial = (e as { stdout?: unknown }).stdout;
       return { stdout: Buffer.isBuffer(partial) ? partial : Buffer.alloc(0), truncated: true };
     }
-    // Deliberately not forwarding git's stderr: it can contain absolute paths.
+    // Deliberately not forwarding git's stderr: it can contain absolute paths. Only its classification is used.
+    const stderr = (e as { stderr?: unknown }).stderr;
+    if (Buffer.isBuffer(stderr) && /promisor remote|lazy fetching disabled|transport '[a-z]+' not allowed/.test(stderr.toString('utf8'))) {
+      throw new GcrError('INVALID_ARGUMENT', 'the repository is a partial clone and some objects are not available locally; the scanner never fetches them, so fetch the full history and run it again', { cause: e });
+    }
     throw new GcrError('INTERNAL_ERROR', `git ${args[0] ?? ''} failed`, { cause: e });
   }
 }
@@ -649,12 +779,17 @@ function scanPatchText(text: string, allow: ReadonlySet<string>, suffix: (commit
   let path: string | null = null;
   let rules: readonly ContentRule[] = [];
   const fileInfo = new Map<string, readonly ContentRule[]>();
+  // Same per-file bound as the work-tree scan, applied to each file section of each commit.
+  let listed = 0;
+  let suppressed = false;
   parsePatch(text, {
     commit(hash) {
       commit = hash;
       if (hash !== '') result.commitsSeen.add(hash);
     },
     file(p) {
+      listed = 0;
+      suppressed = false;
       path = p !== null && !allow.has(p) ? p : null;
       if (path !== null) {
         let r = fileInfo.get(path);
@@ -668,15 +803,28 @@ function scanPatchText(text: string, allow: ReadonlySet<string>, suffix: (commit
     added(lineNo, line) {
       if (path === null) return;
       if (line.includes(SYNTHETIC_MARKER)) result.markerSeen.add(`${commit}\u0000${path}`);
+      if (suppressed) return;
       for (const hit of lineHits(rules, line)) {
+        if (listed === MAX_FINDINGS_PER_FILE) {
+          result.findings.push({ rule: 'too-many-findings', path, detail: `${TOO_MANY_FINDINGS_DETAIL}${suffix(commit)}` });
+          suppressed = true;
+          return;
+        }
         result.findings.push({ rule: hit.rule, path, line: lineNo, detail: `${hit.detail}${suffix(commit)}` });
+        listed++;
       }
     },
   });
   return result;
 }
 
-const PATCH_FLAGS = ['-U0', '--no-renames', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'] as const;
+// `--text` makes git show the added lines of files that .gitattributes (`-diff`, `binary`, a binary diff driver) would
+// otherwise reduce to "Binary files differ", which would hide exactly the files someone wanted kept out of review.
+// `--inter-hunk-context=0` stops a `diff.interHunkContext` setting from merging hunks, which prints unchanged lines
+// inside a hunk that the line-count based parser below does not expect.
+const PATCH_FLAGS = [
+  '-U0', '--inter-hunk-context=0', '--text', '--no-renames', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/',
+] as const;
 const shortCommit = (hash: string): string => hash.slice(0, 12);
 
 async function scanHistory(root: string, allow: ReadonlySet<string>, byteCap: number): Promise<{ findings: Finding[]; stats: HistoryStats; notes: string[] }> {
@@ -728,7 +876,7 @@ async function scanHistory(root: string, allow: ReadonlySet<string>, byteCap: nu
   bytesRead += patch.stdout.length;
   truncated ||= patch.truncated;
   const scanned = scanPatchText(patch.stdout.toString('utf8'), allow, (c) => ` [in history, commit ${shortCommit(c)}]`);
-  findings.push(...scanned.findings);
+  appendAll(findings, scanned.findings);
   if (!patch.truncated) {
     for (const key of [...markerRequired].sort(cmp)) {
       if (scanned.markerSeen.has(key)) continue;
@@ -773,6 +921,78 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
 
 type FileOutcome = { kind: 'scanned' | 'large' | 'binary' | 'nonregular' | 'allowed'; findings: Finding[] };
 
+// ---- content signatures and text decoding ---------------------------------------------------------------------------------
+
+/** `target.push(...items)` throws RangeError once `items` exceeds the engine's argument limit; append in a loop instead. */
+function appendAll<T>(target: T[], items: readonly T[]): void {
+  for (const item of items) target.push(item);
+}
+
+const SIGNATURE_BYTES = 16;
+
+function startsWithBytes(head: Buffer, bytes: readonly number[]): boolean {
+  if (head.length < bytes.length) return false;
+  for (let i = 0; i < bytes.length; i++) if (head[i] !== bytes[i]) return false;
+  return true;
+}
+
+interface FileSignature {
+  label: string;
+  /** ZIP containers: legitimate document/package formats share the signature and are told apart by extension. */
+  zipContainer?: true;
+  matches: (head: Buffer) => boolean;
+}
+
+// Magic numbers of the file types the path rules forbid by NAME, so renaming one (`chats.sqlite` -> `chats.dat`) or
+// dropping its extension does not get it past the scan. Only unambiguous signatures: a text file cannot start with these.
+const FILE_SIGNATURES: readonly FileSignature[] = [
+  { label: 'SQLite database', matches: (h) => startsWithBytes(h, [...Buffer.from('SQLite format 3\u0000', 'latin1')]) },
+  { label: 'ZIP archive', zipContainer: true, matches: (h) => startsWithBytes(h, [0x50, 0x4b, 0x03, 0x04]) || startsWithBytes(h, [0x50, 0x4b, 0x05, 0x06]) },
+  { label: 'gzip stream', matches: (h) => startsWithBytes(h, [0x1f, 0x8b, 0x08]) },
+  { label: '7-Zip archive', matches: (h) => startsWithBytes(h, [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]) },
+  { label: 'RAR archive', matches: (h) => startsWithBytes(h, [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07]) },
+  { label: 'xz stream', matches: (h) => startsWithBytes(h, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) },
+  { label: 'zstd frame', matches: (h) => startsWithBytes(h, [0x28, 0xb5, 0x2f, 0xfd]) },
+  { label: 'bzip2 stream', matches: (h) => h.length >= 10 && /^BZh[1-9]1AY&SY$/.test(h.toString('latin1', 0, 10)) },
+];
+
+const ZIP_CONTAINER_EXTENSIONS: readonly string[] = [
+  '.docx', '.xlsx', '.pptx', '.odt', '.ods', '.odp', '.jar', '.war', '.ear', '.aar', '.apk', '.epub', '.vsix', '.nupkg', '.whl', '.xpi', '.crx', '.ipa', '.egg',
+];
+
+function signatureFinding(path: string, head: Buffer): Finding | null {
+  const base = foldBackupSuffix(pathContext(path).base);
+  for (const sig of FILE_SIGNATURES) {
+    if (!sig.matches(head)) continue;
+    if (sig.zipContainer === true && ZIP_CONTAINER_EXTENSIONS.some((e) => base.endsWith(e))) return null;
+    return { rule: 'forbidden-file-signature', path, detail: `file content is a ${sig.label} although its name does not say so; databases and archives must not be committed under any name` };
+  }
+  return null;
+}
+
+async function readHead(abs: string): Promise<Buffer> {
+  const handle = await open(abs, 'r');
+  try {
+    const buf = Buffer.alloc(SIGNATURE_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, SIGNATURE_BYTES, 0);
+    return buf.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Decode file bytes as text, or return null when they are binary (contain NUL bytes). UTF-16 text with a byte-order
+ * mark (PowerShell redirection, Windows editors) contains NULs by construction but is text, so it is decoded, not skipped.
+ */
+function decodeText(buf: Buffer): string | null {
+  const evenEnd = buf.length - ((buf.length - 2) % 2);
+  if (buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2, Math.max(2, evenEnd)).toString('utf16le');
+  if (buf[0] === 0xfe && buf[1] === 0xff) return Buffer.from(buf.subarray(2, Math.max(2, evenEnd))).swap16().toString('utf16le');
+  if (buf.includes(0)) return null;
+  return buf.toString('utf8');
+}
+
 async function scanOneFile(root: string, path: string, allow: ReadonlySet<string>, maxFileBytes: number): Promise<FileOutcome> {
   if (allow.has(path)) return { kind: 'allowed', findings: [] };
   const findings = pathRuleFindings(path);
@@ -790,7 +1010,9 @@ async function scanOneFile(root: string, path: string, allow: ReadonlySet<string
   try {
     st = await lstat(abs);
   } catch (e) {
-    if (errorCode(e) === 'ENOENT') return { kind: 'nonregular', findings }; // indexed but deleted from the work tree; staged diff covers its content
+    // Indexed but deleted from the work tree: path rules above still apply, staged changes are covered by the staged-diff
+    // pass, and content that is only committed is covered by --history (this scan reads the work tree, not HEAD).
+    if (errorCode(e) === 'ENOENT') return { kind: 'nonregular', findings };
     findings.push({ rule: 'unreadable-file', path, detail: `could not inspect file (${errorCode(e) ?? 'error'}); content was not scanned` });
     return { kind: 'nonregular', findings };
   }
@@ -801,8 +1023,23 @@ async function scanOneFile(root: string, path: string, allow: ReadonlySet<string
   }
   // Size is checked here from stat for files whose text is never decoded; scanned text gets the same check inside textFindings.
   const sizeFinding = fixtureSizeFinding(path, st.size);
+  // A file whose NAME already gives it away is not reported a second time for its content signature.
+  const nameGivesItAway = findings.some((f) => f.rule === 'forbidden-extension');
   if (st.size > maxFileBytes) {
     if (sizeFinding !== null) findings.push(sizeFinding);
+    if (markerRequired) {
+      // Nothing was read, so the marker cannot be verified: fail closed instead of waving the file through.
+      findings.push(markerMissingFinding(path, 'raw-export-shaped fixture is larger than the scan limit, so the synthetic-fixture marker cannot be verified'));
+    }
+    if (!nameGivesItAway) {
+      // The body is not read, but its first bytes are: a renamed database or archive is exactly the kind of file that is large.
+      try {
+        const sig = signatureFinding(path, await readHead(abs));
+        if (sig !== null) findings.push(sig);
+      } catch (e) {
+        findings.push({ rule: 'unreadable-file', path, detail: `could not read file (${errorCode(e) ?? 'error'}); content was not scanned` });
+      }
+    }
     return { kind: 'large', findings };
   }
 
@@ -813,14 +1050,19 @@ async function scanOneFile(root: string, path: string, allow: ReadonlySet<string
     findings.push({ rule: 'unreadable-file', path, detail: `could not read file (${errorCode(e) ?? 'error'}); content was not scanned` });
     return { kind: 'nonregular', findings };
   }
-  if (buf.includes(0)) {
+  if (!nameGivesItAway) {
+    const sig = signatureFinding(path, buf.subarray(0, SIGNATURE_BYTES));
+    if (sig !== null) findings.push(sig);
+  }
+  const text = decodeText(buf);
+  if (text === null) {
     if (sizeFinding !== null) findings.push(sizeFinding);
     if (markerRequired && !buf.includes(SYNTHETIC_MARKER)) {
       findings.push(markerMissingFinding(path, 'raw-export-shaped fixture is binary and does not contain the synthetic-fixture marker'));
     }
     return { kind: 'binary', findings };
   }
-  findings.push(...textFindings(path, buf.toString('utf8'), buf.length));
+  appendAll(findings, textFindings(path, text, buf.length));
   return { kind: 'scanned', findings };
 }
 
@@ -850,7 +1092,7 @@ export async function scanRepo(root: string, opts: RepoScanOptions = {}): Promis
   const counts = { scanned: 0, large: 0, binary: 0, nonregular: 0, allowed: 0 };
   for (const o of outcomes) {
     counts[o.kind]++;
-    findings.push(...o.findings);
+    appendAll(findings, o.findings);
   }
   const notes: string[] = [];
 
@@ -866,8 +1108,8 @@ export async function scanRepo(root: string, opts: RepoScanOptions = {}): Promis
   let history: HistoryStats | null = null;
   if (opts.history === true) {
     const h = await scanHistory(rootAbs, allow, byteCap);
-    findings.push(...h.findings);
-    notes.push(...h.notes);
+    appendAll(findings, h.findings);
+    appendAll(notes, h.notes);
     history = h.stats;
   }
 

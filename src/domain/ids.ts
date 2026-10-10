@@ -7,11 +7,12 @@
  *
  * Error-code policy (applied consistently, asserted by test/domain/ids.test.ts):
  *   INVALID_ARGUMENT  the argument is not a string at all (caller bug)
- *   INVALID_URL       the text is not a well-formed absolute https URL: empty, > 2048 chars, control characters
- *                     (incl. NUL), backslashes, no scheme, `https:` without `//`, empty host
+ *   INVALID_URL       the text is not a well-formed, canonical absolute https URL: empty, > 2048 chars, control
+ *                     characters (incl. NUL), backslashes, percent-encoding anywhere in the path (module spec: "percent-
+ *                     encoded or backslash path tricks"), no scheme, `https:` without `//`, empty host
  *   UNSUPPORTED_URL   well-formed but not the single accepted form: other scheme, other host (www., chat.openai.com,
- *                     look-alikes), userinfo, explicit port, any path other than `/c/<segment>[/]`, percent-encoding in
- *                     the path, extra path segments / dot segments after `/c/`
+ *                     look-alikes), userinfo, explicit port, any path other than `/c/<segment>[/]`, extra path segments /
+ *                     dot segments after `/c/`
  *   INVALID_UUID      the URL shape is right but the single `/c/<segment>` is not a UUID (wrong length, non-hex, ...);
  *                     also used for a bare string that is not a UUID
  *
@@ -57,7 +58,16 @@ export interface ParsedConversationRef {
   canonicalUrl?: string;
 }
 
-export function isUuid(s: unknown): s is string {
+/**
+ * true iff `s` is exactly a 36-character 8-4-4-4-12 UUID string (any case).
+ *
+ * Two signatures on purpose: for a `string` argument the result is a plain boolean, because a type predicate `s is string`
+ * would narrow a string that is NOT a UUID to `never` in the false branch; for any other (e.g. `unknown`) argument it
+ * narrows to `string` on success.
+ */
+export function isUuid(s: string): boolean;
+export function isUuid(s: unknown): s is string;
+export function isUuid(s: unknown): boolean {
   return typeof s === 'string' && s.length === 36 && UUID_RE.test(s);
 }
 
@@ -152,8 +162,9 @@ export function parseChatGptUrl(input: string): ParsedChatGptUrl {
   }
 
   // Percent-encoding is never part of the accepted shape; refusing it removes every decode-ambiguity trick
-  // (%2e%2e, %2F, %63 for "c", encoded hex digits inside the uuid).
-  if (path.includes('%')) fail('UNSUPPORTED_URL', 'Percent-encoded paths are not supported.', 'percent_encoding');
+  // (%2e%2e, %2F, %63 for "c", encoded hex digits inside the uuid). Like backslashes and control characters it makes the
+  // text a non-canonical URL, so it is INVALID_URL (module spec), not UNSUPPORTED_URL.
+  if (path.includes('%')) fail('INVALID_URL', 'Percent-encoded paths are not supported.', 'percent_encoding');
   // Case-sensitive "/c/": covers "", "/", "/share/...", "/g/.../c/...", "//c/...", "/C/..." and "/c".
   if (!path.startsWith('/c/')) fail('UNSUPPORTED_URL', 'Only /c/<uuid> conversation links are supported (share links and other paths are not).', 'path');
   let segment = path.slice(3);

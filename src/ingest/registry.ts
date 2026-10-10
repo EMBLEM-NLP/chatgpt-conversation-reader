@@ -22,9 +22,13 @@ export type AdapterId = 'chatgpt' | 'claude';
 
 export const ADAPTER_IDS: readonly AdapterId[] = Object.freeze(['chatgpt', 'claude'] as AdapterId[]);
 
-/** Adapters are stateless, so one shared instance each is safe. */
-const CHATGPT_ADAPTER: ConversationSourceAdapter = new ChatGPTExportAdapter();
-const CLAUDE_ADAPTER: ConversationSourceAdapter = new ClaudeExportAdapter();
+/**
+ * Adapters are stateless, so one shared instance each is safe. They are FROZEN: the instances are process-wide, and a
+ * caller that could assign `provenance`/`provider` would relabel every later import and `listAdapters()` result.
+ * (ChatGPTExportAdapter only writes its fields in its constructor, so freezing it afterwards is safe.)
+ */
+const CHATGPT_ADAPTER: ConversationSourceAdapter = Object.freeze(new ChatGPTExportAdapter());
+const CLAUDE_ADAPTER: ConversationSourceAdapter = Object.freeze(new ClaudeExportAdapter());
 
 export function getAdapter(id: AdapterId): ConversationSourceAdapter {
   // A switch (not an object lookup) so ids such as "__proto__" or "constructor" can never resolve to something inherited.

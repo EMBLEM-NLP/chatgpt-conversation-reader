@@ -128,7 +128,9 @@ describe('allow list mechanics on scanPaths', () => {
     assert.deepEqual(rulesFor('fixtures/user.json', ['fixtures/user.json']), []);
     assert.deepEqual(rulesFor('fixtures/other/user.json', ['fixtures/user.json']), ['forbidden-filename']);
     assert.deepEqual(rulesFor('x/fixtures/user.json', ['fixtures/user.json']), ['forbidden-filename']);
-    assert.deepEqual(rulesFor('fixtures/user.json.bak', ['fixtures/user.json']), []); // different, harmless name
+    // A backup copy is not a harmless name: it holds the same data, so the exact-path entry must not cover it.
+    assert.deepEqual(rulesFor('fixtures/user.json.bak', ['fixtures/user.json']), ['forbidden-filename']);
+    assert.deepEqual(rulesFor('fixtures/user.json.md', ['fixtures/user.json']), []);
   });
 
   it('is case-sensitive and does not match prefixes', () => {

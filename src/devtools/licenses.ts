@@ -70,11 +70,14 @@ function legacyEntry(v: unknown): string | null {
   return null;
 }
 
+/** Declarations that state "no license" or nothing at all; they identify no license, so the LICENSE file is consulted. */
+const NO_LICENSE_PLACEHOLDER = /^(?:unknown|none|noassertion|no licen[sc]e|n\/a)$/i;
+
 /**
  * Reads the declared license from a parsed package.json. Handles the modern string, the legacy `{ type }` object,
  * and the legacy `licenses: [...]` array (documented by npm as alternatives, hence joined with OR). Returns null
  * when nothing usable is declared. "SEE LICENSE IN <file>" and a literal "unknown" identify no license, so they
- * count as absent and the LICENSE file is consulted instead.
+ * and the placeholders NONE / NOASSERTION / "no license" / N/A count as absent and the LICENSE file is consulted instead.
  */
 export function licenseFromPackageJson(pkg: unknown): string | null {
   if (!isRecord(pkg)) return null;
@@ -92,7 +95,7 @@ export function licenseFromPackageJson(pkg: unknown): string | null {
     }
     if (parts.length === 0) continue;
     const joined = parts.length === 1 ? (parts[0] ?? '') : `(${parts.join(' OR ')})`;
-    if (/^SEE LICENSE IN\b/i.test(joined) || /^unknown$/i.test(joined)) continue;
+    if (/^SEE LICENSE IN\b/i.test(joined) || NO_LICENSE_PLACEHOLDER.test(joined)) continue;
     return joined;
   }
   return null;
@@ -107,7 +110,25 @@ function normalizeWords(text: string): string {
   return text.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
 
-const COPYRIGHT_LINE = /^(?:copyright\s*(?:\(c\)|©|\d{4})|\(c\)\s|©)/i;
+const COPYRIGHT_YEAR_LINE = /^(?:copyright\s*(?:\(c\)|©|\d{4})|\(c\)\s|©)/i;
+/** A year-less "Copyright Holder" notice is only believed before the license body starts: wrapped body text can begin with "copyright". */
+const COPYRIGHT_HOLDER_LINE = /^copyright\b/i;
+/**
+ * A copyright or title line may be dropped only if it is a plain notice. Text written next to the copyright line
+ * ("Copyright 2020 Foo. Commercial use requires a paid license.") is a condition, not a notice: keeping it in the body
+ * makes the text fail the canonical match, so the package stays "unknown" instead of being asserted permissive.
+ */
+const RESTRICTIVE_NOTICE =
+  /\b(?:non[- ]?commercial|commercial|prohibit\w*|forbid\w*|restrict\w*|except|only|not|never|without|unless|exclusive\w*|military|educational|personal|research|academic|resale|sell|redistribut\w*|require\w*|provided|condition\w*|subject)\b/i;
+/** Extra words that make a *copyright* line suspicious (a title legitimately says "License"). */
+const RESTRICTIVE_COPYRIGHT_EXTRA = /\b(?:licen[sc]\w*|permission|permit\w*|shall|must|may)\b/i;
+const COPYRIGHT_NOTICE_MAX_CHARS = 200;
+
+function isCopyrightNotice(line: string, seenBody: boolean): boolean {
+  if (/^all rights reserved\.?$/i.test(line)) return true;
+  if (line.length > COPYRIGHT_NOTICE_MAX_CHARS || RESTRICTIVE_NOTICE.test(line) || RESTRICTIVE_COPYRIGHT_EXTRA.test(line)) return false;
+  return COPYRIGHT_YEAR_LINE.test(line) || (!seenBody && COPYRIGHT_HOLDER_LINE.test(line));
+}
 const TITLE_LINE = /^\(?(?:the\s+)?(?:mit|isc|bsd[ \-\w]{0,24})(?:\s+licen[sc]e)?(?:\s*\([^)]{1,20}\))?\)?\s*:?$|^licen[sc]e\s*:?$/i;
 const LIST_MARKER = /^\s*(?:\d{1,2}[.)]|[*•-])\s+/;
 
@@ -118,8 +139,8 @@ function licenseBodyWords(text: string): string {
   for (const raw of text.replace(/^﻿/, '').split(/\r\n|\r|\n/)) {
     const line = raw.trim();
     if (line === '') continue;
-    if (COPYRIGHT_LINE.test(line) || /^all rights reserved\.?$/i.test(line)) continue;
-    if (!seenBody && TITLE_LINE.test(line)) continue;
+    if (isCopyrightNotice(line, seenBody)) continue;
+    if (!seenBody && TITLE_LINE.test(line) && !RESTRICTIVE_NOTICE.test(line)) continue;
     seenBody = true;
     kept.push(line.replace(LIST_MARKER, ''));
   }
@@ -269,12 +290,16 @@ const FAMILY_BY_IDENTIFIER: ReadonlyArray<{ family: string; test: RegExp }> = [
   { family: 'CC-BY-NC', test: /^cc[ _-]by[ _-]nc/i },
   { family: 'non-commercial', test: /non[ _-]?commercial/i },
   { family: 'UNLICENSED', test: /^unlicensed$/i },
-  { family: 'proprietary', test: /^(?:proprietary|commercial)$/i },
+  { family: 'proprietary', test: /^(?:proprietary|commercial|private|closed[ _-]?source)$/i },
   { family: 'custom license reference', test: /^licenseref-/i },
 ];
 
 /** Matched against the whole string, for free-text license names that are not SPDX identifiers. */
 const FAMILY_BY_PHRASE: ReadonlyArray<{ family: string; test: RegExp }> = [
+  { family: 'CC-BY-NC', test: /\bcc[ _-]?by[ _-]?nc\b/i },
+  { family: 'proprietary', test: /\ball rights reserved\b/i },
+  { family: 'proprietary', test: /\bclosed[ -]source\b/i },
+  { family: 'proprietary', test: /\b(?:personal|educational|internal|research|academic|evaluation)[ -]use[ -]only\b/i },
   { family: 'GPL', test: /\bgeneral public licen[sc]e\b/i },
   { family: 'SSPL', test: /\bserver side public licen[sc]e\b/i },
   { family: 'BUSL', test: /\bbusiness source licen[sc]e\b/i },
@@ -287,6 +312,8 @@ function familyOfIdentifier(id: string): string | null {
   }
   return null;
 }
+
+const SPDX_IDSTRING = /^[A-Za-z0-9.+:_-]+$/;
 
 type SpdxNode = { op: 'id'; id: string } | { op: 'and' | 'or'; items: SpdxNode[] };
 
@@ -308,11 +335,14 @@ function parseSpdx(input: string): SpdxNode | null {
       pos++;
       return inner;
     }
+    // An SPDX idstring is letters, digits, '.', '-' (and '+', ':' for LicenseRef/DocumentRef). A token such as
+    // "MIT/GPL-3.0" or "MIT,GPL-3.0" is two licenses glued together: not an expression, so it is checked word by word.
+    if (!SPDX_IDSTRING.test(t)) return null;
     pos++;
     if (isOp(tokens[pos], 'WITH')) {
       pos++;
       const exception = tokens[pos];
-      if (exception === undefined || exception === '(' || exception === ')') return null;
+      if (exception === undefined || !SPDX_IDSTRING.test(exception)) return null;
       pos++;
     }
     return { op: 'id', id: t };
@@ -379,6 +409,8 @@ interface LockCandidate {
   lockVersion: string | undefined;
   dev: boolean;
   optional: boolean;
+  /** The `license` npm copied from the package's manifest into the lockfile entry, if any. */
+  lockLicense: string | null;
 }
 
 async function loadLockPackages(root: string): Promise<Record<string, unknown>> {
@@ -394,7 +426,7 @@ async function loadLockPackages(root: string): Promise<Record<string, unknown>> 
   }
   let lock: unknown;
   try {
-    lock = JSON.parse(text);
+    lock = JSON.parse(text.replace(/^\uFEFF/, '')); // npm tolerates a byte order mark written by an editor
   } catch (cause) {
     throw new GcrError('INVALID_ARGUMENT', 'package-lock.json is not valid JSON.', { details: { file: 'package-lock.json' }, cause });
   }
@@ -428,6 +460,7 @@ function candidatesFrom(packages: Record<string, unknown>): LockCandidate[] {
       // `devOptional` (dev tree OR an optional runtime edge) is deliberately treated as runtime: when in doubt, report more.
       dev: entry['dev'] === true,
       optional: entry['optional'] === true,
+      lockLicense: licenseFromPackageJson({ license: entry['license'] }),
     });
   }
   return out;
@@ -446,7 +479,7 @@ async function readPackageJson(dir: string): Promise<Record<string, unknown> | n
   const text = await readSmallText(join(dir, 'package.json'), MAX_PACKAGE_JSON_BYTES);
   if (text === null) return null;
   try {
-    const parsed: unknown = JSON.parse(text);
+    const parsed: unknown = JSON.parse(text.replace(/^\uFEFF/, '')); // some published packages carry a BOM; npm reads them
     return isRecord(parsed) ? parsed : null;
   } catch {
     return null; // corrupt package.json: reported as unknown
@@ -458,7 +491,13 @@ async function inspect(root: string, c: LockCandidate): Promise<LicensedPackage 
   const pkg = dir === null ? null : await readPackageJson(dir);
   if (dir === null || pkg === null) {
     // Platform-specific optional packages are legitimately absent; anything else missing from disk is a gap to show.
-    if (c.optional) return null;
+    // An absent optional package is still listed when the lockfile's copy of its manifest declares a non-permissive license,
+    // so that the release gate cannot be dodged by building on a platform that does not install it.
+    if (c.optional) {
+      return c.lockLicense !== null && isNonPermissiveLicense(c.lockLicense)
+        ? { name: c.name, version: c.lockVersion ?? UNKNOWN, license: c.lockLicense, source: 'package.json', dev: c.dev }
+        : null;
+    }
     return { name: c.name, version: c.lockVersion ?? UNKNOWN, license: UNKNOWN, source: 'unknown', dev: c.dev };
   }
   const version = textOrNull(pkg['version']) ?? c.lockVersion ?? UNKNOWN;
@@ -513,7 +552,10 @@ export async function collectLicenses(root: string): Promise<LicenseCollection> 
       continue;
     }
     const keep = existing.source === 'unknown' ? existing : p.source === 'unknown' ? p : existing;
-    merged.set(id, { ...keep, dev: existing.dev && p.dev });
+    // Two copies of the same name@version that declare different licenses are an anomaly (a modified copy): do not
+    // pick one, let a human look.
+    const conflict = existing.source !== 'unknown' && p.source !== 'unknown' && existing.license !== p.license;
+    merged.set(id, conflict ? { ...existing, license: UNKNOWN, source: 'unknown', dev: existing.dev && p.dev } : { ...keep, dev: existing.dev && p.dev });
   }
   const packages = [...merged.values()].sort((a, b) => cmp(a.name, b.name) || cmp(a.version, b.version));
 
@@ -534,9 +576,21 @@ export function blockingPackages(result: LicenseCollection): LicensedPackage[] {
   return result.packages.filter((p) => !p.dev && (p.source === 'unknown' || isNonPermissiveLicense(p.license)));
 }
 
-/** Strips control characters (terminal escape sequences from hostile metadata) and neutralises markdown table syntax. */
+/** Control characters, line separators, bidi overrides/isolates, zero-width and invisible format characters, tag characters. */
+const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\u{e0000}-\u{e007f}]+/gu;
+
+/**
+ * Replaces every run of characters that can drive a terminal or a CI log (ESC sequences, CR/LF that forge extra
+ * log lines such as `::add-mask::`), reorder displayed text (bidi) or hide it (zero-width) by one space. Package
+ * metadata is untrusted: use this for everything that is printed as text.
+ */
+export function sanitizeForTerminal(text: string): string {
+  return text.replace(UNSAFE_TEXT, ' ').trim();
+}
+
+/** Makes metadata safe to print (see sanitizeForTerminal) and neutralises markdown table syntax. */
 function cell(value: string, max = 120): string {
-  const clean = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/[\\|`]/g, '\\$&').trim();
+  const clean = sanitizeForTerminal(value).replace(/[\\|`]/g, '\\$&');
   return clean.length > max ? `${clean.slice(0, max - 3)}...` : clean;
 }
 

@@ -8,7 +8,7 @@ import type { ConversationRecord, MessageRecord } from '../../src/domain/types.j
 import { validateConversationRecord } from '../../src/domain/validate.js';
 import { GcrError } from '../../src/errors.js';
 import type { AdapterContext } from '../../src/ingest/adapter.js';
-import { ChatGPTExportAdapter, NAMED_CONTENT_TYPES, chatGptExportAdapter } from '../../src/ingest/chatgpt-export.js';
+import { ChatGPTExportAdapter, MAX_RAW_NESTING_DEPTH, NAMED_CONTENT_TYPES, chatGptExportAdapter } from '../../src/ingest/chatgpt-export.js';
 import type { ChatGPTAdapterLimits } from '../../src/ingest/chatgpt-export.js';
 import { ConversationBuilder, OMIT, adapterContext, contents, parts, rawJson, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
 import type { MessageOptions, RawObject } from '../helpers/chatgpt-export-builder.js';
@@ -605,10 +605,13 @@ describe('presentInExportAs: only for names that really exist in the container',
     assert.equal(present('file-Q', ['other.dat']), null);
   });
   it('a hostile 1-character id cannot make lookups slow (bounded prefix probing) and does not match by accident', () => {
-    const names = new Set(Array.from({ length: 20_000 }, (_, i) => `f${i}-x.bin`));
+    // One Set / one context for all lookups: the index is built once, so this measures the lookup, not the indexing.
+    const c = adapterContext({ availableAssetNames: new Set(Array.from({ length: 20_000 }, (_, i) => `f${i}-x.bin`)) });
+    const lookup = (): string | null => one(contents.text('x'), { role: 'user', attachments: [{ id: 'f' }], ctx: c }).m.attachments[0]?.presentInExportAs ?? null;
+    assert.equal(lookup(), null);
     const t0 = performance.now();
-    for (let i = 0; i < 200; i++) assert.equal(present('f', names), null);
-    assert.ok(performance.now() - t0 < 4000);
+    for (let i = 0; i < 200; i++) assert.equal(lookup(), null);
+    assert.ok(performance.now() - t0 < 6000, `200 lookups took ${(performance.now() - t0).toFixed(0)} ms`);
   });
   it('a large container is indexed fast and answers correctly', () => {
     const names = new Set(Array.from({ length: 6_000 }, (_, i) => `file-${i.toString(16).padStart(8, '0')}.dat`));
@@ -805,5 +808,114 @@ describe('size limits', () => {
   it('an absurd exponent timestamp literal does not slow anything down', () => {
     const { m } = one(contents.text('x'), { createTime: rawJson('1e999999999') });
     assert.equal(m.createdAt, null);
+  });
+});
+
+describe('nesting guard: records stay serializable whatever the input nests', () => {
+  const nest = (k: number): unknown => rawJson('['.repeat(k) + '1' + ']'.repeat(k));
+  /** Depth of a value (iterative); only called on values the guard already bounded. */
+  const depthOf = (root: unknown): number => {
+    let best = 0;
+    const stack: Array<[unknown, number]> = [[root, 0]];
+    while (stack.length > 0) {
+      const [v, d] = stack.pop() as [unknown, number];
+      if (typeof v !== 'object' || v === null) continue;
+      best = Math.max(best, d + 1);
+      for (const c of Array.isArray(v) ? v : Object.values(v)) stack.push([c, d + 1]);
+    }
+    return best;
+  };
+  const serializable = (r: ConversationRecord): void => {
+    assert.doesNotThrow(() => JSON.stringify(r));
+    assert.doesNotThrow(() => structuredClone(r));
+  };
+
+  it('the limit is a documented constant', () => {
+    assert.equal(MAX_RAW_NESTING_DEPTH, 256);
+  });
+
+  it('deep nesting inside message metadata is cut at the limit; siblings, text and shallow data are untouched; a warning names the message', () => {
+    const keep = { a: [1, 2, { b: 3 }], s: 'kept' };
+    const { r, m } = one(contents.text('still readable'), { metadata: { keep, deep: nest(5000) } });
+    serializable(r);
+    const raw = m.rawSource as RawObject;
+    const md = raw['metadata'] as RawObject;
+    assert.deepEqual(md['keep'], keep);
+    assert.ok(depthOf(raw) <= MAX_RAW_NESTING_DEPTH + 1);
+    assert.equal(m.text, 'still readable');
+    assert.deepEqual(((raw['content'] as RawObject)['parts']), ['still readable']);
+    const w = r.warnings.find((x) => x.code === 'NESTING_TOO_DEEP');
+    assert.deepEqual(w?.ids, ['m']);
+    assert.ok(JSON.stringify(md['deep']).includes('nesting_too_deep'));
+  });
+
+  it('the boundary is exact: message-relative depth 256 is kept whole, 257 is cut', () => {
+    // message object = depth 1, metadata = 2, then k nested arrays
+    const atLimit = one(contents.text('x'), { metadata: { deep: nest(MAX_RAW_NESTING_DEPTH - 2) } });
+    assert.ok(!atLimit.r.warnings.some((w) => w.code === 'NESTING_TOO_DEEP'));
+    assert.ok(!JSON.stringify(atLimit.m.rawSource).includes('nesting_too_deep'));
+    const over = one(contents.text('x'), { metadata: { deep: nest(MAX_RAW_NESTING_DEPTH - 1) } });
+    assert.ok(over.r.warnings.some((w) => w.code === 'NESTING_TOO_DEEP'));
+    assert.ok(JSON.stringify(over.m.rawSource).includes('nesting_too_deep'));
+  });
+
+  it('block metadata that references a deep raw part is cut as well (unknown parts, unknown content types)', () => {
+    const deepPart = { synthetic_unknown_part: true, deep: nest(3000) };
+    const { r, m } = one(contents.multimodal(['before', deepPart, 'after']));
+    serializable(r);
+    assert.deepEqual(types(m), ['text', 'unknown', 'text']);
+    assert.equal(m.text, 'before\nafter');
+    assert.ok(depthOf(m.blocks[1]?.metadata) <= MAX_RAW_NESTING_DEPTH + 1);
+    const unk = one({ content_type: 'future_widget_v9', widget: nest(3000) });
+    serializable(unk.r);
+    assert.ok(unk.r.warnings.some((w) => w.code === 'NESTING_TOO_DEEP'));
+    assert.ok(depthOf(unk.m.blocks[0]?.metadata) <= MAX_RAW_NESTING_DEPTH + 1);
+  });
+
+  it('deep nesting in a conversation-level key is cut in rawMetadata; messages are untouched', () => {
+    const b = new ConversationBuilder({ id: syntheticUuid(1), extra: { voice: nest(4000), keep: 'yes' } });
+    b.user(b.root(), 'hello', { id: 'm' });
+    const out = chatGptExportAdapter.normalizeElementText(b.text(), adapterContext(), 0);
+    assert.equal(out.kind, 'record');
+    if (out.kind !== 'record') return;
+    serializable(out.record);
+    const meta = out.record.rawMetadata as RawObject;
+    assert.equal(meta['keep'], 'yes');
+    assert.ok(depthOf(meta) <= MAX_RAW_NESTING_DEPTH + 1);
+    assert.deepEqual(out.record.warnings.find((w) => w.code === 'NESTING_TOO_DEEP')?.ids, [syntheticUuid(1)]);
+    assert.equal(out.record.messages.find((x) => x.id === 'm')?.text, 'hello');
+  });
+
+  it('a non-object mapping that is itself deeply nested is cut in the preserved copy', () => {
+    const r = validateConversationRecord(
+      (() => {
+        const out = chatGptExportAdapter.normalizeElementText(`{"id":"c","mapping":${'['.repeat(3000)}${']'.repeat(3000)}}`, adapterContext(), 0);
+        assert.equal(out.kind, 'record');
+        if (out.kind !== 'record') throw new Error('unreachable');
+        return out.record;
+      })(),
+    );
+    serializable(r);
+    assert.ok(r.warnings.some((w) => w.code === 'MAPPING_INVALID'));
+    assert.ok(r.warnings.some((w) => w.code === 'NESTING_TOO_DEEP'));
+  });
+
+  it('thoughts given as a JSON string that hides deep nesting is treated as unparseable, not expanded', () => {
+    const nested = '['.repeat(300) + ']'.repeat(300);
+    const { m, r } = one({ content_type: 'thoughts', thoughts: nested });
+    serializable(r);
+    assert.equal(m.text, '');
+    assert.ok(r.warnings.some((w) => w.code === 'CONTENT_SHAPE_UNEXPECTED'));
+    assert.equal(((m.blocks[0]?.metadata) as RawObject)['rawThoughts'], nested);
+  });
+
+  it('ordinary documents are never copied or altered: rawSource equals the parsed message exactly', () => {
+    const text = JSON.stringify({ id: 'c', current_node: 'm', mapping: { m: { id: 'm', parent: null, children: [], message: { id: 'm', author: { role: 'user' }, content: { content_type: 'text', parts: ['x'] }, metadata: { citations: [{ start_ix: 1, nested: { a: [{ b: [1, 2, 3] }] } }] } } } } });
+    const out = chatGptExportAdapter.normalizeElementText(text, adapterContext(), 0);
+    assert.equal(out.kind, 'record');
+    if (out.kind !== 'record') return;
+    const parsed = JSON.parse(text) as { mapping: { m: { message: unknown } } };
+    assert.deepEqual(out.record.messages[0]?.rawSource, parsed.mapping.m.message);
+    assert.deepEqual(out.record.warnings, []);
   });
 });

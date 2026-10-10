@@ -68,6 +68,12 @@ export class DisabledOpenAIAPIOwnedAdapter implements OpenAIAPIOwnedAdapter {
   readonly mode = 'D' as const;
   readonly implemented = false;
 
+  constructor() {
+    // `readonly` is compile-time only. Freezing keeps `implemented` false (and the identity fields intact) for every
+    // caller: nobody can switch the disabled adapter on, or attach credentials to it, by assigning properties.
+    Object.freeze(this);
+  }
+
   normalizeElementText(_text: string, _ctx: AdapterContext, _elementIndex: number): AdapterOutcome {
     throw modeDNotImplemented('normalizeElementText');
   }

@@ -9,7 +9,7 @@ import type { ConversationRecord } from '../../src/domain/types.js';
 import { validateConversationRecord } from '../../src/domain/validate.js';
 import { CHATGPT_ADAPTER_INFO_CODES, CHATGPT_ADAPTER_WARNING_CODES, ChatGPTExportAdapter, INFO_PREFIX, chatGptExportAdapter } from '../../src/ingest/chatgpt-export.js';
 import type { ChatGPTAdapterWarningCode, ElementScan } from '../../src/ingest/chatgpt-export.js';
-import { ConversationBuilder, OMIT, adapterContext, contents, ordered, stringify, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
+import { ConversationBuilder, OMIT, adapterContext, contents, ordered, rawJson, stringify, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
 import type { MessageOptions, RawObject } from '../helpers/chatgpt-export-builder.js';
 
 const ctx = adapterContext();
@@ -101,7 +101,7 @@ const CASES: Record<ChatGPTAdapterWarningCode, Case> = {
   },
   KEY_ORDER_FALLBACK: {
     positive: () => {
-      const wrong: ElementScan = { mappingKeys: [], duplicateMappingKeys: [], duplicateBodySha256: new Map(), nodeKeyDuplicates: new Map(), conversationKeyDuplicates: 0 };
+      const wrong: ElementScan = { mappingKeys: [], duplicateMappingKeys: [], duplicateBodySha256: new Map(), nodeKeyDuplicates: new Map(), conversationKeyDuplicates: 0, maxDepth: 1 };
       return norm(convRaw(ordered([['a', node('a', null, [])]])), tiny({ scanner: () => wrong }));
     },
     negative: () => norm(convRaw(ordered([['a', node('a', null, [])]]))),
@@ -165,6 +165,10 @@ const CASES: Record<ChatGPTAdapterWarningCode, Case> = {
   PARTS_TRUNCATED: {
     positive: () => norm(single(contents.text('1', '2')), tiny({ limits: { maxPartsPerMessage: 1 } })),
     negative: () => norm(single(contents.text('1')), tiny({ limits: { maxPartsPerMessage: 1 } })),
+  },
+  NESTING_TOO_DEEP: {
+    positive: () => norm(single(contents.text('x'), { metadata: { deep: rawJson('['.repeat(300) + ']'.repeat(300)) as unknown } })),
+    negative: () => norm(single(contents.text('x'), { metadata: { deep: rawJson('['.repeat(100) + ']'.repeat(100)) as unknown } })),
   },
   NUL_STRIPPED: {
     positive: () => norm(single(contents.text('a\u0000b'))),

@@ -19,8 +19,9 @@
  * What `rawSource` / `rawMetadata` are, and are not (do not rely on byte-exactness): they are the objects produced by
  * JSON.parse. Consequently (1) integers beyond 2^53 and numbers with more than ~17 significant digits are rounded,
  * `1e999` becomes Infinity, (2) of two duplicate object keys only the LAST value survives (the first mapping bodies are
- * only recorded as SHA-256 hashes, see `_gcr.duplicateNodeBodySha256`), and (3) JavaScript orders integer-like keys
- * before other keys. The exact source bytes are identified by `_gcr.sourceElementSha256`.
+ * only recorded as SHA-256 hashes, see `_gcr.duplicateNodeBodySha256`), (3) JavaScript orders integer-like keys
+ * before other keys, and (4) structures nested deeper than MAX_RAW_NESTING_DEPTH levels are cut (NESTING_TOO_DEEP) so the record
+ * can always be serialized. The exact source bytes are identified by `_gcr.sourceElementSha256`.
  */
 import { createHash } from 'node:crypto';
 import { GcrError } from '../errors.js';
@@ -80,6 +81,7 @@ export const CHATGPT_ADAPTER_WARNING_CODES = [
   'CONTENT_MALFORMED',
   'CONTENT_SHAPE_UNEXPECTED',
   'PARTS_TRUNCATED',
+  'NESTING_TOO_DEEP',
   'NUL_STRIPPED',
   'LONE_SURROGATE',
   'TEXT_TRUNCATED',
@@ -134,6 +136,14 @@ const MAX_FRAME_POINTERS = 1000;
 /** A prefix match in the asset index inspects at most this many candidates (bounds the cost of a hostile id such as "f"). */
 const MAX_ASSET_PREFIX_PROBES = 64;
 const MAX_TRACK_DEPTH = 24;
+/**
+ * Deepest nesting kept inside rawSource / rawMetadata / block metadata. WHY: JSON.parse accepts nesting of a million levels,
+ * but JSON.stringify and structuredClone throw RangeError from a few thousand levels on (measured: 5,000 on Node 22), so a
+ * hostile message could make the storage layer crash while it serializes `rawSource`. Real exports nest roughly 10 levels.
+ * Deeper structures are cut at this depth and replaced by a small marker object (NESTING_TOO_DEEP); the SHA-256 of the whole
+ * element still identifies the original text.
+ */
+export const MAX_RAW_NESTING_DEPTH = 256;
 
 function isPlainObject(v: unknown): v is JsonObject {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -292,11 +302,6 @@ class WarningCollector {
     }
   }
 
-  has(code: ChatGPTAdapterWarningCode): boolean {
-    for (const e of this.entries.values()) if (e.code === code) return true;
-    return false;
-  }
-
   toWarnings(): Warning[] {
     const out: Warning[] = [];
     for (const e of this.entries.values()) {
@@ -326,6 +331,8 @@ export interface ElementScan {
   nodeKeyDuplicates: Map<string, number>;
   /** Duplicate keys in the conversation object itself or in nested objects outside the mapping. */
   conversationKeyDuplicates: number;
+  /** Deepest nesting of objects/arrays in the element (the conversation object itself is depth 1). */
+  maxDepth: number;
 }
 
 const K_OTHER = 0;
@@ -403,6 +410,8 @@ export function scanConversationElement(text: string): ElementScan {
   let nodeKeyDuplicates = new Map<string, number>();
   let conversationKeyDuplicates = 0;
   let currentNodeKey = '';
+  let depth = 0;
+  let maxDepth = 0;
 
   let i = 0;
   while (i < n) {
@@ -468,6 +477,7 @@ export function scanConversationElement(text: string): ElementScan {
     }
 
     if (c === 0x7b || c === 0x5b) {
+      if (++depth > maxDepth) maxDepth = depth;
       if (extra > 0 || frames.length >= MAX_TRACK_DEPTH) {
         extra++;
         i++;
@@ -523,6 +533,7 @@ export function scanConversationElement(text: string): ElementScan {
     }
 
     if (c === 0x7d || c === 0x5d) {
+      depth--;
       if (extra > 0) {
         extra--;
       } else {
@@ -556,7 +567,7 @@ export function scanConversationElement(text: string): ElementScan {
   for (const [key, ranges] of dupRanges) {
     if (ranges.length > 0) duplicateBodySha256.set(key, ranges.map(([s, e]) => sha256Hex(text.slice(s, e))));
   }
-  return { mappingKeys, duplicateMappingKeys, duplicateBodySha256, nodeKeyDuplicates, conversationKeyDuplicates };
+  return { mappingKeys, duplicateMappingKeys, duplicateBodySha256, nodeKeyDuplicates, conversationKeyDuplicates, maxDepth };
 }
 
 /**
@@ -633,6 +644,58 @@ function noteTime(t: TimeResult, wc: WarningCollector, id: string): string | nul
   else if (t.issue === 'out_of_range') wc.add('TIMESTAMP_OUT_OF_RANGE', 'A timestamp is not a plausible unix-seconds value (0, negative, non-finite, millisecond-scale or outside 2015..2100) and was set to null; the raw value is kept in rawSource.', id);
   else if (t.issue === 'unparseable') wc.add('TIMESTAMP_UNPARSEABLE', 'A timestamp has an unsupported type or format and was set to null; the raw value is kept in rawSource.', id);
   return t.iso;
+}
+
+// ------------------------------------------------------------------------------------------
+// Nesting guard (see MAX_RAW_NESTING_DEPTH)
+// ------------------------------------------------------------------------------------------
+
+const NESTING_MARKER_KEY = '_gcr_truncated';
+
+/** true iff `root` nests objects/arrays deeper than `limit` levels. Iterative, stops at the first excess. */
+function exceedsDepth(root: unknown, limit: number): boolean {
+  if (typeof root !== 'object' || root === null) return false;
+  const stack: Array<{ v: object; d: number }> = [{ v: root, d: 1 }];
+  while (stack.length > 0) {
+    const { v, d } = stack.pop() as { v: object; d: number };
+    if (d > limit) return true;
+    const values: unknown[] = Array.isArray(v) ? v : Object.values(v);
+    for (const child of values) if (typeof child === 'object' && child !== null) stack.push({ v: child, d: d + 1 });
+  }
+  return false;
+}
+
+/**
+ * Copy of `root` with every container deeper than `limit` levels replaced by `{ _gcr_truncated: 'nesting_too_deep' }`.
+ * Iterative (no recursion), so it is safe on a million-level structure: it never descends past `limit`.
+ */
+function capDepth(root: unknown, limit: number): { value: unknown; capped: boolean } {
+  if (typeof root !== 'object' || root === null) return { value: root, capped: false };
+  let capped = false;
+  const shellOf = (v: object): JsonObject | unknown[] => (Array.isArray(v) ? [] : {});
+  const rootCopy = shellOf(root);
+  const stack: Array<{ src: object; dst: JsonObject | unknown[]; depth: number }> = [{ src: root, dst: rootCopy, depth: 1 }];
+  const copyChild = (v: unknown, depth: number): unknown => {
+    if (typeof v !== 'object' || v === null) return v;
+    if (depth >= limit) {
+      capped = true;
+      return { [NESTING_MARKER_KEY]: 'nesting_too_deep' };
+    }
+    const shell = shellOf(v);
+    stack.push({ src: v, dst: shell, depth: depth + 1 });
+    return shell;
+  };
+  while (stack.length > 0) {
+    const { src, dst, depth } = stack.pop() as { src: object; dst: JsonObject | unknown[]; depth: number };
+    if (Array.isArray(src)) {
+      const out = dst as unknown[];
+      for (let i = 0; i < src.length; i++) out[i] = copyChild(src[i], depth);
+    } else {
+      const obj = src as JsonObject;
+      for (const k of Object.keys(obj)) setOwn(dst as JsonObject, k, copyChild(obj[k], depth));
+    }
+  }
+  return { value: rootCopy, capped };
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1009,6 +1072,8 @@ const handleThoughts: ContentHandler = (content, mc, ct) => {
     if (rawString.length <= MAX_THOUGHTS_JSON_CHARS) {
       try {
         list = JSON.parse(rawString);
+        // The string may hide arbitrarily deep nesting that the raw-text scan cannot see; treat it as unparseable.
+        if (exceedsDepth(list, MAX_RAW_NESTING_DEPTH)) list = undefined;
       } catch {
         // Not JSON: keep the string raw below (reported as a shape warning); never interpret it.
         list = undefined;
@@ -1379,6 +1444,408 @@ function censusForest(parentIdx: Int32Array): { cycleNodes: number; dangling: nu
   return { cycleNodes, dangling, edges };
 }
 
+// ------------------------------------------------------------------------------------------
+// Conversion steps (each a small function over the shared per-conversation state)
+// ------------------------------------------------------------------------------------------
+
+/** State shared by the conversion steps of ONE conversation. */
+interface ConvState {
+  wc: WarningCollector;
+  conversationId: string;
+  limits: ChatGPTAdapterLimits;
+  /** Why completeness cannot be `exported_tree` (static vocabulary; empty = nothing found). */
+  reasons: string[];
+  /** Extra provenance facts that go into rawMetadata._gcr. */
+  gcrExtra: JsonObject;
+  obs: FormatObservations;
+}
+
+function newObservations(): FormatObservations {
+  return {
+    nodesWithChildrenDeclared: 0,
+    nodesWithChildrenAbsent: 0,
+    hasCurrentNode: false,
+    roleCounts: {},
+    messagesWithRecipient: 0,
+    messagesWithStatus: 0,
+    messagesWithModelSlug: 0,
+    hiddenMessages: 0,
+    rootIsLiteralClientCreatedRoot: false,
+  };
+}
+
+/**
+ * Identity: `conversation_id ?? id` (an unusable value counts as missing). Neither usable -> a deterministic id from the
+ * element hash and position. A UUID-shaped id is lower-cased (the canonical form `get <uuid>` looks up); the raw spelling
+ * stays in rawMetadata. Both aliases are kept there, and a difference is reported.
+ */
+function resolveConversationId(conv: JsonObject, sha: string, elementIndex: number, wc: WarningCollector): string {
+  const cidRaw = own(conv, 'conversation_id');
+  const idRaw = own(conv, 'id');
+  const usable = (v: unknown): v is string => typeof v === 'string' && isSafeId(v);
+  const canon = (x: string): string => (isUuid(x) ? x.toLowerCase() : x);
+  const chosenRaw = usable(cidRaw) ? cidRaw : usable(idRaw) ? idRaw : null;
+  if (chosenRaw === null) {
+    const synthesized = `gcr-synth-${sha.slice(0, 32)}-${elementIndex}`;
+    wc.add('CONVERSATION_ID_MISSING', 'The conversation has no usable id or conversation_id; a deterministic id was derived from the element hash and position.', synthesized);
+    return synthesized;
+  }
+  const id = canon(chosenRaw);
+  if (id !== chosenRaw) wc.add('ID_CASE_NORMALIZED', `${INFO_PREFIX}An upper-case UUID conversation id was lower-cased (the raw value is kept in rawMetadata).`, id);
+  if (cidRaw !== undefined && cidRaw !== null && !usable(cidRaw)) unexpected(wc, id, 'conversation_id');
+  if (usable(cidRaw) && usable(idRaw) && canon(cidRaw) !== canon(idRaw)) {
+    wc.add('ID_ALIAS_MISMATCH', 'id and conversation_id differ; conversation_id was used (both are kept in rawMetadata).', [id, sanitizeRef(canon(idRaw))]);
+  }
+  return id;
+}
+
+function readTitle(conv: JsonObject, st: ConvState): string | null {
+  const v = own(conv, 'title');
+  if (typeof v !== 'string') {
+    if (v !== undefined && v !== null) unexpected(st.wc, st.conversationId, 'title');
+    return null;
+  }
+  let title = sanitizeText(v, st.wc, st.conversationId);
+  if (title.length > MAX_TITLE_LENGTH) {
+    title = truncateChars(title, MAX_TITLE_LENGTH);
+    st.wc.add('TEXT_TRUNCATED', 'Text field "title" exceeded its size limit and was truncated; the raw value is kept in rawMetadata.', st.conversationId, 'title');
+  }
+  return title;
+}
+
+/** Conversation-level model: informational default only (`default_model_slug`, else the newer `model_slug`); never copied to messages. */
+function readDefaultModelSlug(conv: JsonObject, st: ConvState): string | null {
+  return (
+    shortString(own(conv, 'default_model_slug'), MAX_SHORT_STRING, st.wc, st.conversationId, 'default_model_slug') ??
+    shortString(own(conv, 'model_slug'), MAX_SHORT_STRING, st.wc, st.conversationId, 'model_slug')
+  );
+}
+
+interface LocatedNodes {
+  mapping: JsonObject | null;
+  /** Mapping keys in FILE order, limited to the node cap. */
+  keys: string[];
+}
+
+/** Finds the mapping and its keys in file order; records why a conversation without a usable mapping or tree cannot be complete. */
+function locateNodes(conv: JsonObject, scan: ElementScan, st: ConvState): LocatedNodes {
+  const mappingVal = own(conv, 'mapping');
+  let keys: string[] = [];
+  let mapping: JsonObject | null = null;
+  if (isPlainObject(mappingVal)) {
+    mapping = mappingVal;
+    const order = resolveNodeOrder(scan.mappingKeys, mapping);
+    keys = order.keys;
+    if (order.fallback) {
+      st.wc.add('KEY_ORDER_FALLBACK', 'The file order of the mapping keys could not be established; the JSON engine order was used for node ordinals.', st.conversationId);
+    }
+  } else {
+    st.wc.add('MAPPING_INVALID', 'The mapping is not an object; the conversation was kept with no messages (the raw value is kept in rawMetadata).', st.conversationId);
+    setOwn(st.gcrExtra, 'unsupportedMapping', mappingVal);
+    st.reasons.push('mapping_invalid');
+  }
+  if (keys.length > st.limits.maxNodesPerConversation) {
+    st.wc.add('TOO_MANY_NODES', `The mapping has ${keys.length} nodes; only the first ${st.limits.maxNodesPerConversation} (file order) were kept.`, st.conversationId);
+    keys = keys.slice(0, st.limits.maxNodesPerConversation);
+    st.reasons.push('node_limit');
+  }
+  if (keys.length === 0 && mapping !== null) st.reasons.push('empty_mapping');
+  return { mapping, keys };
+}
+
+/**
+ * The mapping key is the node identity (never node.id / message.id). A key the domain cannot accept as an identifier (empty,
+ * > 512 chars, control character, lone surrogate) gets a deterministic stand-in derived from the key itself; safe keys are
+ * assigned first so a stand-in can never steal a real key's id.
+ */
+function assignNodeIds(keys: readonly string[], wc: WarningCollector): { ids: string[]; idByKey: Map<string, string> } {
+  const ids: string[] = new Array<string>(keys.length);
+  const used = new Set<string>();
+  keys.forEach((key, k) => {
+    if (isSafeId(key)) {
+      ids[k] = key;
+      used.add(key);
+    }
+  });
+  keys.forEach((key, k) => {
+    if (ids[k] !== undefined) return;
+    const hash = sha256Hex(key).slice(0, 24);
+    let cand = `gcr-node-${hash}`;
+    for (let bump = 1; used.has(cand); bump++) cand = `gcr-node-${hash}-${bump}`;
+    ids[k] = cand;
+    used.add(cand);
+    wc.add('INVALID_NODE_ID', 'A mapping key is not usable as an identifier (empty, too long, or containing control characters); a deterministic stand-in id was used.', cand);
+  });
+  const idByKey = new Map<string, string>();
+  keys.forEach((key, k) => idByKey.set(key, ids[k] as string));
+  return { ids, idByKey };
+}
+
+/** Turns what the raw-text pre-pass found (duplicate keys that JSON.parse hid) into warnings, completeness reasons and body hashes. */
+function reportScanFindings(scan: ElementScan, resolveId: (raw: string) => string, st: ConvState): void {
+  for (const dupKey of scan.duplicateMappingKeys) {
+    st.wc.add('DUPLICATE_NODE_ID', 'A node id occurs more than once in the mapping; like JSON.parse, the LAST body was kept (all bodies are hashed in rawMetadata._gcr.duplicateNodeBodySha256).', resolveId(dupKey));
+  }
+  if (scan.duplicateMappingKeys.length > 0) st.reasons.push('duplicate_node_id');
+  const message = 'An object contains the same key more than once; like JSON.parse, the LAST value was kept.';
+  if (scan.conversationKeyDuplicates > 0) st.wc.add('DUPLICATE_KEY', message, st.conversationId, '', scan.conversationKeyDuplicates);
+  for (const [nodeKey, count] of scan.nodeKeyDuplicates) st.wc.add('DUPLICATE_KEY', message, resolveId(nodeKey), '', count);
+  if (scan.duplicateBodySha256.size > 0) {
+    const entries: JsonObject[] = [];
+    for (const [dupKey, hashes] of scan.duplicateBodySha256) {
+      if (entries.length >= MAX_WARNING_IDS) break;
+      entries.push({ id: resolveId(dupKey), bodySha256: hashes });
+    }
+    setOwn(st.gcrExtra, 'duplicateNodeBodySha256', entries);
+  }
+}
+
+interface BuiltNodes {
+  drafts: NodeDraft[];
+  /** raw mapping key -> index into drafts */
+  idxByKey: Map<string, number>;
+  roleCounts: Map<string, number>;
+  /** Some node declares at least one child: the `children` field is demonstrably in use in this export. */
+  anyNonEmptyDeclared: boolean;
+  malformedParents: number;
+}
+
+/** `parent` is the authoritative edge. A non-string, non-null parent is malformed: the node becomes a root and the damage is reported. */
+function readParent(nodeObj: JsonObject | null, id: string, st: ConvState): { parent: string | null; malformed: boolean } {
+  if (nodeObj === null) return { parent: null, malformed: false };
+  const pv = own(nodeObj, 'parent');
+  if (typeof pv === 'string') return { parent: pv, malformed: false };
+  if (pv === undefined || pv === null) return { parent: null, malformed: false };
+  unexpected(st.wc, id, 'node.parent');
+  return { parent: null, malformed: true };
+}
+
+/** `children` is an optional ordering hint: an array of strings (others dropped and reported), or null when absent / not an array. */
+function readDeclaredChildren(nodeObj: JsonObject | null, id: string, st: ConvState): string[] | null {
+  const cv = nodeObj === null ? undefined : own(nodeObj, 'children');
+  if (!Array.isArray(cv)) {
+    if (cv !== undefined && cv !== null) unexpected(st.wc, id, 'node.children');
+    st.obs.nodesWithChildrenAbsent++;
+    return null;
+  }
+  const declared: string[] = [];
+  for (const c of cv as unknown[]) {
+    if (typeof c === 'string') declared.push(c);
+    else unexpected(st.wc, id, 'node.children[]');
+  }
+  st.obs.nodesWithChildrenDeclared++;
+  return declared;
+}
+
+/** Phase A: one draft (record without edges yet) per kept node, in file order. */
+function buildDrafts(mapping: JsonObject | null, keys: readonly string[], ids: readonly string[], st: ConvState, assets: AssetIndex | null): BuiltNodes {
+  const out: BuiltNodes = { drafts: [], idxByKey: new Map(), roleCounts: new Map(), anyNonEmptyDeclared: false, malformedParents: 0 };
+  const seenMessageIds = new Map<string, string>();
+  for (let k = 0; k < keys.length; k++) {
+    const key = keys[k] as string;
+    const id = ids[k] as string;
+    const rawNode = mapping === null ? undefined : own(mapping, key);
+    let nodeObj: JsonObject | null = null;
+    if (isPlainObject(rawNode)) nodeObj = rawNode;
+    else st.wc.add('NODE_NOT_OBJECT', 'A mapping value is not an object; it was kept as a structural node with no parent.', id);
+
+    const { parent: parentRaw, malformed } = readParent(nodeObj, id, st);
+    if (malformed) out.malformedParents++;
+    const declared = readDeclaredChildren(nodeObj, id, st);
+    if (declared !== null && declared.length > 0) out.anyNonEmptyDeclared = true;
+
+    // Identity cross-checks: recorded, never trusted.
+    const nid = nodeObj === null ? undefined : own(nodeObj, 'id');
+    if (typeof nid === 'string' && nid !== key) st.wc.add('NODE_ID_MISMATCH', 'A node has an id field that differs from its mapping key; the mapping key is the identity.', id);
+
+    const record = buildNodeRecord(rawNode, nodeObj, { id, key, ordinal: k }, seenMessageIds, out.roleCounts, st, assets);
+    const ms = parseIsoUtcToEpochMs(record.createdAt);
+    out.drafts.push({ key, id, ordinal: k, parentRaw, declared, parentIdx: PARENT_ROOT, createdMs: ms === null ? Number.POSITIVE_INFINITY : ms, record });
+    out.idxByKey.set(key, k);
+  }
+  return out;
+}
+
+/** The MessageRecord (message node) or the structural placeholder (`message` null / not an object) of one node. */
+function buildNodeRecord(
+  rawNode: unknown,
+  nodeObj: JsonObject | null,
+  at: { id: string; key: string; ordinal: number },
+  seenMessageIds: Map<string, string>,
+  roleCounts: Map<string, number>,
+  st: ConvState,
+  assets: AssetIndex | null,
+): MessageRecord {
+  const messageVal = nodeObj === null ? undefined : own(nodeObj, 'message');
+  const base = { id: at.id, conversationId: st.conversationId, ordinal: at.ordinal };
+  if (!isPlainObject(messageVal)) {
+    if (messageVal !== undefined && messageVal !== null) st.wc.add('MESSAGE_NOT_OBJECT', 'A node has a message value that is not an object; it was kept as a structural node.', at.id);
+    // A structural node keeps its whole node object as rawSource (a null message has nothing else to preserve).
+    return structuralRecord(base, messageVal === undefined || messageVal === null ? rawNode : messageVal);
+  }
+  const built = buildMessageRecord(messageVal, base, st.wc, st.limits, assets);
+  const mv = own(messageVal, 'id');
+  if (typeof mv === 'string') {
+    if (mv !== at.key) st.wc.add('MESSAGE_ID_MISMATCH', 'A message has an id field that differs from its node key; the node key is the identity.', at.id);
+    const first = seenMessageIds.get(mv);
+    if (first === undefined) seenMessageIds.set(mv, at.id);
+    else st.wc.add('DUPLICATE_MESSAGE_ID', 'The same message.id appears in more than one node.', [first, at.id]);
+  }
+  roleCounts.set(built.facts.role, (roleCounts.get(built.facts.role) ?? 0) + 1);
+  if (built.facts.hasRecipient) st.obs.messagesWithRecipient++;
+  if (built.facts.hasStatus) st.obs.messagesWithStatus++;
+  if (built.facts.hasModel) st.obs.messagesWithModelSlug++;
+  if (built.record.hidden) st.obs.hiddenMessages++;
+  return built.record;
+}
+
+/** Phase B: resolve every parent pointer to an index (root / dangling / node), set parentId, and census cycles and dangling parents. */
+function linkParents(nodes: BuiltNodes, st: ConvState): { cycleNodes: number; dangling: number; edges: number } {
+  const { drafts, idxByKey } = nodes;
+  const parentIdx = new Int32Array(drafts.length);
+  for (let k = 0; k < drafts.length; k++) {
+    const d = drafts[k] as NodeDraft;
+    if (d.parentRaw === null) {
+      d.parentIdx = PARENT_ROOT;
+      d.record.parentId = null;
+      if (d.key === 'client-created-root') st.obs.rootIsLiteralClientCreatedRoot = true;
+    } else {
+      const pi = idxByKey.get(d.parentRaw);
+      d.parentIdx = pi === undefined ? PARENT_DANGLING : pi;
+      d.record.parentId = pi === undefined ? sanitizeRef(d.parentRaw) : (drafts[pi] as NodeDraft).id;
+    }
+    parentIdx[k] = d.parentIdx;
+  }
+  const census = censusForest(parentIdx);
+  if (census.cycleNodes > 0) st.reasons.push('cycle');
+  if (census.dangling > 0) st.reasons.push('missing_parent');
+  if (nodes.malformedParents > 0) st.reasons.push('malformed_parent');
+  return census;
+}
+
+/**
+ * Child lists. The declared list is kept as declared (its order is meaningful: later = newer) and inconsistencies are left for
+ * the domain analyzer to report. Where the source gave none (absent), or gave only empty lists although parent pointers define
+ * edges (the children field is demonstrably unused in this export), the list is DERIVED from the parent pointers, ordered by
+ * (createdAt asc, unknown last; file ordinal; id), with ONE warning per conversation. Returns, per node index, whether anything
+ * names it as parent (for the current-node leaf check).
+ */
+function assignChildren(nodes: BuiltNodes, census: { edges: number }, resolveId: (raw: string) => string, st: ConvState): Uint8Array {
+  const { drafts, idxByKey } = nodes;
+  const treatEmptyAsAbsent = !nodes.anyNonEmptyDeclared && census.edges > 0;
+  const derive = (d: NodeDraft): boolean => d.declared === null || (treatEmptyAsAbsent && d.declared.length === 0);
+  const hasChild = new Uint8Array(drafts.length);
+  for (const d of drafts) if (d.parentIdx >= 0) hasChild[d.parentIdx] = 1;
+
+  let derivedKids: Array<string[] | undefined> = [];
+  if (treatEmptyAsAbsent || drafts.some((d) => d.declared === null)) {
+    derivedKids = new Array<string[] | undefined>(drafts.length);
+    const order = drafts.filter((d) => d.parentIdx >= 0);
+    order.sort((a, b) => (a.createdMs !== b.createdMs ? (a.createdMs < b.createdMs ? -1 : 1) : a.ordinal !== b.ordinal ? a.ordinal - b.ordinal : cmp(a.id, b.id)));
+    for (const d of order) {
+      const list = derivedKids[d.parentIdx];
+      if (list === undefined) derivedKids[d.parentIdx] = [d.id];
+      else list.push(d.id);
+    }
+    if (st.obs.nodesWithChildrenAbsent > 0 || treatEmptyAsAbsent) {
+      st.wc.add(
+        'CHILDREN_ABSENT',
+        treatEmptyAsAbsent && st.obs.nodesWithChildrenAbsent === 0
+          ? "Every 'children' list is empty although parent pointers define edges; child lists were derived from parent pointers."
+          : "Some nodes have no 'children' list (reported for exports since mid-2026); child lists were derived from parent pointers.",
+        st.conversationId,
+      );
+    }
+  }
+  for (let k = 0; k < drafts.length; k++) {
+    const d = drafts[k] as NodeDraft;
+    d.record.childIds = derive(d) ? (derivedKids[k] ?? []) : declaredChildIds(d, idxByKey, resolveId, st);
+  }
+  return hasChild;
+}
+
+/** A declared list as record child ids: repeats dropped (the schema forbids them) and reported; phantom children reported, kept as declared. */
+function declaredChildIds(d: NodeDraft, idxByKey: Map<string, number>, resolveId: (raw: string) => string, st: ConvState): string[] {
+  const declared = d.declared as string[];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let repeated = false;
+  for (const raw of declared) {
+    if (seen.has(raw)) {
+      repeated = true;
+      continue;
+    }
+    seen.add(raw);
+    out.push(resolveId(raw));
+    if (!idxByKey.has(raw)) st.wc.add('CHILD_NOT_FOUND', 'A children list names a node that does not exist; the phantom edge is ignored by the tree analysis.', resolveId(raw));
+  }
+  if (repeated) st.wc.add('DUPLICATE_CHILD_ENTRY', 'A children list names the same child more than once; the repeats were dropped.', d.id);
+  return out;
+}
+
+/** The active-branch pointer counts only if it is a real key of the mapping; anything else is null plus a reason (never a guess). */
+function resolveCurrentNode(conv: JsonObject, nodes: BuiltNodes, hasChild: Uint8Array, st: ConvState): string | null {
+  const cnVal = own(conv, 'current_node');
+  if (cnVal === undefined || cnVal === null) {
+    st.wc.add('NO_CURRENT_NODE', 'The source gives no current_node; the active branch is unknown and is not guessed.', st.conversationId);
+    st.reasons.push('no_current_node');
+    return null;
+  }
+  const ci = typeof cnVal === 'string' ? nodes.idxByKey.get(cnVal) : undefined;
+  if (ci === undefined) {
+    st.wc.add('INVALID_CURRENT_NODE', 'current_node does not name a node of this conversation; the active branch is unknown and is not guessed.', typeof cnVal === 'string' ? sanitizeRef(cnVal) : st.conversationId);
+    st.reasons.push('invalid_current_node');
+    return null;
+  }
+  const id = (nodes.drafts[ci] as NodeDraft).id;
+  if (hasChild[ci] === 1) st.wc.add('CURRENT_NODE_NOT_LEAF', `${INFO_PREFIX}current_node is not a leaf; the active branch passes through it.`, id);
+  return id;
+}
+
+/**
+ * Only runs for elements whose text nests deeper than MAX_RAW_NESTING_DEPTH. Cuts every too-deep structure that the record
+ * keeps by reference (message rawSource, block metadata, rawMetadata) so the whole record can be serialized and cloned safely.
+ */
+function enforceNestingLimit(messages: MessageRecord[], rawMetadata: JsonObject, st: ConvState): JsonObject {
+  const message = `Nesting deeper than ${MAX_RAW_NESTING_DEPTH} levels was cut and replaced by a marker so the record stays serializable; the SHA-256 of the whole element identifies the original.`;
+  for (const m of messages) {
+    let hit = false;
+    if (m.rawSource !== undefined) {
+      const r = capDepth(m.rawSource, MAX_RAW_NESTING_DEPTH);
+      if (r.capped) {
+        m.rawSource = r.value;
+        hit = true;
+      }
+    }
+    for (const b of m.blocks) {
+      if (b.metadata === undefined) continue;
+      const r = capDepth(b.metadata, MAX_RAW_NESTING_DEPTH);
+      if (r.capped) {
+        b.metadata = r.value;
+        hit = true;
+      }
+    }
+    if (hit) st.wc.add('NESTING_TOO_DEEP', message, m.id);
+  }
+  const r = capDepth(rawMetadata, MAX_RAW_NESTING_DEPTH);
+  if (!r.capped) return rawMetadata;
+  st.wc.add('NESTING_TOO_DEEP', message, st.conversationId);
+  return r.value as JsonObject;
+}
+
+/** Every conversation key except `mapping`, plus `_gcr` provenance. A source key named `_gcr` is kept as `_gcr_original`, so it cannot spoof the hash. */
+function buildRawMetadata(conv: JsonObject, sha: string, gcrExtra: JsonObject): JsonObject {
+  const rawMetadata: JsonObject = {};
+  for (const key of Object.keys(conv)) {
+    if (key === 'mapping') continue;
+    setOwn(rawMetadata, key === '_gcr' ? '_gcr_original' : key, conv[key]);
+  }
+  const gcr: JsonObject = { sourceElementSha256: sha };
+  for (const k of Object.keys(gcrExtra)) setOwn(gcr, k, gcrExtra[k]);
+  setOwn(rawMetadata, '_gcr', gcr);
+  return rawMetadata;
+}
+
 export interface ChatGPTAdapterOptions {
   limits?: Partial<ChatGPTAdapterLimits>;
   /** Replaceable key scanner (test seam; the default is scanConversationElement). */
@@ -1451,342 +1918,38 @@ export class ChatGPTExportAdapter implements ConversationSourceAdapter {
 
   private convert(conv: JsonObject, text: string, sha: string, ctx: AdapterContext, elementIndex: number): AdapterOutcome {
     const wc = new WarningCollector();
-    const limits = this.limits;
+    const conversationId = resolveConversationId(conv, sha, elementIndex, wc);
+    const st: ConvState = { wc, conversationId, limits: this.limits, reasons: [], gcrExtra: {}, obs: newObservations() };
 
-    // ---- identity: conversation_id ?? id --------------------------------------------------------------------------
-    const cidRaw = own(conv, 'conversation_id');
-    const idRaw = own(conv, 'id');
-    const usable = (v: unknown): v is string => typeof v === 'string' && isSafeId(v);
-    const canon = (s: string): string => (isUuid(s) ? s.toLowerCase() : s);
-    let conversationId: string;
-    let idWasSynthesized = false;
-    if (usable(cidRaw)) conversationId = canon(cidRaw);
-    else if (usable(idRaw)) conversationId = canon(idRaw);
-    else {
-      conversationId = `gcr-synth-${sha.slice(0, 32)}-${elementIndex}`;
-      idWasSynthesized = true;
-    }
-    const chosenRaw = usable(cidRaw) ? cidRaw : usable(idRaw) ? idRaw : null;
-    if (idWasSynthesized) {
-      wc.add('CONVERSATION_ID_MISSING', 'The conversation has no usable id or conversation_id; a deterministic id was derived from the element hash and position.', conversationId);
-    } else {
-      if (chosenRaw !== null && canon(chosenRaw) !== chosenRaw) {
-        wc.add('ID_CASE_NORMALIZED', `${INFO_PREFIX}An upper-case UUID conversation id was lower-cased (the raw value is kept in rawMetadata).`, conversationId);
-      }
-      if (cidRaw !== undefined && cidRaw !== null && !usable(cidRaw)) unexpected(wc, conversationId, 'conversation_id');
-      if (usable(cidRaw) && usable(idRaw) && canon(cidRaw) !== canon(idRaw)) {
-        wc.add('ID_ALIAS_MISMATCH', 'id and conversation_id differ; conversation_id was used (both are kept in rawMetadata).', [conversationId, sanitizeRef(canon(idRaw))]);
-      }
-    }
-
-    // ---- simple conversation fields ---------------------------------------------------------------------------------
-    const titleVal = own(conv, 'title');
-    let title: string | null = null;
-    if (typeof titleVal === 'string') {
-      title = sanitizeText(titleVal, wc, conversationId);
-      if (title.length > MAX_TITLE_LENGTH) {
-        title = truncateChars(title, MAX_TITLE_LENGTH);
-        wc.add('TEXT_TRUNCATED', 'Text field "title" exceeded its size limit and was truncated; the raw value is kept in rawMetadata.', conversationId, 'title');
-      }
-    } else if (titleVal !== undefined && titleVal !== null) {
-      unexpected(wc, conversationId, 'title');
-    }
+    const title = readTitle(conv, st);
     const createdAt = noteTime(convertTimestamp(own(conv, 'create_time')), wc, conversationId);
     const updatedAt = noteTime(convertTimestamp(own(conv, 'update_time')), wc, conversationId);
-    // Conversation-level model: informational default only. `default_model_slug` first, then the newer `model_slug`.
-    const defaultModelSlug =
-      shortString(own(conv, 'default_model_slug'), MAX_SHORT_STRING, wc, conversationId, 'default_model_slug') ??
-      shortString(own(conv, 'model_slug'), MAX_SHORT_STRING, wc, conversationId, 'model_slug');
+    const defaultModelSlug = readDefaultModelSlug(conv, st);
 
-    // ---- the mapping --------------------------------------------------------------------------------------------------
-    const mappingVal = own(conv, 'mapping');
-    const gcrExtra: JsonObject = {};
-    let nodeKeys: string[] = [];
-    let mapping: JsonObject | null = null;
-    let scan: ElementScan | null = null;
-    const completenessReasons: string[] = [];
-    if (isPlainObject(mappingVal)) {
-      mapping = mappingVal;
-      scan = this.scan(text);
-      const order = resolveNodeOrder(scan.mappingKeys, mapping);
-      nodeKeys = order.keys;
-      if (order.fallback) {
-        wc.add('KEY_ORDER_FALLBACK', 'The file order of the mapping keys could not be established; the JSON engine order was used for node ordinals.', conversationId);
-      }
-    } else {
-      wc.add('MAPPING_INVALID', 'The mapping is not an object; the conversation was kept with no messages (the raw value is kept in rawMetadata).', conversationId);
-      setOwn(gcrExtra, 'unsupportedMapping', mappingVal);
-      completenessReasons.push('mapping_invalid');
-    }
-
-    if (nodeKeys.length > limits.maxNodesPerConversation) {
-      wc.add('TOO_MANY_NODES', `The mapping has ${nodeKeys.length} nodes; only the first ${limits.maxNodesPerConversation} (file order) were kept.`, conversationId);
-      nodeKeys = nodeKeys.slice(0, limits.maxNodesPerConversation);
-      completenessReasons.push('node_limit');
-    }
-    if (nodeKeys.length === 0 && mapping !== null) completenessReasons.push('empty_mapping');
-
-    // ---- node ids: the mapping key is the identity (never node.id / message.id) ------------------------------------
-    const nodeCount = nodeKeys.length;
-    const ids: string[] = new Array<string>(nodeCount);
-    const usedIds = new Set<string>();
-    for (let k = 0; k < nodeCount; k++) {
-      const key = nodeKeys[k] as string;
-      if (isSafeId(key)) {
-        ids[k] = key;
-        usedIds.add(key);
-      }
-    }
-    for (let k = 0; k < nodeCount; k++) {
-      if (ids[k] !== undefined) continue;
-      // An unusable key (empty, > 512 chars, control character, lone surrogate) gets a stand-in derived from the key itself.
-      const hash = sha256Hex(nodeKeys[k] as string).slice(0, 24);
-      let cand = `gcr-node-${hash}`;
-      for (let bump = 1; usedIds.has(cand); bump++) cand = `gcr-node-${hash}-${bump}`;
-      ids[k] = cand;
-      usedIds.add(cand);
-      wc.add('INVALID_NODE_ID', 'A mapping key is not usable as an identifier (empty, too long, or containing control characters); a deterministic stand-in id was used.', cand);
-    }
-    const idByKey = new Map<string, string>();
-    for (let k = 0; k < nodeCount; k++) idByKey.set(nodeKeys[k] as string, ids[k] as string);
+    // The raw-text pre-pass always runs: it finds duplicate keys and the file order of the mapping, and measures nesting.
+    const scan = this.scan(text);
+    const located = locateNodes(conv, scan, st);
+    const { ids, idByKey } = assignNodeIds(located.keys, wc);
     const resolveId = (raw: string): string => idByKey.get(raw) ?? sanitizeRef(raw);
+    reportScanFindings(scan, resolveId, st);
 
-    // ---- duplicates found by the pre-pass ----------------------------------------------------------------------------
-    let hadDuplicateNodes = false;
-    if (scan !== null) {
-      for (const dupKey of scan.duplicateMappingKeys) {
-        hadDuplicateNodes = true;
-        wc.add('DUPLICATE_NODE_ID', 'A node id occurs more than once in the mapping; like JSON.parse, the LAST body was kept (all bodies are hashed in rawMetadata._gcr.duplicateNodeBodySha256).', resolveId(dupKey));
-      }
-      if (hadDuplicateNodes) completenessReasons.push('duplicate_node_id');
-      const dupKeyMessage = 'An object contains the same key more than once; like JSON.parse, the LAST value was kept.';
-      if (scan.conversationKeyDuplicates > 0) wc.add('DUPLICATE_KEY', dupKeyMessage, conversationId, '', scan.conversationKeyDuplicates);
-      for (const [nodeKey, count] of scan.nodeKeyDuplicates) wc.add('DUPLICATE_KEY', dupKeyMessage, resolveId(nodeKey), '', count);
-      if (scan.duplicateBodySha256.size > 0) {
-        const entries: JsonObject[] = [];
-        for (const [dupKey, hashes] of scan.duplicateBodySha256) {
-          if (entries.length >= MAX_WARNING_IDS) break;
-          entries.push({ id: resolveId(dupKey), bodySha256: hashes });
-        }
-        setOwn(gcrExtra, 'duplicateNodeBodySha256', entries);
-      }
-    }
+    const nodes = buildDrafts(located.mapping, located.keys, ids, st, getAssetIndex(ctx.availableAssetNames));
+    const census = linkParents(nodes, st);
+    const hasChild = assignChildren(nodes, census, resolveId, st);
+    const currentNodeId = resolveCurrentNode(conv, nodes, hasChild, st);
+    st.obs.hasCurrentNode = currentNodeId !== null;
+    st.obs.roleCounts = Object.fromEntries(nodes.roleCounts);
 
-    // ---- phase A: drafts and records ---------------------------------------------------------------------------------
-    const assets = getAssetIndex(ctx.availableAssetNames);
-    const drafts: NodeDraft[] = [];
-    const idxByKey = new Map<string, number>();
-    const seenMessageIds = new Map<string, string>();
-    const obs: FormatObservations = {
-      nodesWithChildrenDeclared: 0,
-      nodesWithChildrenAbsent: 0,
-      hasCurrentNode: false,
-      roleCounts: {},
-      messagesWithRecipient: 0,
-      messagesWithStatus: 0,
-      messagesWithModelSlug: 0,
-      hiddenMessages: 0,
-      rootIsLiteralClientCreatedRoot: false,
-    };
-    const roleCounts = new Map<string, number>();
-    let malformedParents = 0;
-    let anyNonEmptyDeclared = false;
-
-    for (let k = 0; k < nodeCount; k++) {
-      const key = nodeKeys[k] as string;
-      const id = ids[k] as string;
-      const rawNode = mapping === null ? undefined : own(mapping, key);
-      let nodeObj: JsonObject | null = null;
-      if (isPlainObject(rawNode)) nodeObj = rawNode;
-      else wc.add('NODE_NOT_OBJECT', 'A mapping value is not an object; it was kept as a structural node with no parent.', id);
-
-      // parent: authoritative edge
-      let parentRaw: string | null = null;
-      if (nodeObj !== null) {
-        const pv = own(nodeObj, 'parent');
-        if (typeof pv === 'string') parentRaw = pv;
-        else if (pv !== undefined && pv !== null) {
-          unexpected(wc, id, 'node.parent');
-          malformedParents++;
-        }
-      }
-
-      // children: optional ordering hint
-      let declared: string[] | null = null;
-      const cv = nodeObj === null ? undefined : own(nodeObj, 'children');
-      if (Array.isArray(cv)) {
-        declared = [];
-        for (const c of cv) {
-          if (typeof c === 'string') declared.push(c);
-          else unexpected(wc, id, 'node.children[]');
-        }
-        if (declared.length > 0) anyNonEmptyDeclared = true;
-        obs.nodesWithChildrenDeclared++;
-      } else {
-        if (cv !== undefined && cv !== null) unexpected(wc, id, 'node.children');
-        obs.nodesWithChildrenAbsent++;
-      }
-
-      // identity cross-checks (recorded, not trusted)
-      if (nodeObj !== null) {
-        const nid = own(nodeObj, 'id');
-        if (typeof nid === 'string' && nid !== key) wc.add('NODE_ID_MISMATCH', 'A node has an id field that differs from its mapping key; the mapping key is the identity.', id);
-      }
-
-      // message
-      const messageVal = nodeObj === null ? undefined : own(nodeObj, 'message');
-      const base = { id, conversationId, ordinal: k };
-      let record: MessageRecord;
-      if (isPlainObject(messageVal)) {
-        const built = buildMessageRecord(messageVal, base, wc, limits, assets);
-        record = built.record;
-        const mv = own(messageVal, 'id');
-        if (typeof mv === 'string') {
-          if (mv !== key) wc.add('MESSAGE_ID_MISMATCH', 'A message has an id field that differs from its node key; the node key is the identity.', id);
-          const first = seenMessageIds.get(mv);
-          if (first === undefined) seenMessageIds.set(mv, id);
-          else {
-            wc.add('DUPLICATE_MESSAGE_ID', 'The same message.id appears in more than one node.', [first, id]);
-          }
-        }
-        roleCounts.set(built.facts.role, (roleCounts.get(built.facts.role) ?? 0) + 1);
-        if (built.facts.hasRecipient) obs.messagesWithRecipient++;
-        if (built.facts.hasStatus) obs.messagesWithStatus++;
-        if (built.facts.hasModel) obs.messagesWithModelSlug++;
-        if (record.hidden) obs.hiddenMessages++;
-      } else {
-        if (messageVal !== undefined && messageVal !== null) wc.add('MESSAGE_NOT_OBJECT', 'A node has a message value that is not an object; it was kept as a structural node.', id);
-        // A structural node keeps its whole node object as rawSource (a null message has nothing else to preserve).
-        record = structuralRecord(base, messageVal === undefined || messageVal === null ? rawNode : messageVal);
-      }
-
-      const ms = parseIsoUtcToEpochMs(record.createdAt);
-      drafts.push({ key, id, ordinal: k, parentRaw, declared, parentIdx: PARENT_ROOT, createdMs: ms === null ? Number.POSITIVE_INFINITY : ms, record });
-      idxByKey.set(key, k);
-    }
-
-    // ---- phase B: edges ---------------------------------------------------------------------------------------------
-    const parentIdx = new Int32Array(drafts.length);
-    for (let k = 0; k < drafts.length; k++) {
-      const d = drafts[k] as NodeDraft;
-      if (d.parentRaw === null) {
-        d.parentIdx = PARENT_ROOT;
-        d.record.parentId = null;
-        if (d.key === 'client-created-root') obs.rootIsLiteralClientCreatedRoot = true;
-      } else {
-        const pi = idxByKey.get(d.parentRaw);
-        d.parentIdx = pi === undefined ? PARENT_DANGLING : pi;
-        d.record.parentId = pi === undefined ? sanitizeRef(d.parentRaw) : (drafts[pi] as NodeDraft).id;
-      }
-      parentIdx[k] = d.parentIdx;
-    }
-    const census = censusForest(parentIdx);
-    if (census.cycleNodes > 0) completenessReasons.push('cycle');
-    if (census.dangling > 0) completenessReasons.push('missing_parent');
-    if (malformedParents > 0) completenessReasons.push('malformed_parent');
-
-    // children: declared order when usable, else derived from parent pointers.
-    const treatEmptyAsAbsent = !anyNonEmptyDeclared && census.edges > 0;
-    const derive = (d: NodeDraft): boolean => d.declared === null || (treatEmptyAsAbsent && d.declared.length === 0);
-    let needsDerivation = treatEmptyAsAbsent;
-    for (const d of drafts) {
-      if (d.declared === null) {
-        needsDerivation = true;
-        break;
-      }
-    }
-    let derivedKids: Array<string[] | undefined> = [];
-    const hasChild = new Uint8Array(drafts.length);
-    for (let k = 0; k < drafts.length; k++) {
-      const p = (drafts[k] as NodeDraft).parentIdx;
-      if (p >= 0) hasChild[p] = 1;
-    }
-    if (needsDerivation) {
-      derivedKids = new Array<string[] | undefined>(drafts.length);
-      // Derived order: createdAt asc (unknown last), file ordinal, id.
-      const order: NodeDraft[] = drafts.filter((d) => d.parentIdx >= 0);
-      order.sort((a, b) => (a.createdMs !== b.createdMs ? (a.createdMs < b.createdMs ? -1 : 1) : a.ordinal !== b.ordinal ? a.ordinal - b.ordinal : cmp(a.id, b.id)));
-      for (const d of order) {
-        const list = derivedKids[d.parentIdx];
-        if (list === undefined) derivedKids[d.parentIdx] = [d.id];
-        else list.push(d.id);
-      }
-      if (obs.nodesWithChildrenAbsent > 0 || treatEmptyAsAbsent) {
-        wc.add(
-          'CHILDREN_ABSENT',
-          treatEmptyAsAbsent && obs.nodesWithChildrenAbsent === 0
-            ? "Every 'children' list is empty although parent pointers define edges; child lists were derived from parent pointers."
-            : "Some nodes have no 'children' list (reported for exports since mid-2026); child lists were derived from parent pointers.",
-          conversationId,
-        );
-      }
-    }
-    for (let k = 0; k < drafts.length; k++) {
-      const d = drafts[k] as NodeDraft;
-      if (derive(d)) {
-        d.record.childIds = derivedKids[k] ?? [];
-        continue;
-      }
-      // Declared list: kept as declared (order is meaningful); inconsistencies are reported by the domain analyzer.
-      const declared = d.declared as string[];
-      const out: string[] = [];
-      if (declared.length > 1) {
-        const seen = new Set<string>();
-        let dup = false;
-        for (const raw of declared) {
-          if (seen.has(raw)) {
-            dup = true;
-            continue;
-          }
-          seen.add(raw);
-          out.push(resolveId(raw));
-        }
-        if (dup) wc.add('DUPLICATE_CHILD_ENTRY', 'A children list names the same child more than once; the repeats were dropped.', d.id);
-      } else {
-        for (const raw of declared) out.push(resolveId(raw));
-      }
-      for (const raw of declared) {
-        if (!idxByKey.has(raw)) wc.add('CHILD_NOT_FOUND', 'A children list names a node that does not exist; the phantom edge is ignored by the tree analysis.', resolveId(raw));
-      }
-      d.record.childIds = out;
-    }
-
-    // ---- current node (the active-branch pointer): only a real mapping key counts ---------------------------------------
-    const cnVal = own(conv, 'current_node');
-    let currentNodeId: string | null = null;
-    if (cnVal === undefined || cnVal === null) {
-      wc.add('NO_CURRENT_NODE', 'The source gives no current_node; the active branch is unknown and is not guessed.', conversationId);
-      completenessReasons.push('no_current_node');
-    } else if (typeof cnVal === 'string' && idxByKey.has(cnVal)) {
-      const ci = idxByKey.get(cnVal) as number;
-      currentNodeId = (drafts[ci] as NodeDraft).id;
-      if (hasChild[ci] === 1) {
-        wc.add('CURRENT_NODE_NOT_LEAF', `${INFO_PREFIX}current_node is not a leaf; the active branch passes through it.`, currentNodeId);
-      }
-    } else {
-      wc.add('INVALID_CURRENT_NODE', 'current_node does not name a node of this conversation; the active branch is unknown and is not guessed.', typeof cnVal === 'string' ? sanitizeRef(cnVal) : conversationId);
-      completenessReasons.push('invalid_current_node');
-    }
-    obs.hasCurrentNode = currentNodeId !== null;
-
-    // ---- completeness (FR-09): claim a full tree only when the evidence supports it --------------------------------------
+    // Completeness (FR-09): claim a full tree only when the evidence supports it; otherwise say why.
     let completeness: Completeness = 'exported_tree';
-    if (completenessReasons.length > 0) {
+    if (st.reasons.length > 0) {
       completeness = 'unknown';
-      wc.add('COMPLETENESS_LOWERED', `Completeness was lowered from exported_tree to unknown because: ${completenessReasons.join(', ')}.`, conversationId);
+      wc.add('COMPLETENESS_LOWERED', `Completeness was lowered from exported_tree to unknown because: ${st.reasons.join(', ')}.`, conversationId);
     }
 
-    // ---- raw metadata: every conversation key except `mapping`, plus provenance of the exact input text ------------------
-    const rawMetadata: JsonObject = {};
-    for (const key of Object.keys(conv)) {
-      if (key === 'mapping') continue;
-      setOwn(rawMetadata, key === '_gcr' ? '_gcr_original' : key, conv[key]);
-    }
-    const gcr: JsonObject = { sourceElementSha256: sha };
-    for (const k of Object.keys(gcrExtra)) setOwn(gcr, k, gcrExtra[k]);
-    setOwn(rawMetadata, '_gcr', gcr);
-
-    obs.roleCounts = Object.fromEntries(roleCounts);
+    const messages = nodes.drafts.map((d) => d.record);
+    let rawMetadata = buildRawMetadata(conv, sha, st.gcrExtra);
+    if (scan.maxDepth > MAX_RAW_NESTING_DEPTH) rawMetadata = enforceNestingLimit(messages, rawMetadata, st);
 
     const record: ConversationRecord = {
       provider: 'chatgpt',
@@ -1801,11 +1964,11 @@ export class ChatGPTExportAdapter implements ConversationSourceAdapter {
       updatedAt,
       currentNodeId,
       defaultModelSlug,
-      messages: drafts.map((d) => d.record),
+      messages,
       rawMetadata,
       warnings: wc.toWarnings(),
     };
-    return { kind: 'record', record, observations: obs, sourceElementSha256: sha };
+    return { kind: 'record', record, observations: st.obs, sourceElementSha256: sha };
   }
 }
 

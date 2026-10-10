@@ -512,8 +512,12 @@ describe('conversation identity', () => {
     });
   }
 
-  it('repairs a lone surrogate in an id instead of rejecting the conversation', () => {
+  it('does not reject a conversation whose uuid has a lone surrogate, but never repairs the id lossily (distinct ids must stay distinct)', () => {
+    // Review finding: repairing to U+FFFD mapped "id-\ud800-x" and "id-\ud801-x" to the same id. The ChatGPT adapter's
+    // isSafeId() already treats such an id as unusable; so does this adapter (hash-and-position replacement).
     const r = recordOf(`{"uuid":"id-\\ud800-x","chat_messages":[]}`);
-    assert.equal(r.id, 'id-\uFFFD-x');
+    assert.ok(r.id.startsWith('gcr-synth-'));
+    assert.ok(findWarning(r, 'CONVERSATION_ID_INVALID') !== undefined);
+    assert.equal((r.rawMetadata as Record<string, unknown>)['uuid'], 'id-\ud800-x');
   });
 });

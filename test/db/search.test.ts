@@ -8,7 +8,7 @@ import fc from 'fast-check';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ConversationRecord } from '../../src/domain/types.js';
 import { GcrError } from '../../src/errors.js';
-import { parsePlainQuery } from '../../src/db/cjk.js';
+import { iterateSearchTokens, parsePlainQuery } from '../../src/db/cjk.js';
 import { openDatabase } from '../../src/db/open.js';
 import { Repository } from '../../src/db/repo.js';
 import type { ImportBatchMeta } from '../../src/db/repo.js';
@@ -169,6 +169,38 @@ describe('searchMessages: Unicode term matching (FR-05)', () => {
     for (const q of ['🍕', '❤\uFE0F', '!!!', '   ', '', '""', '*']) {
       assert.throws(() => searchMessages(db, { query: q }), (e) => e instanceof GcrError && e.code === 'INVALID_ARGUMENT', JSON.stringify(q));
     }
+  });
+});
+
+describe('index/query consistency (differential property)', () => {
+  const POOL = [
+    'a', 'B', 'z', '0', '9', ' ', '.', ',', '-', 'e\u0301', '\u00E9', '\u00C9', 'ss', '\u00DF', '\u00F8', 'n\u0303', '\u03A3', '\u03C2', '\u03C3', '\u03AE', '\u0419', '\u0439', '\u0436',
+    '\u65E5', '\u672C', '\u8A9E', '\u3053', '\u30FC', '\u30AC', '\uFF76', '\uD55C', '\uAD6D', '\u{20000}', '\u{20001}', '\uFB01', '\uFF21', '\uFF11', '\u{1F600}', '\u2764\uFE0F', '\u200D', '\u0939\u093F', '\u0928\u094D', '\u0926\u0940',
+  ];
+  const textArb = fc.array(fc.constantFrom(...POOL), { minLength: 1, maxLength: 20 }).map((a) => a.join(''));
+
+  it('any run of consecutive tokens of a message, queried as a phrase, finds that message (property)', async () => {
+    const { db, repo } = await setup([]);
+    let n = 0;
+    await fc.assert(
+      fc.asyncProperty(textArb, fc.nat(), fc.nat(), async (text, a, b) => {
+        const tokens = [...iterateSearchTokens(text)];
+        if (tokens.length === 0) return;
+        const from = a % tokens.length;
+        const to = from + (b % (tokens.length - from));
+        const phrase = tokens.slice(from, to + 1).map((t) => t.norm);
+        const id = `p${n++}`;
+        await repo.importBatch({ batch: { ...META, contentDigest: id }, conversations: [conv(id, [text])] });
+        const query = `"${phrase.join(' ')}"`;
+        const found = searchMessages(db, { query, conversationId: id });
+        assert.equal(found.items.length, 1, `text ${JSON.stringify(text)} should be found by ${JSON.stringify(query)}`);
+        // and with raw text of the same run taken from the ORIGINAL string (what a user would actually type)
+        const typed = text.slice(tokens[from]?.start ?? 0, tokens[to]?.end ?? text.length);
+        const typedHits = searchMessages(db, { query: `"${typed.replaceAll('"', ' ')}"`, conversationId: id });
+        assert.equal(typedHits.items.length, 1, `typing ${JSON.stringify(typed)} should find ${JSON.stringify(text)}`);
+      }),
+      { seed: SEED, numRuns: 250 },
+    );
   });
 });
 
@@ -466,6 +498,20 @@ describe('searchMessages: snippets (plain text from the ORIGINAL message, marker
     assert.equal(buildSnippet('hello world', []), 'hello world');
     assert.equal(buildSnippet('', NEEDLE), '');
     assert.ok(buildSnippet('x '.repeat(500), [{ tokens: ['zebra'], prefix: false }]).length <= 160);
+  });
+});
+
+describe('searchMessages: very large messages', () => {
+  it('finds a match anywhere in a huge message; only the first 200,000 characters are used to build the snippet', async () => {
+    const early = 'filler '.repeat(20_000) + 'earlyneedle ' + 'filler '.repeat(10); // match at ~140k
+    const late = 'filler '.repeat(40_000) + 'lateneedle'; // match at ~280k, beyond the snippet source window
+    const { db } = await setup([conv('c1', [early, late])]);
+    const e = searchMessages(db, { query: 'earlyneedle' }).items[0];
+    assert.ok(e?.snippet.includes(`${MARK_START}earlyneedle${MARK_END}`));
+    const l = searchMessages(db, { query: 'lateneedle' }).items[0];
+    assert.equal(l?.messageId, 'c1-m1', 'the hit itself is still found by the index');
+    assert.ok(l && l.snippet.length <= 160 && !l.snippet.includes(MARK_START), 'fallback: start of the text, no highlight');
+    assert.ok(l?.snippet.startsWith('filler'));
   });
 });
 

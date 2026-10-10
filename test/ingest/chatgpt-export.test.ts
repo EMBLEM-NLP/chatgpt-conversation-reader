@@ -110,6 +110,10 @@ describe('parse failures and skipped entries', () => {
     ['truncated string', '{"id":"x'],
     ['trailing comma', '{"id":"x","mapping":{},}'],
     ['NaN literal', '{"id":"x","mapping":{},"n":NaN}'],
+    ['Infinity literal (Python json.dumps default)', '{"id":"x","mapping":{},"n":Infinity}'],
+    ['-Infinity literal', '{"id":"x","mapping":{},"n":-Infinity}'],
+    ['leading zeros', '{"id":"x","mapping":{},"n":007}'],
+    ['unescaped control character in a string', '{"id":"x","mapping":{},"n":"a\u0001b"}'],
     ['two concatenated documents', '{"mapping":{}}{"mapping":{}}'],
     ['single quotes', "{'id':'x'}"],
     ['trailing garbage', '{"mapping":{}} x'],
@@ -788,5 +792,112 @@ describe('roles, channels, recipients, statuses are open strings', () => {
     const r = rec(convText([['a', node('a', null, [], msg('a', 'r'.repeat(600), 'x'))]], { current_node: 'a' }));
     assert.equal(r.messages[0]?.authorRole.length, 512);
     assert.ok(codes(r).includes('TEXT_TRUNCATED'));
+  });
+});
+
+describe('global prototype pollution cannot leak into parsed data', () => {
+  it('inherited Object.prototype properties are never read as conversation, node, message, content or attachment fields', () => {
+    // Every field is ABSENT in the input, so a naive `obj.field` read would pick up the polluted inherited value.
+    const text = '{"mapping":{"a":{"message":{"author":{"role":"user"},"content":{"content_type":"text"},"metadata":{"attachments":[{"id":"file-A"}]}}},"b":{"message":{"author":{"role":"assistant"},"content":{"content_type":"code"}}}}}';
+    const clean = JSON.stringify(run(text, 5));
+    const polluted: Record<string, unknown> = {
+      id: 'evil-id',
+      conversation_id: 'evil-cid',
+      title: 'evil title',
+      create_time: 1760000000,
+      update_time: 1760000000,
+      current_node: 'a',
+      default_model_slug: 'evil-default',
+      model_slug: 'evil-model',
+      parent: 'ghost-parent',
+      children: ['ghost-child'],
+      message: { id: 'evil-msg' },
+      author: { role: 'evil-role' },
+      role: 'evil-flat-role',
+      name: 'evil-name',
+      channel: 'evil-channel',
+      recipient: 'evil-recipient',
+      status: 'evil-status',
+      content: { content_type: 'text', parts: ['evil text'] },
+      parts: ['evil part'],
+      text: 'evil code text',
+      language: 'evil-lang',
+      metadata: { model_slug: 'evil-model', is_visually_hidden_from_conversation: true },
+      is_visually_hidden_from_conversation: true,
+      attachments: [{ id: 'evil-attachment' }],
+      mime_type: 'evil/type',
+      size: 99,
+      asset_pointer: 'sediment://evil',
+      conversations: [],
+    };
+    const keys = Object.keys(polluted);
+    try {
+      for (const k of keys) Object.defineProperty(Object.prototype, k, { value: polluted[k], configurable: true, enumerable: false, writable: true });
+      assert.equal(JSON.stringify(run(text, 5)), clean, 'output must not change when Object.prototype is polluted');
+    } finally {
+      for (const k of keys) Reflect.deleteProperty(Object.prototype, k);
+    }
+    for (const k of keys) assert.ok(!(k in ({} as RawObject)), `cleanup of ${k}`);
+    assert.equal(JSON.stringify(run(text, 5)), clean);
+  });
+});
+
+describe('edge cases from the format notes that are decided at adapter level', () => {
+  it('EC-25: a 400-digit integer literal (Infinity once parsed) and -0 never become timestamps', () => {
+    const huge = `{"id":"c","create_time":1${'0'.repeat(400)},"update_time":-0,"mapping":{}}`;
+    const r = rec(huge);
+    assert.equal(r.createdAt, null);
+    assert.equal(r.updatedAt, null);
+    assert.ok(codes(r).includes('TIMESTAMP_OUT_OF_RANGE'));
+  });
+
+  it('EC-36: a mapping that is a string, number, boolean or array is a damaged conversation with zero messages (raw kept), never an abort', () => {
+    for (const m of ['"text"', '5', 'true', '[1,2]', '[{"id":"a"}]', 'null']) {
+      const r = rec(`{"id":"c","mapping":${m},"current_node":"a"}`);
+      assert.equal(r.messages.length, 0, m);
+      assert.ok(codes(r).includes('MAPPING_INVALID'), m);
+      assert.equal(r.completeness, 'unknown', m);
+      assert.deepEqual(((r.rawMetadata as RawObject)['_gcr'] as RawObject)['unsupportedMapping'], JSON.parse(m), m);
+    }
+  });
+
+  it('EC-50: a node with message null in the MIDDLE of a chain stays a structural node and the chain continues through it', () => {
+    const text = convText([['r', node('r', null, ['x'])], ['x', node('x', 'r', ['y'], null)], ['y', node('y', 'x', [], msg('y', 'user', 'hi'))]], { current_node: 'y' });
+    const r = rec(text);
+    assert.deepEqual(r.messages.map((m) => m.nodeKind), ['structural_empty', 'structural_empty', 'message']);
+    const t = analyzeTree(r.id, r.messages, r.currentNodeId);
+    assert.equal(t.branches.length, 1);
+    assert.deepEqual(t.branches[0]?.path, ['r', 'x', 'y']);
+    assert.equal(t.branches[0]?.messageCount, 1, 'structural nodes are not messages');
+  });
+
+  it('EC-46: a root that carries a message imports like any other message', () => {
+    const r = rec(convText([['r', node('r', null, ['a'], msg('r', 'system', 'root with message'))], ['a', node('a', 'r', [], msg('a', 'user', 'hi'))]], { current_node: 'a' }));
+    assert.equal(r.messages[0]?.nodeKind, 'message');
+    assert.equal(r.messages[0]?.text, 'root with message');
+    assert.equal(r.completeness, 'exported_tree');
+  });
+
+  it('EC-57: metadata that is an array, string, number or boolean is treated as absent (reported); null is silent', () => {
+    for (const md of ['[]', '"str"', '5', 'true']) {
+      const r = rec(`{"id":"c","current_node":"a","mapping":{"a":{"id":"a","parent":null,"children":[],"message":{"id":"a","author":{"role":"assistant"},"content":{"content_type":"text","parts":["x"]},"metadata":${md}}}}}`);
+      assert.equal(r.messages[0]?.modelSlug, null, md);
+      assert.equal(r.messages[0]?.hidden, false, md);
+      assert.ok(r.warnings.some((w) => w.code === 'UNEXPECTED_FIELD_TYPE' && w.message.includes('message.metadata')), md);
+    }
+    const r = rec('{"id":"c","current_node":"a","mapping":{"a":{"id":"a","parent":null,"children":[],"message":{"id":"a","author":{"role":"assistant"},"content":{"content_type":"text","parts":["x"]},"metadata":null}}}}');
+    assert.deepEqual(r.warnings, []);
+  });
+
+  it('EC-30: bidi controls, U+2028/2029 and private-use citation delimiters in a TITLE are stored verbatim', () => {
+    const title = 'a\u202eb\u2028c\u2029d\ue200e\u200df';
+    const r = rec(`{"id":"c","title":"${title}","mapping":{}}`);
+    assert.equal(r.title, JSON.parse(`"${title}"`));
+  });
+
+  it('EC-63: a conversation with zero messages is a valid (if empty) record', () => {
+    const r = rec('{"id":"c","title":"empty","mapping":{},"current_node":null}');
+    assert.deepEqual(r.messages, []);
+    assert.equal(r.title, 'empty');
   });
 });

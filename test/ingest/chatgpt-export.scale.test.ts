@@ -127,7 +127,7 @@ describe('shapes that break naive implementations', () => {
     assert.equal(t.unreachableIds.length, n);
   });
 
-  it('JSON nested 200,000 levels deep inside metadata does not overflow the adapter or the scanner', () => {
+  it('JSON nested 200,000 levels deep inside metadata does not overflow the adapter or the scanner, and the record stays serializable', () => {
     const depth = 200_000;
     const deep = '['.repeat(depth) + ']'.repeat(depth);
     const text = `{"id":"deep","current_node":"m","mapping":{"m":{"id":"m","parent":null,"message":{"id":"m","author":{"role":"user"},"content":{"content_type":"text","parts":["still readable"]},"metadata":{"deep":${deep}}}},"after":{"id":"after","parent":null,"message":null}}}`;
@@ -135,14 +135,25 @@ describe('shapes that break naive implementations', () => {
     assert.deepEqual(rec.messages.map((m) => m.id), ['m', 'after']);
     assert.equal(rec.messages[0]?.text, 'still readable');
     assert.ok(ms < 10_000, `took ${ms.toFixed(0)} ms`);
-    // The record validates (rawSource is opaque to the validator). Serializing rawSource is the DB layer's job and needs its own depth guard.
     validateConversationRecord(rec);
+    // JSON.stringify / structuredClone throw RangeError from ~5,000 levels; the guard keeps the record far below that
+    assert.doesNotThrow(() => JSON.stringify(rec));
+    assert.doesNotThrow(() => structuredClone(rec));
+    assert.ok(rec.warnings.some((w) => w.code === 'NESTING_TOO_DEEP'));
+  });
+
+  it('a million-level document is handled in bounded time and memory', () => {
+    const depth = 1_000_000;
+    const text = `{"id":"deep","current_node":"m","mapping":{"m":{"id":"m","parent":null,"message":{"id":"m","author":{"role":"user"},"content":{"content_type":"text","parts":["x"]},"metadata":{"deep":${'['.repeat(depth)}${']'.repeat(depth)}}}}}}`;
+    const { value: rec, ms } = timed(() => normalize(text));
+    assert.ok(ms < 15_000, `took ${ms.toFixed(0)} ms`);
+    assert.doesNotThrow(() => JSON.stringify(rec));
   });
 
   it('nodes with 5,000 distinct keys each in message objects (wide, not deep) are fine', () => {
     const wide: Record<string, number> = {};
     for (let i = 0; i < 5000; i++) wide[`k${i}`] = i;
-    const text = stringify({ id: 'wide', current_node: 'm', mapping: ordered([['m', { id: 'm', parent: null, message: { id: 'm', author: { role: 'user' }, content: { content_type: 'text', parts: ['x'] }, metadata: wide } }]]) });
+    const text = stringify({ id: 'wide', current_node: 'm', mapping: ordered([['m', { id: 'm', parent: null, children: [], message: { id: 'm', author: { role: 'user' }, content: { content_type: 'text', parts: ['x'] }, metadata: wide } }]]) });
     const rec = normalize(text);
     assert.deepEqual(rec.warnings, []);
   });

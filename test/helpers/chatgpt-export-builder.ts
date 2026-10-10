@@ -5,23 +5,31 @@
  * privacy scanner requires in committed fixtures.
  *
  * Dependency-free on purpose (only a type import from the adapter contract), so later modules (import runner, CLI,
- * MCP tests) can use it as is. Overview of the API:
+ * MCP tests) can use it as is.
  *
- *   const b = new ConversationBuilder({ title: 'GCR-SYNTHETIC-FIXTURE demo' });
- *   const root = b.root();                           // 'client-created-root' (rootStyle: 'literal' | 'uuid' | 'none')
- *   const u1 = b.user(root, 'hello');                // message nodes; parent/children are maintained for you
- *   const a1 = b.assistant(u1, 'hi', { model: 'synthetic-model-1' });
- *   b.regenerate(a1, 'second answer');               // sibling assistant under the same user turn
+ * ConversationBuilder (parent/children links are maintained for you; ids default to the next synthetic UUID, 0x10 upward):
+ *   const b = new ConversationBuilder({ title: 'GCR-SYNTHETIC-FIXTURE demo', omitChildren: false, rootStyle: 'literal' });
+ *   const root = b.root();                           // 'client-created-root' (or a UUID with rootStyle 'uuid'); message null
+ *   const u1 = b.user(root, 'hello');                // also .assistant .system .tool .code .multimodal .thoughts .message
+ *   const a1 = b.assistant(u1, 'hi', { model: 'synthetic-model-1', channel: 'final', recipient: 'all', status: 'finished_successfully' });
+ *   b.regenerate(a1, 'second answer');               // sibling assistant under the same parent
  *   b.editUser(u1, 'hello again');                   // sibling user turn under the same parent (a new subtree)
- *   b.setCurrent(a1);                                // default: the last message node added
- *   const raw = b.build();                           // plain JS object (integer-like ids may be re-ordered by JS!)
- *   const text = b.text({ pretty: true });           // exact, insertion-ordered JSON text (what the adapter receives)
+ *   b.structural(parentId, id?) / b.rawNode(id, anyValue)   // message-null node / a node value used verbatim
+ *   b.setNode(id, { parent: 'ghost', children: OMIT }) / b.setMessage(id, { create_time: OMIT })   // raw overrides after the fact
+ *   b.setCurrent(a1)                                 // a node id, null, or OMIT (no key); default: the last message node added
+ *   b.build()                                        // plain JS object (JS re-orders integer-like ids in a plain mapping!)
+ *   b.value()                                        // same, but with an ORDERED mapping (embed in arrays, then stringify)
+ *   b.text({ pretty: true })                         // exact, insertion-ordered JSON text: what the adapter receives
+ *   b.mappingEntries()                               // [id, node][] to edit (e.g. inject a duplicate) and pass back via text({ mappingEntries })
+ * Free functions: linearConversation(pairs, init), linearConversationText(n, { omitChildren }) (cheap text for scale tests),
+ *   contents.* (one factory per content_type), parts.* (parts[] variants), adapterContext(over), syntheticUuid(n),
+ *   splitTopLevelArray(text) (fixture file -> exact element texts).
  *
  * Absent vs null vs value: option value `undefined` means "use the default"; `OMIT` means "write no such key"; `null` writes
- * `null`. The `set*` overrides apply `OMIT` the same way. Raw-text control (duplicate keys, `__proto__`, integer-like ids,
- * `1e999`...) is done with `ordered([...])` (an object that may repeat keys and keeps order) and `rawJson('...')` (verbatim
- * JSON text) inside any value, then `stringify`. `splitTopLevelArray` cuts a fixture file into the per-element texts the
- * adapter consumes, preserving them byte for byte.
+ * `null`. Raw-text control (duplicate keys, `__proto__`, integer-like ids in file order, `1e999`...) is done with
+ * `ordered([[key, value], ...])` (an object that may repeat keys and keeps order) and `rawJson('...')` (verbatim JSON text)
+ * placed inside any value, then `stringify(value, space)`. The conversation builder's `default_model_slug` is deliberately
+ * present by default: it is the trap that tests use to prove a message model is never inferred from it.
  */
 import type { AdapterContext } from '../../src/ingest/adapter.js';
 
@@ -323,7 +331,7 @@ export interface ConversationInit {
   defaultModel?: Omittable<string | null>;
   /** Only id/title/times/mapping/current_node (the trimmed 2026 shape) instead of the full key set. */
   minimal?: boolean;
-  /** `root()` style: the literal 'client-created-root', a UUID, or no root helper. */
+  /** What `root()` creates: the literal 'client-created-root' (default) or an ordinary UUID. */
   rootStyle?: 'literal' | 'uuid';
   /** Strip `children` from every node when building (the 2026 export shape). */
   omitChildren?: boolean;

@@ -33,6 +33,8 @@ proves compatibility with a live export.
   plus ids/counts only, never content.
 * Label data with a provider other than its own. `ClaudeExportAdapter` throws `INVALID_ARGUMENT` when the context says `provider !== 'claude'`
   (a wiring bug that would otherwise silently destroy provenance).
+* Be reconfigured. The registry shares ONE instance per adapter for the whole process, so the registry **freezes** them (`Object.freeze`; the disabled Mode D adapter freezes itself in its constructor): a caller
+  cannot reassign `provider`, `provenance`, `name` (or, for Mode D, `implemented`) and thereby relabel every later import or `listAdapters()` result.
 
 ## 2. Mode D: the OpenAI developer API (SPEC section 3)
 
@@ -76,7 +78,7 @@ array (a project or user record, a ChatGPT element, a wrapper) -> `NOT_A_CONVERS
 | Rule | Behaviour |
 |---|---|
 | Role | `sender === "human"` (exact) -> `authorRole "user"`; every other string is kept verbatim (after NUL/surrogate sanitizing, capped at 512). A missing/non-string/empty sender -> `"unknown"` + `SENDER_MISSING` (never `""`, which is reserved for structural nodes). The original sender always stays in `rawSource` |
-| Ids | a UUID-shaped conversation `uuid` is **lower-cased** (like the ChatGPT adapter, so lookups by the lower-cased uuid find it; `ID_CASE_NORMALIZED`, an `[info]` warning; the raw value stays in `rawMetadata`), any other conversation id and every message id is kept verbatim. Missing/invalid -> `gcr-synth-<sha256[0:32]>-<elementIndex>` (same form as the ChatGPT adapter) + `CONVERSATION_ID_MISSING/INVALID`. Message `uuid` missing/invalid -> `synthetic-msg-<ordinal>` + `MESSAGE_ID_MISSING/INVALID`. A repeated message uuid keeps both messages: later ones get `~dup2`, `~dup3`... + `DUPLICATE_MESSAGE_ID` (pointers resolve to the first occurrence) |
+| Ids | a UUID-shaped conversation `uuid` is **lower-cased** (like the ChatGPT adapter, so lookups by the lower-cased uuid find it; `ID_CASE_NORMALIZED`, an `[info]` warning; the raw value stays in `rawMetadata`), any other conversation id and every message id is kept verbatim. Missing/invalid -> `gcr-synth-<sha256[0:32]>-<elementIndex>` (same form as the ChatGPT adapter) + `CONVERSATION_ID_MISSING/INVALID`. Message `uuid` missing/invalid -> `synthetic-msg-<ordinal>` + `MESSAGE_ID_MISSING/INVALID`. An id is **unusable** (invalid) when it is not a string, is empty, longer than 512 units, contains a control character (NUL included) or contains an **unpaired surrogate**; unlike text, surrogates in ids are never "repaired" to U+FFFD, because that would map distinct ids (`"a\ud800"`, `"a\ud801"`) to one and silently merge two conversations or make a parent pointer hit the wrong message. A repeated message uuid keeps both messages: later ones get `~dup2`, `~dup3`... + `DUPLICATE_MESSAGE_ID` (pointers resolve to the first occurrence; the suffix search is amortized linear: one remembered counter per id stem) |
 | Tree | **Linear chain in file order** unless any message carries the key `parent_message_uuid`; then pointers win for every message. `null` and the Claude root sentinel `00000000-0000-4000-8000-000000000000` mean "no parent". A dangling pointer is kept verbatim (`branches.ts` reports `MISSING_PARENT`). In explicit mode a message **without** the key (and not the first) is a root + `PARENT_POINTER_ABSENT`: linking it to its file-order predecessor would be a guess. Unusable pointers -> root + `INVALID_PARENT_POINTER` |
 | `childIds` | Claude has no `children`; they are derived from the parent pointers in `(createdAt asc nulls last, ordinal, id)` order. One `CHILDREN_ABSENT` warning per non-empty conversation |
 | Model | `modelSlug` is null unless THAT message has a non-empty string `model`. A conversation-level `model` fills `defaultModelSlug` and is never copied to messages. Look-alikes (`model_slug`, `metadata.model`) are not read |
@@ -85,8 +87,9 @@ array (a project or user record, a ChatGPT element, a wrapper) -> `NOT_A_CONVERS
 | Thinking | `thinking` block -> `{ type: "thoughts", text, metadata: { hidden: true, sourceType: "thinking" } }`. `ContentBlock` is a strict schema without a `hidden` key, so the flag lives in `metadata`. It is **never** part of `message.text`; renderers must exclude `thoughts` blocks by default (ARCHITECTURE section 5). The message itself keeps `hidden: false` |
 | Tool blocks | `tool_use` -> `{ type: "tool_use", metadata: { toolName, toolUseId, input } }` (no text). `tool_result` -> `{ type: "tool_result", text: <nested text parts joined by "\n">, metadata: { toolUseId, toolName, isError, nonTextContent? } }`; nested non-text parts are preserved, not dropped |
 | Other blocks | `image` -> `image_ref` (media type only; the payload is **not** copied out of `rawSource`); `voice_note` (text kept); `token_budget`; anything else -> `type "unknown"` with `metadata.raw` + `UNKNOWN_CONTENT_TYPE`; a non-object / typeless block -> `unknown` + `MALFORMED_CONTENT_BLOCK` |
-| Attachments | `attachments[]` and `files[]` -> `AttachmentRef` metadata only. `extracted_content` -> a separate `attachment_text` block (with `attachmentIndex`, `fileName`), **not** merged into `message.text`. `assetPointer` and `presentInExportAs` are **always null**: Claude exports are not known to contain attachment bytes, and matching a file name could falsely claim presence, so `ctx.availableAssetNames` is ignored on purpose. Names such as `../../x` are stored as data and never used as paths |
+| Attachments | `attachments[]` and `files[]` -> `AttachmentRef` metadata only. `extracted_content` -> a separate `attachment_text` block (with `attachmentIndex`, `fileName`), **not** merged into `message.text`. `file_size` must be a safe non-negative integer (`-0` is stored as `0`; `1e999`, fractions, strings and unsafe integers become `null` + `INVALID_ATTACHMENT_FIELD`). `assetPointer` and `presentInExportAs` are **always null**: Claude exports are not known to contain attachment bytes, and matching a file name could falsely claim presence, so `ctx.availableAssetNames` is ignored on purpose. Names such as `../../x` are stored as data and never used as paths |
 | `sourceUri` | always `null` |
+| Second provider's marker | An element with a `chat_messages` array **and** an object `mapping` is the registry's "ambiguous" case (detection returns `null`). If the operator still selects this adapter, `chat_messages` is converted, the mapping is **not** read (it stays in `rawMetadata`) and `FOREIGN_PROVIDER_MARKER` says so. A `mapping` of another type is not a marker (same rule as the registry) |
 | Unknown fields | message-level in `rawSource`, conversation-level in `rawMetadata`, unknown block types in `metadata.raw`. Nothing is dropped |
 
 ### 3.3 Why `currentNodeId` can be set, and when it is not
@@ -112,7 +115,12 @@ so the record must never be presented as the full conversation tree (FR-09).
   units (`FIELD_TRUNCATED`, surrogate pairs are never split); message/block text 64 MiB of UTF-8, cut on a character boundary with an explicit
   marker (`TEXT_TRUNCATED`); 500 000 messages per conversation and nesting depth 128 -> `IMPORT_LIMIT_EXCEEDED` (the element is skipped by the
   runner; the output of a tiny `{}` is hundreds of bytes, so the count is bounded); 50 000 blocks and 5 000 attachments per message are truncated
-  with `BLOCKS_TRUNCATED` / `ATTACHMENTS_TRUNCATED` (the rest stays in `rawSource`).
+  with `BLOCKS_TRUNCATED` / `ATTACHMENTS_TRUNCATED` (the rest stays in `rawSource`). The per-message caps alone do not bound a conversation
+  (500 000 messages x 50 000 blocks; measured amplification of the `1`-only content array is ~36x: 15 MB of JSON became ~550 MB of heap), so
+  content blocks + attachment refs + attachment-text blocks share one **budget of 2 000 000 items per conversation**
+  (`MAX_ITEMS_PER_CONVERSATION`); once it is spent, later content is not converted (reported with the same two warnings, kept in `rawSource`).
+  `message.text` composed from several text blocks is capped at the same 64 MiB as every other body (`TEXT_TRUNCATED`) — the individual
+  blocks are each capped, their join is not automatically.
 * Warnings are **aggregated per code**: one `Warning` per code per conversation, listing at most 50 ids and the total count, so a hostile
   50 000-message conversation cannot produce 50 000 warning objects.
 
@@ -122,7 +130,7 @@ so the record must never be presented as the full conversation tree (FR-09).
 `MESSAGE_ID_MISSING`, `MESSAGE_ID_INVALID`, `DUPLICATE_MESSAGE_ID`, `NON_OBJECT_MESSAGE`, `PARENT_POINTER_ABSENT`, `INVALID_PARENT_POINTER`,
 `SENDER_MISSING`, `INVALID_TIMESTAMP`, `INVALID_TITLE`, `INVALID_MODEL_SLUG`, `INVALID_TEXT_FIELD`, `INVALID_CONTENT`, `TEXT_FIELD_MISMATCH`,
 `UNKNOWN_CONTENT_TYPE`, `MALFORMED_CONTENT_BLOCK`, `INVALID_ATTACHMENT`, `INVALID_ATTACHMENT_FIELD`, `NUL_STRIPPED`, `LONE_SURROGATE`,
-`FIELD_TRUNCATED`, `TEXT_TRUNCATED`, `BLOCKS_TRUNCATED`, `ATTACHMENTS_TRUNCATED`. (Exported as `CLAUDE_WARNING_CODES`.) Tree anomalies
+`FIELD_TRUNCATED`, `TEXT_TRUNCATED`, `BLOCKS_TRUNCATED`, `ATTACHMENTS_TRUNCATED`, `FOREIGN_PROVIDER_MARKER`. (Exported as `CLAUDE_WARNING_CODES`.) Tree anomalies
 (`MISSING_PARENT`, `CYCLE_DETECTED`, `CHILD_PARENT_MISMATCH`) are reported by `src/domain/branches.ts`, not by the adapter.
 
 ### 3.6 Errors
@@ -149,7 +157,8 @@ listAdapters(): AdapterInfo[]                               // [{ id, name, prov
 detectAdapterFromElementText(text: string, options?: { maxChars?: number }): { adapter: AdapterId | null; reason: string }
 ```
 
-`getAdapter` accepts exactly the two ids (a `switch`, so `__proto__`/`constructor` cannot resolve to inherited members). Any other string is
+`getAdapter` accepts exactly the two ids (a `switch`, so `__proto__`/`constructor` cannot resolve to inherited members, and objects that merely
+stringify to an id are rejected). The returned instances are frozen and `listAdapters()` returns fresh objects on every call. Any other string is
 `INVALID_ARGUMENT`; `"openai_api"` is `NOT_IMPLEMENTED` with the Mode D remedy.
 
 **Detection rules** (one element's JSON text; cheap, safe, never guesses, never throws, reasons are fixed text):
