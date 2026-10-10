@@ -17,6 +17,8 @@
  *      * The indexed string is `buildSearchText(text)` from cjk.ts (NFKC + lower-case + diacritic folding + one space
  *        around every CJK code point). The tokenizer is unicode61 with `categories 'L* N* Co Mn Mc'` so that combining
  *        marks of Indic scripts stay inside their word. No stemming (predictable, language independent; use `word*`).
+ *        No FTS prefix index (`prefix=...`): measured on 50k synthetic messages it would raise the index from ~0.36x to
+ *        ~0.67x of the raw text while only speeding up very broad prefixes (e.g. `ka*`: ~130 ms -> ~100 ms).
  *      * rowid stability: VACUUM may renumber rowids of tables WITHOUT an explicit INTEGER PRIMARY KEY. SQLite keeps them
  *        when the table has an index (ours have), and a test pins that behaviour for the bundled SQLite build.
  *  - Local (writable) tables and derived graph tables live in the same file but are separate from imported originals.

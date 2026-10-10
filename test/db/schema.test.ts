@@ -389,6 +389,30 @@ describe('openDatabase', () => {
     });
   });
 
+  it('maps lock contention to DB_ERROR (busy) and recovers once the other writer is done', async () => {
+    await withTempDir(async (dir) => {
+      const path = join(dir, 'g.sqlite');
+      const a = openDatabase(path);
+      const b = openDatabase(path);
+      try {
+        b.db.exec('PRAGMA busy_timeout = 50'); // keep the test fast; the production default is 5000 ms
+        a.db.exec('BEGIN IMMEDIATE');
+        await assert.rejects(
+          new Repository(b.db).importBatch({ batch: META, conversations: [linearConversation('c1', 1)] }),
+          (e) => e instanceof GcrError && e.code === 'DB_ERROR' && (e.details as { reason: string }).reason === 'busy' && !e.message.includes(dir),
+        );
+        assert.equal(b.db.isTransaction, false);
+        a.db.exec('ROLLBACK');
+        const res = await new Repository(b.db).importBatch({ batch: META, conversations: [linearConversation('c1', 1)] });
+        assert.equal(res.conversations.stored, 1);
+        assert.equal(count(a.db, 'messages'), 3, 'the other connection sees the committed import');
+      } finally {
+        closeDatabase(a);
+        closeDatabase(b);
+      }
+    });
+  });
+
   it('does not write anything to stdout (the ExperimentalWarning, if any, goes to stderr)', () => {
     const openUrl = new URL('../../src/db/open.js', import.meta.url).href;
     const code = `import { openDatabase, closeDatabase } from ${JSON.stringify(openUrl)}; closeDatabase(openDatabase(':memory:'));`;
