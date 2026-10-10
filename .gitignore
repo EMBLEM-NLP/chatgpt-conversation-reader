@@ -1,0 +1,32 @@
+# --- GCR privacy boundary: private conversation data must never be committed ---
+node_modules/
+dist/
+dist-test*/
+coverage/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.db
+.gcr/
+# ChatGPT / Claude export archives and raw exports (synthetic fixtures live under fixtures/ and are allow-listed)
+*.zip
+/conversations*.json
+/export/
+/exports/
+/private/
+# secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+cookies*.json
+session*.json
+# editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+*.log
+tmp/
+.tmp/
