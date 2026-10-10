@@ -10,6 +10,9 @@ import fc from 'fast-check';
 import { CONTENT_RULE_IDS, CONTENT_RULE_SOURCES, FIXTURE_MAX_BYTES, SYNTHETIC_MARKER, maskSecret, scanContent } from '../../src/devtools/privacy-scan.js';
 import type { Finding } from '../../src/devtools/privacy-scan.js';
 
+// Fixed seed so a failure reproduces; fast-check prints the counterexample and this seed.
+const PROPERTY_SEED = 20261015;
+
 const B62 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const B64 = `${B62}+/`;
 const HEX = '0123456789abcdef';
@@ -391,7 +394,7 @@ describe('masking', () => {
           assert.ok(!f.detail.includes(body), f.rule);
         }
       }),
-      { numRuns: 300 },
+      { numRuns: 300, seed: PROPERTY_SEED },
     );
   });
 });

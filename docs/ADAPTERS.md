@@ -76,7 +76,7 @@ array (a project or user record, a ChatGPT element, a wrapper) -> `NOT_A_CONVERS
 | Rule | Behaviour |
 |---|---|
 | Role | `sender === "human"` (exact) -> `authorRole "user"`; every other string is kept verbatim (after NUL/surrogate sanitizing, capped at 512). A missing/non-string/empty sender -> `"unknown"` + `SENDER_MISSING` (never `""`, which is reserved for structural nodes). The original sender always stays in `rawSource` |
-| Ids | conversation `uuid` kept verbatim. Missing/invalid -> `gcr-synth-<sha256[0:32]>-<elementIndex>` (same form as the ChatGPT adapter) + `CONVERSATION_ID_MISSING/INVALID`. Message `uuid` missing/invalid -> `synthetic-msg-<ordinal>` + `MESSAGE_ID_MISSING/INVALID`. A repeated message uuid keeps both messages: later ones get `~dup2`, `~dup3`... + `DUPLICATE_MESSAGE_ID` (pointers resolve to the first occurrence) |
+| Ids | a UUID-shaped conversation `uuid` is **lower-cased** (like the ChatGPT adapter, so lookups by the lower-cased uuid find it; `ID_CASE_NORMALIZED`, an `[info]` warning; the raw value stays in `rawMetadata`), any other conversation id and every message id is kept verbatim. Missing/invalid -> `gcr-synth-<sha256[0:32]>-<elementIndex>` (same form as the ChatGPT adapter) + `CONVERSATION_ID_MISSING/INVALID`. Message `uuid` missing/invalid -> `synthetic-msg-<ordinal>` + `MESSAGE_ID_MISSING/INVALID`. A repeated message uuid keeps both messages: later ones get `~dup2`, `~dup3`... + `DUPLICATE_MESSAGE_ID` (pointers resolve to the first occurrence) |
 | Tree | **Linear chain in file order** unless any message carries the key `parent_message_uuid`; then pointers win for every message. `null` and the Claude root sentinel `00000000-0000-4000-8000-000000000000` mean "no parent". A dangling pointer is kept verbatim (`branches.ts` reports `MISSING_PARENT`). In explicit mode a message **without** the key (and not the first) is a root + `PARENT_POINTER_ABSENT`: linking it to its file-order predecessor would be a guess. Unusable pointers -> root + `INVALID_PARENT_POINTER` |
 | `childIds` | Claude has no `children`; they are derived from the parent pointers in `(createdAt asc nulls last, ordinal, id)` order. One `CHILDREN_ABSENT` warning per non-empty conversation |
 | Model | `modelSlug` is null unless THAT message has a non-empty string `model`. A conversation-level `model` fills `defaultModelSlug` and is never copied to messages. Look-alikes (`model_slug`, `metadata.model`) are not read |
@@ -118,7 +118,7 @@ so the record must never be presented as the full conversation tree (FR-09).
 
 ### 3.5 Warning codes emitted by `ClaudeExportAdapter`
 
-`LINEAR_EXPORT_ACTIVE_BRANCH_ONLY`, `CHILDREN_ABSENT`, `ACTIVE_BRANCH_UNKNOWN`, `CONVERSATION_ID_MISSING`, `CONVERSATION_ID_INVALID`,
+`LINEAR_EXPORT_ACTIVE_BRANCH_ONLY`, `CHILDREN_ABSENT`, `ACTIVE_BRANCH_UNKNOWN`, `CONVERSATION_ID_MISSING`, `CONVERSATION_ID_INVALID`, `ID_CASE_NORMALIZED`,
 `MESSAGE_ID_MISSING`, `MESSAGE_ID_INVALID`, `DUPLICATE_MESSAGE_ID`, `NON_OBJECT_MESSAGE`, `PARENT_POINTER_ABSENT`, `INVALID_PARENT_POINTER`,
 `SENDER_MISSING`, `INVALID_TIMESTAMP`, `INVALID_TITLE`, `INVALID_MODEL_SLUG`, `INVALID_TEXT_FIELD`, `INVALID_CONTENT`, `TEXT_FIELD_MISMATCH`,
 `UNKNOWN_CONTENT_TYPE`, `MALFORMED_CONTENT_BLOCK`, `INVALID_ATTACHMENT`, `INVALID_ATTACHMENT_FIELD`, `NUL_STRIPPED`, `LONE_SURROGATE`,

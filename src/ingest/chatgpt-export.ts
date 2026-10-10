@@ -1131,19 +1131,15 @@ function buildContent(content: unknown, mc: MsgCtx): string | null {
     addUnknownBlock(mc, { raw: content });
     return null;
   }
+  // The SANITIZED type is what is stored on the message, so it is also what selects the handler (stored and interpreted agree).
   const ct = shortString(ctRaw, MAX_SHORT_STRING, mc.wc, mc.mid, 'content_type') ?? '';
-  const handler = CONTENT_HANDLERS.get(ctRaw);
+  const handler = CONTENT_HANDLERS.get(ct);
   if (handler !== undefined) {
-    handler(content, mc, ctRaw);
+    handler(content, mc, ct);
   } else {
     // WHY aggregated per type: a drifting export can carry one new type thousands of times; one warning with a count is enough.
-    mc.wc.add(
-      'UNKNOWN_CONTENT_TYPE',
-      `Unknown content_type "${safeToken(ctRaw)}" was kept as raw 'unknown' blocks and contributes no text.`,
-      mc.mid,
-      ctRaw.length <= 256 ? ctRaw : sha256Hex(ctRaw),
-    );
-    addUnknownBlock(mc, { contentType: ctRaw, raw: content });
+    mc.wc.add('UNKNOWN_CONTENT_TYPE', `Unknown content_type "${safeToken(ct)}" was kept as raw 'unknown' blocks and contributes no text.`, mc.mid, ct.length <= 256 ? ct : sha256Hex(ct));
+    addUnknownBlock(mc, { contentType: ct, raw: content });
   }
   return ct;
 }

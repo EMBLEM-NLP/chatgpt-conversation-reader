@@ -379,7 +379,7 @@ describe('message tree: linear chain unless explicit parent pointers exist', () 
     assert.deepEqual(r.messages.map((m) => m.ordinal), [0, 2, 6]);
     assert.equal(message(r, 1).parentId, message(r, 0).id);
     assert.equal(message(r, 2).parentId, message(r, 1).id);
-    assert.equal(findWarning(r, 'NON_OBJECT_MESSAGE')?.message.includes('[4 occurrences]'), true);
+    assert.equal(findWarning(r, 'NON_OBJECT_MESSAGE')?.message.includes('(4 occurrences)'), true);
     assert.equal(r.currentNodeId, message(r, 2).id);
   });
 
@@ -467,9 +467,24 @@ describe('model attribution (FR-16: never inferred)', () => {
 });
 
 describe('conversation identity', () => {
-  it('keeps the uuid verbatim (no case folding, no trimming)', () => {
+  it('lower-cases a UUID-shaped conversation id (so lookups by the lower-cased uuid still find it) and says so as an info warning', () => {
     const upper = 'ABCDEF01-0000-4000-8000-0000000000AA';
-    assert.equal(recordOf(claudeConversation([], { uuid: upper })).id, upper);
+    const r = recordOf(claudeConversation([claudeMessage(0)], { uuid: upper }));
+    assert.equal(r.id, upper.toLowerCase());
+    assert.equal(message(r, 0).conversationId, r.id);
+    assert.equal((r.rawMetadata as Record<string, unknown>)['uuid'], upper, 'the raw value is kept');
+    const w = findWarning(r, 'ID_CASE_NORMALIZED');
+    assert.ok(w?.message.startsWith('[info] '));
+    assert.deepEqual(w?.ids, [r.id]);
+  });
+
+  it('keeps every other id verbatim: lower-case uuids, non-UUID conversation ids, and ALL message ids (no case folding, no trimming)', () => {
+    const lower = 'abcdef01-0000-4000-8000-0000000000aa';
+    assert.equal(findWarning(recordOf(claudeConversation([], { uuid: lower })), 'ID_CASE_NORMALIZED'), undefined);
+    assert.equal(recordOf(claudeConversation([], { uuid: lower })).id, lower);
+    for (const id of ['ABC', ' padded ', 'Conv-UPPER-1']) assert.equal(recordOf(claudeConversation([], { uuid: id })).id, id);
+    const m = recordOf(claudeConversation([claudeMessage(0, { uuid: 'ABCDEF01-0000-4000-8000-0000000000BB' })]));
+    assert.equal(message(m, 0).id, 'ABCDEF01-0000-4000-8000-0000000000BB');
   });
 
   it('assigns a deterministic hash-and-position derived id when the uuid is absent (same form as the ChatGPT adapter)', () => {
@@ -483,7 +498,9 @@ describe('conversation identity', () => {
     assert.equal(message(a, 0).conversationId, a.id);
     const other = recordOf(elementText(claudeConversation([claudeMessage(1)], { uuid: undefined })), claudeCtx(), 4);
     assert.notEqual(other.id, a.id, 'different content, different synthetic id');
-    assert.ok(recordOf(text, claudeCtx(), -3).id.endsWith('-0') && recordOf(text, claudeCtx(), Number.NaN).id.endsWith('-0'), 'a bogus index falls back to 0');
+    for (const bogus of [-3, Number.NaN, 1.5, Number.POSITIVE_INFINITY, '7' as unknown as number]) {
+      assert.ok(recordOf(text, claudeCtx(), bogus).id.endsWith('-0'), `a bogus index (${String(bogus)}) falls back to 0`);
+    }
   });
 
   for (const [label, uuid] of [['a number', 5], ['empty', ''], ['containing a control character', 'a\tb'], ['513 characters long', 'c'.repeat(513)]] as const) {

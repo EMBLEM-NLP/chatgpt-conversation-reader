@@ -22,6 +22,9 @@
  * per line (`#` starts a comment line, no globs). An allow-listed path is exempt from every rule, so the file is
  * the single, reviewable place where exceptions live.
  *
+ * Bounds: files are read up to `maxFileBytes`; the staged-diff and history passes read git's own patch text and are
+ * bounded by `maxHistoryBytes` instead, so an oversized staged file still has its added lines scanned (up to the cap).
+ *
  * Known limits (reported, not hidden): the allow-file is read from the working tree only; unreachable objects, the
  * reflog and content that exists only inside a merge-commit resolution are not scanned; history scanning is capped
  * (see `maxHistoryBytes`) and reports when it truncated.
@@ -773,6 +776,12 @@ type FileOutcome = { kind: 'scanned' | 'large' | 'binary' | 'nonregular' | 'allo
 async function scanOneFile(root: string, path: string, allow: ReadonlySet<string>, maxFileBytes: number): Promise<FileOutcome> {
   if (allow.has(path)) return { kind: 'allowed', findings: [] };
   const findings = pathRuleFindings(path);
+  if (path.includes('\uFFFD')) {
+    // git hands over raw bytes; a non-UTF-8 name decodes lossily, so the real file cannot be opened by that string.
+    // Fail closed with a finding rather than treating it as a deleted file.
+    findings.push({ rule: 'unreadable-file', path, detail: 'path is not valid UTF-8, so the file cannot be opened by name; content was not scanned' });
+    return { kind: 'nonregular', findings };
+  }
   const ctx = pathContext(path);
   const markerRequired = requiresSyntheticMarker(ctx);
   const abs = join(root, path);

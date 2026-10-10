@@ -417,7 +417,7 @@ describe('searchMessages: snippets (plain text from the ORIGINAL message, marker
     const forged = buildSnippet('before \u0001FORGED\u0002 needle after \u001b[31mred\u0007 line1\nline2\ttab\u202Eevil', NEEDLE);
     assert.equal([...forged].filter((c) => c === MARK_START).length, 1, 'exactly the one real highlight');
     assert.equal([...forged].filter((c) => c === MARK_END).length, 1);
-    assert.ok(forged.includes('�'), 'forged markers and bidi controls are replaced');
+    assert.ok(forged.includes('\uFFFD'), 'forged markers and bidi controls are replaced');
     assert.doesNotMatch(forged, /[\u001b\u0007\n\t\u202E]/u);
     assert.ok(forged.includes(`${MARK_START}needle${MARK_END}`));
   });

@@ -787,6 +787,18 @@ describe('robustness', () => {
     });
   });
 
+  it('reports a file whose name is not valid UTF-8 instead of treating it as missing', async () => {
+    await inRepo(async (dir) => {
+      await writeFile(Buffer.concat([Buffer.from(`${dir}/`), Buffer.from([0x66, 0xe9, 0x2e, 0x74, 0x78, 0x74])]), `${join_('sk-', rnd(40, 160))}\n`);
+      await put(dir, 'plain.txt', 'fine\n');
+      const result = await scanRepo(dir);
+      assert.deepEqual(result.findings.map((f) => f.rule), ['unreadable-file']);
+      assert.match(result.findings[0]?.detail ?? '', /not valid UTF-8/);
+      assert.equal(result.skippedNonRegular, 1);
+      assert.equal(result.scannedFiles, 1);
+    });
+  });
+
   it('says when the staged diff was cut short by the byte cap', async () => {
     await inRepo(async (dir) => {
       await put(dir, 'big.txt', 'filler line of ordinary text\n'.repeat(2000));

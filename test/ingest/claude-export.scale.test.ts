@@ -55,7 +55,7 @@ describe('scale', () => {
     assert.equal(r.messages.length, N);
     assert.ok(r.warnings.length <= 8, `${r.warnings.length} warnings`);
     for (const w of r.warnings) assert.ok((w.ids ?? []).length <= 50);
-    assert.ok(findWarning(r, 'MESSAGE_ID_MISSING')?.message.includes(`[${N} occurrences]`));
+    assert.ok(findWarning(r, 'MESSAGE_ID_MISSING')?.message.includes(`(${N} occurrences)`));
     assert.ok(r.messages.every((m) => m.id === `synthetic-msg-${m.ordinal}`));
     assert.equal(r.currentNodeId, `synthetic-msg-${N - 1}`);
   });

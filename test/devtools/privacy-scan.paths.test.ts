@@ -7,6 +7,9 @@ import { describe, it } from 'node:test';
 import fc from 'fast-check';
 import { parseAllowFile, scanPaths } from '../../src/devtools/privacy-scan.js';
 
+// Fixed seed so a failure reproduces; fast-check prints the counterexample and this seed.
+const PROPERTY_SEED = 20261015;
+
 const rulesFor = (path: string, allow?: string[]): string[] => scanPaths([path], allow === undefined ? {} : { allow }).map((f) => f.rule);
 
 describe('forbidden extensions', () => {
@@ -198,7 +201,7 @@ describe('determinism', () => {
         const input = dup ? [...shuffled, ...shuffled] : shuffled;
         assert.deepEqual(scanPaths(input), expected);
       }),
-      { numRuns: 100 },
+      { numRuns: 100, seed: PROPERTY_SEED },
     );
   });
 
@@ -215,7 +218,7 @@ describe('determinism', () => {
           assert.ok(rules.includes('forbidden-extension'), rules.join());
         },
       ),
-      { numRuns: 200 },
+      { numRuns: 200, seed: PROPERTY_SEED },
     );
   });
 });

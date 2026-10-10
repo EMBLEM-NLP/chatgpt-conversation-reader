@@ -308,7 +308,7 @@ const SPACE = /^\s$/u;
  * space, bidi controls become U+FFFD.
  */
 function cleanChar(ch: string): string {
-  if (ch === MARK_START || ch === MARK_END || BIDI_CONTROLS.test(ch)) return '�';
+  if (ch === MARK_START || ch === MARK_END || BIDI_CONTROLS.test(ch)) return '\uFFFD';
   if (CONTROL.test(ch) || SPACE.test(ch)) return ' ';
   return ch;
 }

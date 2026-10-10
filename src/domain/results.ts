@@ -73,8 +73,12 @@ export interface ThreadResult {
   messages: MessageRecord[];
   /** How many hidden messages were omitted from `messages`. */
   omittedHidden: number;
-  /** Present when the branch was chosen by an explicit heuristic policy rather than a source-provided current_node. */
-  selectionPolicy: 'source_current_node' | 'explicit_branch' | 'last_child' | 'latest_leaf';
+  /**
+   * How the branch was chosen. 'source_current_node' = the export's own current_node pointer; 'explicit_branch' = caller named it;
+   * 'only_branch' = the tree has exactly ONE branch so nothing is inferred; 'last_child' / 'latest_leaf' = explicit opt-in heuristics
+   * (always accompanied by an ACTIVE_BRANCH_HEURISTIC warning).
+   */
+  selectionPolicy: 'source_current_node' | 'explicit_branch' | 'only_branch' | 'last_child' | 'latest_leaf';
   warnings: Warning[];
 }
 

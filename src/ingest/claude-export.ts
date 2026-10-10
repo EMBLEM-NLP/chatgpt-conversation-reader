@@ -33,6 +33,7 @@
 import { createHash } from 'node:crypto';
 import { GcrError } from '../errors.js';
 import type { Warning } from '../errors.js';
+import { isUuid } from '../domain/ids.js';
 import type { AttachmentRef, ContentBlock, ConversationRecord, MessageRecord } from '../domain/types.js';
 import { MAX_ID_LENGTH, MAX_TEXT_BYTES, isIso8601Utc, parseIsoUtcToEpochMs, unixSecondsToIso } from '../domain/validate.js';
 import type { UnixSecondsFailure } from '../domain/validate.js';
@@ -50,6 +51,8 @@ export const MAX_JSON_DEPTH = 128;
 export const MAX_MESSAGES_PER_CONVERSATION = 500_000;
 export const MAX_BLOCKS_PER_MESSAGE = 50_000;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 5_000;
+/** Purely informational warnings start with this prefix (same convention as src/ingest/chatgpt-export.ts). */
+export const INFO_PREFIX = '[info] ';
 /** At most this many ids are listed per warning code (the total count is always reported). */
 export const MAX_WARNING_IDS = 50;
 /** Appended when a text exceeds MAX_TEXT_BYTES so that truncation is explicit, never silent. */
@@ -68,6 +71,7 @@ export const CLAUDE_WARNING_CODES = {
   ACTIVE_BRANCH_UNKNOWN: 'ACTIVE_BRANCH_UNKNOWN',
   CONVERSATION_ID_MISSING: 'CONVERSATION_ID_MISSING',
   CONVERSATION_ID_INVALID: 'CONVERSATION_ID_INVALID',
+  ID_CASE_NORMALIZED: 'ID_CASE_NORMALIZED',
   MESSAGE_ID_MISSING: 'MESSAGE_ID_MISSING',
   MESSAGE_ID_INVALID: 'MESSAGE_ID_INVALID',
   DUPLICATE_MESSAGE_ID: 'DUPLICATE_MESSAGE_ID',
@@ -142,7 +146,7 @@ class WarningLog {
   toArray(): Warning[] {
     const out: Warning[] = [];
     for (const [code, e] of this.entries) {
-      let message = e.count > 1 ? `${e.message} [${e.count} occurrences]` : e.message;
+      let message = e.count > 1 ? `${e.message} (${e.count} occurrences)` : e.message;
       if (e.idSet.size > e.ids.length) message += ` (first ${MAX_WARNING_IDS} ids listed)`;
       out.push(e.ids.length > 0 ? { code, message, ids: [...e.ids] } : { code, message });
     }
@@ -724,14 +728,18 @@ function countRoles(messages: readonly MessageRecord[]): Record<string, number> 
 // ------------------------------------------------------------------------------------------
 
 /** The conversation id, or a deterministic replacement plus the reason (reported by the caller so warning order stays fixed). */
-function readConversationId(parsed: JsonObject, sha256: string, elementIndex: number): { id: string; problem: 'missing' | 'invalid' | null } {
+function readConversationId(parsed: JsonObject, sha256: string, elementIndex: number): { id: string; problem: 'missing' | 'invalid' | 'case' | null } {
   const raw = own(parsed, 'uuid');
   const id = cleanId(raw);
-  if (id !== null) return { id, problem: null };
+  if (id !== null) {
+    // A UUID-shaped conversation id is lower-cased, like the ChatGPT adapter does, because lookups (parseConversationRef)
+    // lower-case what the operator types: an upper-case stored id could never be found again. Message ids stay verbatim
+    // (parent pointers must keep matching them exactly). The raw value remains in rawMetadata.
+    return isUuid(id) && id !== id.toLowerCase() ? { id: id.toLowerCase(), problem: 'case' } : { id, problem: null };
+  }
   // Same form as the ChatGPT adapter's fallback. Deterministic from the element's bytes AND its position: re-importing
   // the same file reproduces the id (FR-10), while two byte-identical id-less elements stay two distinct conversations.
-  const position = Number.isSafeInteger(elementIndex) && elementIndex >= 0 ? elementIndex : 0;
-  return { id: `gcr-synth-${sha256.slice(0, 32)}-${position}`, problem: raw === undefined || raw === null ? 'missing' : 'invalid' };
+  return { id: `gcr-synth-${sha256.slice(0, 32)}-${elementIndex}`, problem: raw === undefined || raw === null ? 'missing' : 'invalid' };
 }
 
 function readTitle(log: WarningLog, parsed: JsonObject, convId: string): string | null {
@@ -787,8 +795,10 @@ function parseElementJson(text: string): unknown {
   }
 }
 
-function normalizeElement(text: string, ctx: AdapterContext, elementIndex: number): AdapterOutcome {
+function normalizeElement(text: string, ctx: AdapterContext, rawElementIndex: number): AdapterOutcome {
   assertContext(ctx);
+  // The index only feeds a fallback id and a warning text, so a bogus value (NaN, negative, non-number) becomes 0.
+  const elementIndex = Number.isSafeInteger(rawElementIndex) && rawElementIndex >= 0 ? rawElementIndex : 0;
   if (typeof text !== 'string') {
     throw new GcrError('INVALID_ARGUMENT', 'The element text must be a string.', { details: { reason: 'TEXT_NOT_STRING' } });
   }
@@ -811,6 +821,7 @@ function normalizeElement(text: string, ctx: AdapterContext, elementIndex: numbe
   // Always first: every Claude record states that it is one thread, even an empty one (completeness is not about message count).
   log.add(W.LINEAR_EXPORT_ACTIVE_BRANCH_ONLY, 'A Claude export holds one linear thread per conversation (the branch rendered at export time); alternate branches, edits and regenerations are not part of it, so this is not the full conversation tree.', convId);
   if (identity.problem === 'missing') log.add(W.CONVERSATION_ID_MISSING, 'The conversation has no "uuid"; an id derived from the element hash and position was assigned.', convId);
+  if (identity.problem === 'case') log.add(W.ID_CASE_NORMALIZED, `${INFO_PREFIX}An upper-case UUID conversation id was lower-cased (the raw value is kept in rawMetadata).`, convId);
   if (identity.problem === 'invalid') log.add(W.CONVERSATION_ID_INVALID, 'The conversation "uuid" was not a usable identifier; an id derived from the element hash and position was assigned.', convId);
 
   const drafts = buildDrafts(log, chatMessages, convId);

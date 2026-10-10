@@ -225,7 +225,7 @@ describe('warnings never carry conversation content', () => {
       assert.ok((w.ids ?? []).length <= 50, `${w.code} lists too many ids`);
     }
     const sender = findWarning(r, 'SENDER_MISSING');
-    assert.ok(sender?.message.includes('[300 occurrences]'), 'the total is always reported');
+    assert.ok(sender?.message.includes('(300 occurrences)'), 'the total is always reported');
     assert.ok(sender?.message.includes('first 50 ids listed'));
     assert.equal(r.warnings.length, new Set(r.warnings.map((w) => w.code)).size, 'one warning per code');
   });
@@ -291,6 +291,14 @@ describe('skipped elements and invalid input', () => {
       assert.equal(skippedReason(text), 'NON_OBJECT_ENTRY');
     });
   }
+
+  it('a bogus elementIndex is reported as element 0 and never breaks the warning text', () => {
+    for (const bogus of [-1, Number.NaN, 'x' as unknown as number, Symbol('s') as unknown as number]) {
+      const out = claudeAdapter.normalizeElementText('null', claudeCtx(), bogus);
+      assert.equal(out.kind, 'skipped');
+      assert.ok(out.kind === 'skipped' && out.warnings[0]?.message.includes('Element 0 '));
+    }
+  });
 
   it('{} is EMPTY_CONVERSATION_ENTRY', () => {
     assert.equal(skippedReason('{}'), 'EMPTY_CONVERSATION_ENTRY');
@@ -380,7 +388,7 @@ describe('purity (static source checks of src/ingest/claude-export.ts)', () => {
 
   it('imports only the pure modules it needs (node:crypto for SHA-256, errors, domain types/validate, adapter types)', () => {
     const specifiers = [...code.matchAll(/\bfrom\s+'([^']+)'/g)].map((m) => m[1]).sort();
-    assert.deepEqual(specifiers, ['../domain/types.js', '../domain/validate.js', '../domain/validate.js', '../errors.js', '../errors.js', './adapter.js', 'node:crypto']);
+    assert.deepEqual(specifiers, ['../domain/ids.js', '../domain/types.js', '../domain/validate.js', '../domain/validate.js', '../errors.js', '../errors.js', './adapter.js', 'node:crypto']);
     assert.ok(!/\brequire\s*\(/.test(code) && !/\bimport\s*\(/.test(code), 'no dynamic imports');
   });
 

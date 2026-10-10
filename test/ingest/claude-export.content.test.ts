@@ -289,7 +289,7 @@ describe('attachments and files (metadata only, FR-15)', () => {
     const { m, r: rr } = single({ attachments: [null, 'x', 3, [], { file_name: 'ok.txt' }] });
     assert.equal(m.attachments.length, 1);
     assert.equal(m.attachments[0]?.name, 'ok.txt');
-    assert.ok(findWarning(rr, 'INVALID_ATTACHMENT')?.message.includes('[4 occurrences]'));
+    assert.ok(findWarning(rr, 'INVALID_ATTACHMENT')?.message.includes('(4 occurrences)'));
   });
 
   it('unusable field values become null with INVALID_ATTACHMENT_FIELD (size must be a non-negative safe integer)', () => {

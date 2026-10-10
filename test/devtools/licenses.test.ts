@@ -449,6 +449,14 @@ describe('collectLicenses: errors are structured GcrErrors without absolute path
       await expectInvalidArgument(collectLicenses(dir), /lockfileVersion 2 or 3/);
     });
   });
+  it('rejects other lockfile versions even when a "packages" map is present (no guessing at unknown formats)', async () => {
+    await withTempDir(async (dir) => {
+      for (const lockfileVersion of [1, 4, '3', null]) {
+        await put(join(dir, 'package-lock.json'), JSON.stringify({ lockfileVersion, packages: {} }));
+        await expectInvalidArgument(collectLicenses(dir), /lockfileVersion 2 or 3/);
+      }
+    });
+  });
   it('packages locked but node_modules absent', async () => {
     await withTempDir(async (dir) => {
       await buildProject(dir, [{ name: 'p', manifest: false }], { nodeModules: false });
