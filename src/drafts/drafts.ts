@@ -341,11 +341,14 @@ function longestBacktickRun(s: string): number {
  */
 function oneLine(value: string, maxChars = 240): string {
   const flat = value
+    // Line breaks (incl. LS/PS, U+2028/U+2029) and C0/C1 controls become one space ...
     // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f-\u009f  ]+/g, ' ')
-    .replace(/[​-‏‪-‮⁠⁦-⁩؜﻿]/g, '');
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    // ... zero-width and bidirectional formatting characters are dropped (they can visually reorder surrounding text).
+    // Written as escapes on purpose: no literal invisible character may live in this source file.
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\u061c\ufeff]/g, '');
   const chars = Array.from(flat);
-  return chars.length > maxChars ? `${chars.slice(0, maxChars - 1).join('')}…` : flat;
+  return chars.length > maxChars ? `${chars.slice(0, maxChars - 1).join('')}\u2026` : flat;
 }
 
 /** A CommonMark code span whose delimiter is longer than any backtick run inside, so the value cannot close it early. */
