@@ -1,0 +1,212 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000005",
+    "conversation_id": "00000000-0000-4000-8000-000000000005",
+    "title": "GCR-SYNTHETIC-FIXTURE F05 multimodal parts",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000120.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "00000000-0000-4000-8000-000000000010"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000010": {
+        "id": "00000000-0000-4000-8000-000000000010",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000010",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "multimodal_text",
+            "parts": [
+              "synthetic caption",
+              {
+                "content_type": "image_asset_pointer",
+                "asset_pointer": "sediment://file_00000000000000000000000000000001",
+                "size_bytes": 1234,
+                "width": 512,
+                "height": 512,
+                "fovea": null,
+                "metadata": {
+                  "dalle": null,
+                  "gizmo": null,
+                  "generation": null,
+                  "sanitized": true
+                }
+              },
+              {
+                "content_type": "image_asset_pointer",
+                "asset_pointer": "file-service://file-SYNTHETIC1",
+                "size_bytes": 1234,
+                "width": 512,
+                "height": 512,
+                "fovea": null,
+                "metadata": {
+                  "dalle": null,
+                  "gizmo": null,
+                  "generation": null,
+                  "sanitized": true
+                }
+              },
+              {
+                "content_type": "image_asset_pointer",
+                "asset_pointer": "sediment://synthetichash#file_00000000000000000000000000000002#p_2.jpg",
+                "size_bytes": 1234,
+                "width": 512,
+                "height": 512,
+                "fovea": null,
+                "metadata": {
+                  "dalle": null,
+                  "gizmo": null,
+                  "generation": null,
+                  "sanitized": true
+                }
+              },
+              {
+                "content_type": "audio_transcription",
+                "text": "synthetic spoken words",
+                "direction": "in",
+                "decoding_id": null
+              },
+              {
+                "content_type": "audio_asset_pointer",
+                "asset_pointer": "sediment://file_00000000000000000000000000000008",
+                "size_bytes": 2048,
+                "format": "wav",
+                "expiry_datetime": null,
+                "metadata": {
+                  "start_timestamp": null,
+                  "end_timestamp": null
+                }
+              },
+              {
+                "content_type": "real_time_user_audio_video_asset_pointer",
+                "expiry_datetime": null,
+                "audio_start_timestamp": 1.5,
+                "audio_asset_pointer": {
+                  "content_type": "audio_asset_pointer",
+                  "asset_pointer": "sediment://file_00000000000000000000000000000003",
+                  "size_bytes": 10,
+                  "format": "wav"
+                },
+                "video_container_asset_pointer": {
+                  "content_type": "video_container_asset_pointer",
+                  "asset_pointer": "sediment://file_00000000000000000000000000000004",
+                  "size_bytes": 20
+                },
+                "frames_asset_pointers": [
+                  {
+                    "content_type": "image_asset_pointer",
+                    "asset_pointer": "sediment://file_00000000000000000000000000000005",
+                    "size_bytes": 30
+                  }
+                ]
+              },
+              {
+                "content_type": "video_container_asset_pointer",
+                "asset_pointer": "sediment://file_00000000000000000000000000000006",
+                "size_bytes": 40
+              }
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "00000000-0000-4000-8000-000000000011"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000011": {
+        "id": "00000000-0000-4000-8000-000000000011",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000011",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "multimodal_text",
+            "parts": [
+              "synthetic text part",
+              {
+                "type": "search_result_group",
+                "domain": "example.invalid",
+                "entries": [
+                  {
+                    "type": "search_result",
+                    "url": "https://example.invalid/r1",
+                    "title": "Synthetic result",
+                    "snippet": "synthetic snippet",
+                    "ref_id": {
+                      "ref_type": "search",
+                      "turn_index": 0,
+                      "ref_index": 0
+                    }
+                  }
+                ]
+              },
+              {
+                "synthetic_unknown_part": true,
+                "value": 7
+              },
+              42,
+              true,
+              null,
+              [
+                "nested",
+                "array"
+              ],
+              {
+                "content_type": "future_pointer_asset_pointer",
+                "asset_pointer": "sediment://file_00000000000000000000000000000007"
+              }
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute",
+            "model_slug": "synthetic-model-1"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000010",
+        "children": []
+      }
+    },
+    "current_node": "00000000-0000-4000-8000-000000000011",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  }
+]

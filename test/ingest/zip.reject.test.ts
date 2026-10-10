@@ -3,6 +3,7 @@
  * message names the entry INDEX, and that hostile names / file-system paths never appear in messages.
  */
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readdirSync, existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -90,6 +91,11 @@ const BAD_NAMES: Array<[string, string | Buffer, string, ErrorCode?, boolean?]> 
   ['flagged invalid UTF-8', Buffer.from([0x61, 0xff, 0x62]), 'NAME_ENCODING'],
   ['flagged encoded surrogate', Buffer.from([0xed, 0xa0, 0x80]), 'NAME_ENCODING'],
   ['flagged overlong slash', Buffer.from([0xc0, 0xaf]), 'NAME_ENCODING'],
+  // The raw bytes are checked BEFORE decoding, so an undecodable name that is also hostile reports the hostile part.
+  ['flagged invalid UTF-8 + dotdot (raw check first)', Buffer.from([0xff, 0x2f, 0x2e, 0x2e, 0x2f, 0x78]), 'NAME_DOT_DOT'],
+  ['flagged invalid UTF-8 + NUL (raw check first)', Buffer.from([0xc3, 0x00]), 'NAME_CONTROL_CHAR'],
+  ['flagged invalid UTF-8 + backslash (raw check first)', Buffer.from([0xfe, 0x5c]), 'NAME_BACKSLASH'],
+  ['flagged invalid UTF-8 + absolute (raw check first)', Buffer.from([0x2f, 0xfe, 0x61]), 'NAME_ABSOLUTE'],
   ['unflagged invalid UTF-8 + dotdot', Buffer.from([0xff, 0x2f, 0x2e, 0x2e, 0x2f, 0x78]), 'NAME_DOT_DOT', UNSAFE, true],
   ['unflagged invalid UTF-8 + NUL', Buffer.from([0xff, 0x00]), 'NAME_CONTROL_CHAR', UNSAFE, true],
   ['unflagged invalid UTF-8 + backslash', Buffer.from([0xff, 0x5c, 0x78]), 'NAME_BACKSLASH', UNSAFE, true],
@@ -164,6 +170,10 @@ test('encrypted entries are rejected: traditional, strong, masked headers, local
   reject(buildZip([GOOD, { name: 'e.bin', data: 'x', method: 'store', extraFlags: 0x0040 }]), UNSAFE, 'ENCRYPTED'); // strong encryption
   reject(buildZip([GOOD, { name: 'e.bin', data: 'x', method: 'store', extraFlags: 0x2000 }]), UNSAFE, 'ENCRYPTED'); // masked headers
   reject(buildZip([GOOD, { name: 'e.bin', data: 'x', method: 'store', localExtraFlags: 0x0001 }]), UNSAFE, 'ENCRYPTED'); // lies only locally
+  // ...and the converse: only the CENTRAL directory says so (each check must stand on its own).
+  for (const bit of [0x0001, 0x0040, 0x2000]) {
+    reject(buildZip([GOOD, { name: 'e.bin', data: 'x', method: 'store', centralExtraFlags: bit }]), UNSAFE, 'ENCRYPTED');
+  }
   reject(buildZip([GOOD, { name: 'e.bin', data: 'x', method: 'store', encrypted: true, methodIdOverride: 99 }]), UNSAFE, 'ENCRYPTED'); // WinZip AES
   reject(buildZip([GOOD, { name: 'e.bin', data: 'x', method: 'store', extraFlags: 0x0020 }]), UNSAFE, 'UNSUPPORTED_FLAGS'); // compressed patched data
 });
@@ -477,3 +487,41 @@ test('fromBuffer(): invalid arguments are INVALID_ARGUMENT', () => {
 // A silent-regression guard: the table of ZipOptions used above must keep compiling against the builder.
 const _typecheck: ZipOptions = { zip64Eocd: { saturate: true } };
 void _typecheck;
+
+test('safety net: an unexpected exception inside validation surfaces as a GcrError (PARSE_FAILURE), never as a raw error', () => {
+  const evil = Buffer.from(buildZip([GOOD]));
+  Object.defineProperty(evil, 'subarray', {
+    value: (): never => {
+      throw new RangeError('simulated parser bug');
+    },
+  });
+  let caught: unknown;
+  try {
+    SafeZipReader.fromBuffer(evil);
+  } catch (e) {
+    caught = e;
+  }
+  assert.ok(caught instanceof GcrError, `got ${String(caught)}`);
+  assert.equal(caught.code, 'IMPORT_ZIP_UNSAFE');
+  assert.equal(caught.details?.['reason'], 'PARSE_FAILURE');
+  assert.ok(caught.cause instanceof RangeError, 'the original error is kept as the cause for debugging');
+  assert.ok(!caught.message.includes('simulated'), 'the raw message must not leak into the user-facing message');
+});
+
+test('open(): FIFOs and device files are refused promptly instead of blocking the process', { timeout: 10_000 }, async (t) => {
+  await withTempDir(async (dir) => {
+    const fifo = join(dir, 'pipe.zip');
+    try {
+      execFileSync('mkfifo', [fifo]);
+    } catch {
+      t.skip('mkfifo is not available');
+      return;
+    }
+    const t0 = Date.now();
+    await assert.rejects(SafeZipReader.open(fifo), (e: unknown) => e instanceof GcrError && e.code === 'IMPORT_UNSUPPORTED_FORMAT');
+    assert.ok(Date.now() - t0 < 3000, 'opening a FIFO must not wait for a writer');
+  });
+  if (existsSync('/dev/zero')) {
+    await assert.rejects(SafeZipReader.open('/dev/zero'), (e: unknown) => e instanceof GcrError && e.code === 'IMPORT_UNSUPPORTED_FORMAT');
+  }
+});

@@ -1,0 +1,64 @@
+[
+  {
+    "uuid": "00000000-0000-4000-8000-000000000003",
+    "name": "GCR-SYNTHETIC-FIXTURE thinking and tool blocks",
+    "summary": "",
+    "created_at": "2025-05-06T07:08:09.000000Z",
+    "updated_at": "2025-05-06T07:09:09.000000Z",
+    "account": { "uuid": "00000000-0000-4000-8000-000000000900" },
+    "chat_messages": [
+      {
+        "uuid": "00000000-0000-4000-8000-000000000031",
+        "text": "synthetic human request that needs a tool",
+        "content": [
+          { "type": "text", "text": "synthetic human request that needs a tool" }
+        ],
+        "sender": "human",
+        "created_at": "2025-05-06T07:08:09.000000Z",
+        "updated_at": "2025-05-06T07:08:09.000000Z",
+        "attachments": [],
+        "files": []
+      },
+      {
+        "uuid": "00000000-0000-4000-8000-000000000032",
+        "text": "synthetic final answer after the tool call",
+        "content": [
+          { "type": "thinking", "thinking": "SYNTHETIC-HIDDEN-REASONING the model plans an invented tool call" },
+          { "type": "text", "text": "synthetic final answer after the tool call" },
+          {
+            "type": "tool_use",
+            "id": "synthetic_toolu_01",
+            "name": "synthetic_search_tool",
+            "input": { "query": "invented query", "limit": 3, "nested": { "flag": true, "list": [1, 2, 3] } }
+          },
+          {
+            "type": "tool_result",
+            "tool_use_id": "synthetic_toolu_01",
+            "name": "synthetic_search_tool",
+            "content": [
+              { "type": "text", "text": "SYNTHETIC-TOOL-RESULT first hit" },
+              { "type": "text", "text": "SYNTHETIC-TOOL-RESULT second hit" },
+              { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "c3ludGhldGlj" } }
+            ],
+            "is_error": false
+          },
+          {
+            "type": "tool_result",
+            "tool_use_id": "synthetic_toolu_02",
+            "content": "SYNTHETIC-TOOL-ERROR the invented tool failed",
+            "is_error": true
+          },
+          { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "c3ludGhldGlj" } },
+          { "type": "voice_note", "text": "synthetic voice note transcript" },
+          { "type": "token_budget" },
+          { "type": "synthetic_future_block_v9", "payload": { "anything": ["goes", 1, null] } }
+        ],
+        "sender": "assistant",
+        "created_at": "2025-05-06T07:09:09.000000Z",
+        "updated_at": "2025-05-06T07:09:09.000000Z",
+        "attachments": [],
+        "files": []
+      }
+    ]
+  }
+]

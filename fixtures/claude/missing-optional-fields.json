@@ -1,0 +1,41 @@
+[
+  {
+    "uuid": "00000000-0000-4000-8000-000000000005",
+    "chat_messages": [
+      { "uuid": "00000000-0000-4000-8000-000000000051", "sender": "human", "text": "GCR-SYNTHETIC-FIXTURE conversation with only a uuid and bare messages" },
+      { "uuid": "00000000-0000-4000-8000-000000000052", "sender": "assistant", "text": "synthetic reply without timestamps, content or attachments" }
+    ]
+  },
+  {
+    "name": "GCR-SYNTHETIC-FIXTURE conversation without uuid or timestamps",
+    "chat_messages": [
+      { "sender": "human", "text": "synthetic message without a uuid" },
+      { "text": "synthetic message without a sender" },
+      {
+        "uuid": "00000000-0000-4000-8000-000000000063",
+        "sender": "assistant",
+        "text": null,
+        "content": null,
+        "created_at": null,
+        "updated_at": null,
+        "attachments": null,
+        "files": null
+      }
+    ]
+  },
+  {
+    "uuid": "00000000-0000-4000-8000-000000000006",
+    "name": null,
+    "summary": null,
+    "created_at": null,
+    "updated_at": null,
+    "account": null,
+    "chat_messages": [
+      {
+        "uuid": "00000000-0000-4000-8000-000000000071",
+        "sender": "human",
+        "content": [{ "type": "text", "text": "GCR-SYNTHETIC-FIXTURE message with content blocks but no top-level text" }]
+      }
+    ]
+  }
+]

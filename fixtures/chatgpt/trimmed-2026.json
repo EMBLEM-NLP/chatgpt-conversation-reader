@@ -1,0 +1,193 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000003",
+    "title": "GCR-SYNTHETIC-FIXTURE F03 trimmed 2026-style export (no children, no recipient/status/weight)",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000420.654321,
+    "mapping": {
+      "00000000-0000-4000-8000-00000000000f": {
+        "id": "00000000-0000-4000-8000-00000000000f",
+        "message": null,
+        "parent": null
+      },
+      "00000000-0000-4000-8000-000000000010": {
+        "id": "00000000-0000-4000-8000-000000000010",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000010",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic user turn 1"
+            ]
+          },
+          "end_turn": null,
+          "metadata": {
+            "timestamp_": "absolute"
+          }
+        },
+        "parent": "00000000-0000-4000-8000-00000000000f"
+      },
+      "00000000-0000-4000-8000-000000000011": {
+        "id": "00000000-0000-4000-8000-000000000011",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000011",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic assistant answer 1 (active branch)"
+            ]
+          },
+          "end_turn": true,
+          "metadata": {
+            "timestamp_": "absolute",
+            "model_slug": "synthetic-model-1"
+          }
+        },
+        "parent": "00000000-0000-4000-8000-000000000010"
+      },
+      "00000000-0000-4000-8000-000000000012": {
+        "id": "00000000-0000-4000-8000-000000000012",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000012",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000120.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic user turn 2"
+            ]
+          },
+          "end_turn": null,
+          "metadata": {
+            "timestamp_": "absolute"
+          }
+        },
+        "parent": "00000000-0000-4000-8000-000000000011"
+      },
+      "00000000-0000-4000-8000-000000000013": {
+        "id": "00000000-0000-4000-8000-000000000013",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000013",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000180.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic assistant answer 2 (current node)"
+            ]
+          },
+          "end_turn": true,
+          "metadata": {
+            "timestamp_": "absolute",
+            "model_slug": "synthetic-model-2"
+          }
+        },
+        "parent": "00000000-0000-4000-8000-000000000012"
+      },
+      "00000000-0000-4000-8000-000000000014": {
+        "id": "00000000-0000-4000-8000-000000000014",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000014",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000240.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic partial regenerated answer"
+            ]
+          },
+          "end_turn": true,
+          "metadata": {
+            "timestamp_": "absolute",
+            "model_slug": "synthetic-model-1",
+            "finish_details": {
+              "type": "interrupted",
+              "reason": "client_stopped"
+            }
+          }
+        },
+        "parent": "00000000-0000-4000-8000-000000000010"
+      },
+      "00000000-0000-4000-8000-000000000015": {
+        "id": "00000000-0000-4000-8000-000000000015",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000015",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000300.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic edited user turn 1"
+            ]
+          },
+          "end_turn": null,
+          "metadata": {
+            "timestamp_": "absolute"
+          }
+        },
+        "parent": "00000000-0000-4000-8000-00000000000f"
+      },
+      "00000000-0000-4000-8000-000000000016": {
+        "id": "00000000-0000-4000-8000-000000000016",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000016",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000360.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic answer to the edited turn"
+            ]
+          },
+          "end_turn": true,
+          "metadata": {
+            "timestamp_": "absolute",
+            "model_slug": "synthetic-model-1"
+          }
+        },
+        "parent": "00000000-0000-4000-8000-000000000015"
+      }
+    },
+    "current_node": "00000000-0000-4000-8000-000000000013",
+    "default_model_slug": "synthetic-default-model"
+  }
+]

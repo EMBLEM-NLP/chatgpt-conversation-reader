@@ -10,10 +10,11 @@
  *    UTF-8 no byte of a multi-byte sequence is < 0x80, so a character split across two chunks can never be mistaken
  *    for structure. Text is decoded only once a whole element is available, so splits inside a code point are harmless.
  *  - Memory is bounded by ONE element (plus the current chunk): bytes of the element being scanned are accumulated
- *    in a single reusable buffer, and `maxElementBytes` is enforced while accumulating (not after), so a hostile
- *    never-ending string cannot exhaust memory.
- *  - State is per byte, so output is identical for any chunking (down to 1-byte chunks). Errors carry only a byte
- *    OFFSET and a reason code - never input content (log hygiene, NFR-07).
+ *    in a single reusable buffer, and `maxElementBytes` is enforced WHILE SCANNING (the scanners never read past
+ *    elementStart + maxElementBytes), so a hostile never-ending string cannot exhaust memory.
+ *  - State is per byte and every error position is an ABSOLUTE stream offset, so output (including which error is
+ *    reported, and where) is identical for any chunking down to 1-byte chunks. Errors carry only a byte OFFSET and a
+ *    reason code - never input content (log hygiene, NFR-07).
  *  - The splitter validates framing only (strings/escapes, bracket pairing and nesting depth, separators). It does not
  *    validate the inside of an element; `JSON.parse` in the caller does.
  *  - The yielded text is untrusted DATA (AGENTS.md): it is never evaluated or interpreted here.
@@ -127,6 +128,10 @@ function parseError(reason: JsonParseReason, byteOffset: number): GcrError {
   });
 }
 
+/**
+ * `byteOffset` is ALWAYS elementStart + max: the position of the first byte that does not fit. Defining it by absolute
+ * position (not by "where this chunk happened to end") keeps the error identical for every chunking.
+ */
 function elementTooLarge(index: number, max: number, byteOffset: number): GcrError {
   return new GcrError('IMPORT_LIMIT_EXCEEDED', `JSON element #${index} exceeds the maximum element size of ${max} bytes.`, {
     remedy: 'The export contains a single record larger than the configured element limit; raise maxElementBytes only if the file is trusted.',
@@ -168,6 +173,8 @@ class ElementScanner {
   private depth = 0;
   private inString = false;
   private escaped = false;
+  /** Absolute stream offset of the first byte of the current element. */
+  private elementStart = 0;
   /** Index (within the current chunk) where the unflushed part of the current element begins. */
   private pieceStart = 0;
   /** Exclusive end index (in the current chunk) of a just-completed element, or -1. */
@@ -181,6 +188,9 @@ class ElementScanner {
   private count = 0;
 
   constructor(mode: Mode, opts: JsonStreamOptions) {
+    if (typeof opts !== 'object' || opts === null) {
+      throw new GcrError('INVALID_ARGUMENT', 'JSON stream options must be an object.', { details: { reason: 'BAD_OPTIONS' } });
+    }
     this.lines = mode === 'lines';
     this.allowSingleObject = mode === 'array' && opts.allowSingleObject === true;
     // Reuse the central validation so a bad option (0, NaN, Infinity, negative) is rejected exactly like ImportLimits.
@@ -312,6 +322,7 @@ class ElementScanner {
   private beginValue(b: number, i: number): void {
     this.phase = PH_VALUE;
     this.pieceStart = i;
+    this.elementStart = this.base + i;
     this.accLen = 0;
     this.endAt = -1;
     this.escaped = false;
@@ -347,7 +358,13 @@ class ElementScanner {
     let inString = this.inString;
     let escaped = this.escaped;
     let depth = this.depth;
-    while (i < n) {
+    // Element size limit, defined by ABSOLUTE position so the outcome cannot depend on chunking: `limitIdx` is the chunk
+    // index of the first byte that would be the (max+1)-th byte of this element. We never scan at or beyond it, and if the
+    // element is still open when a byte exists there, that byte is the violation (it wins over any structural error
+    // that would only show up later in the stream).
+    const limitIdx = this.elementStart + this.maxElementBytes - this.base;
+    const end = Math.min(n, limitIdx);
+    while (i < end) {
       const b = chunk[i] as number;
       if (inString) {
         // NDJSON: a raw LF can never be part of a valid string, even right after a backslash, so check it first.
@@ -391,6 +408,7 @@ class ElementScanner {
     this.inString = inString;
     this.escaped = escaped;
     this.depth = depth;
+    if (this.endAt < 0 && limitIdx < n && i >= limitIdx) throw elementTooLarge(this.count, this.maxElementBytes, this.elementStart + this.maxElementBytes);
     return i;
   }
 
@@ -398,9 +416,11 @@ class ElementScanner {
   private scanScalar(chunk: Buffer, start: number): number {
     const n = chunk.length;
     let i = start; // the first byte was already classified (and consumed) by beginValue
+    const limitIdx = this.elementStart + this.maxElementBytes - this.base; // see scanCompound
     while (i < n) {
       const b = chunk[i] as number;
       if (SCALAR_BYTE[b] === 1) {
+        if (i >= limitIdx) throw elementTooLarge(this.count, this.maxElementBytes, this.elementStart + this.maxElementBytes);
         i++;
         continue;
       }
@@ -428,9 +448,9 @@ class ElementScanner {
   private carryOver(chunk: Buffer, n: number): void {
     const len = n - this.pieceStart;
     if (len > 0) {
+      // The scanners never advance past elementStart + maxElementBytes, so `need` is already bounded by the limit here:
+      // buffered data never exceeds maxElementBytes (+ the current chunk) and nothing is copied for an oversized element.
       const need = this.accLen + len;
-      // Enforce the limit BEFORE growing/copying: buffered data never exceeds maxElementBytes (+ the current chunk).
-      if (need > this.maxElementBytes) throw elementTooLarge(this.count, this.maxElementBytes, this.base + n);
       this.ensureAcc(need);
       chunk.copy(this.acc, this.accLen, this.pieceStart, n);
       this.accLen = need;
@@ -449,8 +469,7 @@ class ElementScanner {
   /** Finish the current element. `chunk` holds its tail (indices pieceStart..end); null at EOF when everything is in `acc`. */
   private completeElement(chunk: Buffer | null, end: number): JsonElement {
     const tail = chunk === null ? 0 : end - this.pieceStart;
-    const total = this.accLen + tail;
-    if (total > this.maxElementBytes) throw elementTooLarge(this.count, this.maxElementBytes, this.base + end);
+    const total = this.accLen + tail; // <= maxElementBytes by construction (see scanCompound / scanScalar)
     let text: string;
     if (this.accLen === 0 && chunk !== null) {
       // Common fast path: the element lies entirely in this chunk; decode straight from it (no copy).

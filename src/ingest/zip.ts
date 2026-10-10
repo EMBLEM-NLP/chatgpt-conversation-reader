@@ -20,7 +20,7 @@
  * Known limits of this reader (also reported in the module notes): multi-disk archives, encryption, Windows reparse points,
  * the PKWARE digital-signature record and bytes trailing a DEFLATE stream (ignored, but CRC/size still bind the output).
  */
-import { open as fsOpen } from 'node:fs/promises';
+import { constants as fsConstants, open as fsOpen } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { Readable, pipeline } from 'node:stream';
 import { createInflateRaw, crc32 } from 'node:zlib';
@@ -813,7 +813,9 @@ export class SafeZipReader {
     if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) throw invalidArgument('A file path is required.', 'BAD_PATH');
     let handle: FileHandle;
     try {
-      handle = await fsOpen(path, 'r');
+      // O_NONBLOCK: opening a FIFO/device path read-only would otherwise BLOCK until a writer appears, hanging a worker
+      // thread on a hostile path. For regular files the flag has no effect; non-regular files are refused right below.
+      handle = await fsOpen(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
     } catch (e) {
       const code = errnoCode(e);
       // Never put the path in the message (it can be an absolute private path).
@@ -838,7 +840,10 @@ export class SafeZipReader {
     }
   }
 
-  /** Open an in-memory archive (tests). The buffer must not be modified while the reader is in use. */
+  /**
+   * Open an in-memory archive (tests). The buffer must not be modified while the reader is in use, and STORE entries are
+   * delivered as zero-copy views of it (so consumers must not modify the chunks either).
+   */
   static fromBuffer(buf: Buffer, limits?: Partial<ImportLimits>): SafeZipReader {
     const resolved = resolveLimits(limits);
     if (!Buffer.isBuffer(buf)) throw invalidArgument('A Buffer is required.', 'BAD_BUFFER');

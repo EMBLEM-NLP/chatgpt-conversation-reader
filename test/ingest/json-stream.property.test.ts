@@ -158,6 +158,9 @@ test(`differential oracle: whenever JSON.parse accepts an array, the splitter ac
         const p = e.pos % (text.length + 1);
         text = e.kind === 'insert' ? text.slice(0, p) + e.ch + text.slice(p) : e.kind === 'delete' ? text.slice(0, p) + text.slice(p + 1) : text.slice(0, p) + e.ch + text.slice(p + 1);
       }
+      // Mutations can split a surrogate pair, leaving a lone surrogate that UTF-8 cannot carry (it becomes U+FFFD in the
+      // bytes). Judge JSON.parse on exactly what the splitter sees: the text after a UTF-8 round trip.
+      text = Buffer.from(text, 'utf8').toString('utf8');
       const out = await assertInvariant(jsonArrayElements as Gen, Buffer.from(text, 'utf8'), sizes);
       let parsed: unknown;
       let valid = true;

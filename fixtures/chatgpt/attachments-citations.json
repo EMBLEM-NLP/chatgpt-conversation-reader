@@ -1,0 +1,226 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-00000000000b",
+    "conversation_id": "00000000-0000-4000-8000-00000000000b",
+    "title": "GCR-SYNTHETIC-FIXTURE F11 attachments, citations and content references",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000180.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "00000000-0000-4000-8000-000000000010"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000010": {
+        "id": "00000000-0000-4000-8000-000000000010",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000010",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with attachments"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute",
+            "attachments": [
+              {
+                "id": "file-SYN0001",
+                "name": "synthetic-notes.txt",
+                "mime_type": "text/plain",
+                "size": 120,
+                "source": "local"
+              },
+              {
+                "id": "file-SYN0002",
+                "name": "synthetic-diagram.png",
+                "mimeType": "image/png",
+                "size": 2048,
+                "fileSizeTokens": 55,
+                "source": "library",
+                "library_file_id": "lib-SYN0002"
+              },
+              {
+                "id": "file-SYN0003",
+                "name": "synthetic-missing.pdf",
+                "mime_type": "application/pdf",
+                "size": 4096
+              },
+              "not an object"
+            ]
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "00000000-0000-4000-8000-000000000011"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000011": {
+        "id": "00000000-0000-4000-8000-000000000011",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000011",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic answer with citations"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute",
+            "model_slug": "synthetic-model-1",
+            "citations": [
+              {
+                "start_ix": 10,
+                "end_ix": 4,
+                "citation_format_type": "tether_v4",
+                "metadata": {
+                  "title": "synthetic inverted range",
+                  "url": "https://example.invalid/c1",
+                  "text": "synthetic",
+                  "type": "webpage",
+                  "extra": null
+                }
+              },
+              {
+                "start_ix": 1.5,
+                "end_ix": 2.5,
+                "citation_format_type": "tether_v4",
+                "metadata": {
+                  "title": "synthetic fractional range",
+                  "url": "https://example.invalid/c2"
+                }
+              }
+            ],
+            "content_references": [
+              {
+                "type": "grouped_webpages",
+                "matched_text": "citeturn0search0",
+                "start_idx": 99999,
+                "end_idx": 100010,
+                "items": [
+                  {
+                    "title": "synthetic grouped",
+                    "url": "https://example.invalid/g1"
+                  }
+                ]
+              },
+              {
+                "type": "sources_footnote",
+                "matched_text": " ",
+                "sources": [
+                  {
+                    "title": "synthetic source",
+                    "url": "https://example.invalid/s1"
+                  }
+                ]
+              },
+              {
+                "type": "file",
+                "matched_text": "synthetic file reference",
+                "input_pointer": {
+                  "message_index": 0,
+                  "file_index": 0
+                }
+              }
+            ]
+          },
+          "recipient": "all",
+          "channel": "final"
+        },
+        "parent": "00000000-0000-4000-8000-000000000010",
+        "children": [
+          "00000000-0000-4000-8000-000000000012"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000012": {
+        "id": "00000000-0000-4000-8000-000000000012",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000012",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000120.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "multimodal_text",
+            "parts": [
+              "synthetic follow-up with the same file",
+              {
+                "content_type": "image_asset_pointer",
+                "asset_pointer": "file-service://file-SYN0002",
+                "size_bytes": 2048,
+                "width": 512,
+                "height": 512,
+                "fovea": null,
+                "metadata": {
+                  "dalle": null,
+                  "gizmo": null,
+                  "generation": null,
+                  "sanitized": true
+                }
+              }
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute",
+            "attachments": [
+              {
+                "id": "file-SYN0001",
+                "name": "synthetic-notes.txt",
+                "mime_type": "text/plain",
+                "size": 120
+              }
+            ]
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000011",
+        "children": []
+      }
+    },
+    "current_node": "00000000-0000-4000-8000-000000000012",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  }
+]

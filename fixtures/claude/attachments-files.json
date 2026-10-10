@@ -1,0 +1,55 @@
+[
+  {
+    "uuid": "00000000-0000-4000-8000-000000000002",
+    "name": "GCR-SYNTHETIC-FIXTURE attachments and files",
+    "summary": "",
+    "created_at": "2025-04-01T10:00:00.000000Z",
+    "updated_at": "2025-04-01T10:02:00.000000Z",
+    "account": { "uuid": "00000000-0000-4000-8000-000000000900" },
+    "chat_messages": [
+      {
+        "uuid": "00000000-0000-4000-8000-000000000021",
+        "text": "synthetic human turn with two attachments and one file",
+        "content": [
+          { "type": "text", "text": "synthetic human turn with two attachments and one file" }
+        ],
+        "sender": "human",
+        "created_at": "2025-04-01T10:00:00.000000Z",
+        "updated_at": "2025-04-01T10:00:00.000000Z",
+        "attachments": [
+          {
+            "file_name": "synthetic-notes.txt",
+            "file_size": 1234,
+            "file_type": "text/plain",
+            "extracted_content": "SYNTHETIC-EXTRACTED-TEXT line one\nSYNTHETIC-EXTRACTED-TEXT line two"
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000a01",
+            "file_name": "synthetic-table.csv",
+            "file_size": 56,
+            "file_type": "csv"
+          }
+        ],
+        "files": [
+          {
+            "file_uuid": "00000000-0000-4000-8000-000000000f01",
+            "file_name": "synthetic-diagram.png",
+            "file_kind": "image"
+          }
+        ]
+      },
+      {
+        "uuid": "00000000-0000-4000-8000-000000000022",
+        "text": "synthetic assistant answer that mentions the notes",
+        "content": [
+          { "type": "text", "text": "synthetic assistant answer that mentions the notes" }
+        ],
+        "sender": "assistant",
+        "created_at": "2025-04-01T10:02:00.000000Z",
+        "updated_at": "2025-04-01T10:02:00.000000Z",
+        "attachments": [],
+        "files": []
+      }
+    ]
+  }
+]

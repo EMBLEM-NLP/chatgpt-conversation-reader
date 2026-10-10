@@ -40,6 +40,8 @@ export interface ZipEntrySpec {
   extraFlags?: number;
   /** OR additional bits into the flags of the LOCAL header only. */
   localExtraFlags?: number;
+  /** OR additional bits into the flags of the CENTRAL directory record only. */
+  centralExtraFlags?: number;
   /** "Version made by" host byte (default 3 = Unix). */
   madeByHost?: number;
   /** Full 32-bit external file attributes; wins over `unixMode`. */
@@ -215,7 +217,7 @@ export function buildZip(entries: ZipEntrySpec[], opts: ZipOptions = {}): Buffer
     cd.writeUInt32LE(0x02014b50, 0);
     cd.writeUInt16LE(((e.madeByHost ?? 3) << 8) | 20, 4); // made by: unix (default), v2.0
     cd.writeUInt16LE(z64 ? 45 : 20, 6);
-    cd.writeUInt16LE(flags, 8);
+    cd.writeUInt16LE(flags | (e.centralExtraFlags ?? 0), 8);
     cd.writeUInt16LE(methodId, 10);
     cd.writeUInt16LE(0, 12);
     cd.writeUInt16LE(0x21, 14);

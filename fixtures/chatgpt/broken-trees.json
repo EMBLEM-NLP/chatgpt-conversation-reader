@@ -1,0 +1,1060 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000030",
+    "conversation_id": "00000000-0000-4000-8000-000000000030",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 cycle with no root",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000120.654321,
+    "mapping": {
+      "cyc-a": {
+        "id": "cyc-a",
+        "message": {
+          "id": "cyc-a",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic cycle node A"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "cyc-b",
+        "children": [
+          "cyc-b"
+        ]
+      },
+      "cyc-b": {
+        "id": "cyc-b",
+        "message": {
+          "id": "cyc-b",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic cycle node B"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "cyc-a",
+        "children": [
+          "cyc-a"
+        ]
+      }
+    },
+    "current_node": "cyc-a",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000031",
+    "conversation_id": "00000000-0000-4000-8000-000000000031",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 cycle declared from a root",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000180.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-x"
+        ]
+      },
+      "node-x": {
+        "id": "node-x",
+        "message": {
+          "id": "node-x",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic node X"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "cyc-y"
+        ]
+      },
+      "cyc-y": {
+        "id": "cyc-y",
+        "message": {
+          "id": "cyc-y",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic cycle node Y"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "cyc-z",
+        "children": [
+          "cyc-z"
+        ]
+      },
+      "cyc-z": {
+        "id": "cyc-z",
+        "message": {
+          "id": "cyc-z",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000120.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic cycle node Z"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "cyc-y",
+        "children": [
+          "cyc-y"
+        ]
+      }
+    },
+    "current_node": "node-x",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000032",
+    "conversation_id": "00000000-0000-4000-8000-000000000032",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 self parent",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000120.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-x"
+        ]
+      },
+      "node-x": {
+        "id": "node-x",
+        "message": {
+          "id": "node-x",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic node X"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": []
+      },
+      "self-w": {
+        "id": "self-w",
+        "message": {
+          "id": "self-w",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic self-parent node"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "self-w",
+        "children": [
+          "self-w"
+        ]
+      }
+    },
+    "current_node": "node-x",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000033",
+    "conversation_id": "00000000-0000-4000-8000-000000000033",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 dangling parent",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000120.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-x"
+        ]
+      },
+      "node-x": {
+        "id": "node-x",
+        "message": {
+          "id": "node-x",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic node X"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": []
+      },
+      "orphan-y": {
+        "id": "orphan-y",
+        "message": {
+          "id": "orphan-y",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic orphan node"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "ghost-parent",
+        "children": []
+      }
+    },
+    "current_node": "node-x",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000034",
+    "conversation_id": "00000000-0000-4000-8000-000000000034",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 children names a missing id",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000060.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-x"
+        ]
+      },
+      "node-x": {
+        "id": "node-x",
+        "message": {
+          "id": "node-x",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic node X"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "ghost-child"
+        ]
+      }
+    },
+    "current_node": "node-x",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000035",
+    "conversation_id": "00000000-0000-4000-8000-000000000035",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 node claimed by two parents",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000180.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "parent-1",
+          "parent-2"
+        ]
+      },
+      "parent-1": {
+        "id": "parent-1",
+        "message": {
+          "id": "parent-1",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic parent one"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "child-c"
+        ]
+      },
+      "parent-2": {
+        "id": "parent-2",
+        "message": {
+          "id": "parent-2",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic parent two"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "child-c"
+        ]
+      },
+      "child-c": {
+        "id": "child-c",
+        "message": {
+          "id": "child-c",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000120.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic contested child"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all",
+          "channel": "final"
+        },
+        "parent": "parent-1",
+        "children": []
+      }
+    },
+    "current_node": "child-c",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000036",
+    "conversation_id": "00000000-0000-4000-8000-000000000036",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 current_node dangling",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000120.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-x"
+        ]
+      },
+      "node-x": {
+        "id": "node-x",
+        "message": {
+          "id": "node-x",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic user"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "node-y"
+        ]
+      },
+      "node-y": {
+        "id": "node-y",
+        "message": {
+          "id": "node-y",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic assistant"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all",
+          "channel": "final"
+        },
+        "parent": "node-x",
+        "children": []
+      }
+    },
+    "current_node": "ghost-current",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000037",
+    "conversation_id": "00000000-0000-4000-8000-000000000037",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 current_node on a mid-tree node",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000240.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-u1"
+        ]
+      },
+      "node-u1": {
+        "id": "node-u1",
+        "message": {
+          "id": "node-u1",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic user 1"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "node-a1"
+        ]
+      },
+      "node-a1": {
+        "id": "node-a1",
+        "message": {
+          "id": "node-a1",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic assistant 1"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all",
+          "channel": "final"
+        },
+        "parent": "node-u1",
+        "children": [
+          "node-u2"
+        ]
+      },
+      "node-u2": {
+        "id": "node-u2",
+        "message": {
+          "id": "node-u2",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000120.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic user 2"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "node-a1",
+        "children": [
+          "node-a2"
+        ]
+      },
+      "node-a2": {
+        "id": "node-a2",
+        "message": {
+          "id": "node-a2",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000180.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic assistant 2"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all",
+          "channel": "final"
+        },
+        "parent": "node-u2",
+        "children": []
+      }
+    },
+    "current_node": "node-a1",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000038",
+    "conversation_id": "00000000-0000-4000-8000-000000000038",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 two roots",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000120.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-x"
+        ]
+      },
+      "00000000-0000-4000-8000-00000000004f": {
+        "id": "00000000-0000-4000-8000-00000000004f",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-y"
+        ]
+      },
+      "node-x": {
+        "id": "node-x",
+        "message": {
+          "id": "node-x",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic under root one"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": []
+      },
+      "node-y": {
+        "id": "node-y",
+        "message": {
+          "id": "node-y",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic under root two"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-00000000004f",
+        "children": []
+      }
+    },
+    "current_node": "node-y",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000039",
+    "conversation_id": "00000000-0000-4000-8000-000000000039",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 node key differs from node.id",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000060.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "key-1"
+        ]
+      },
+      "key-1": {
+        "id": "other-node-id",
+        "message": {
+          "id": "key-1",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic user"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": []
+      }
+    },
+    "current_node": "key-1",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  },
+  {
+    "id": "00000000-0000-4000-8000-00000000003a",
+    "conversation_id": "00000000-0000-4000-8000-00000000003a",
+    "title": "GCR-SYNTHETIC-FIXTURE F07 message.id differs from node id, and a repeated message.id",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000120.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "node-1"
+        ]
+      },
+      "node-1": {
+        "id": "node-1",
+        "message": {
+          "id": "shared-message-id",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic user"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "node-2"
+        ]
+      },
+      "node-2": {
+        "id": "node-2",
+        "message": {
+          "id": "shared-message-id",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic assistant"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all",
+          "channel": "final"
+        },
+        "parent": "node-1",
+        "children": []
+      }
+    },
+    "current_node": "node-2",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  }
+]

@@ -1,0 +1,303 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000008",
+    "conversation_id": "00000000-0000-4000-8000-000000000008",
+    "title": "GCR-SYNTHETIC-FIXTURE F08 duplicate keys, __proto__ and integer-like node ids",
+    "create_time": 1759999880.654321,
+    "update_time": 1760000480.654321,
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "__proto__"
+        ]
+      },
+      "__proto__": {
+        "id": "__proto__",
+        "message": {
+          "id": "__proto__",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message under node id __proto__"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "constructor"
+        ]
+      },
+      "constructor": {
+        "id": "constructor",
+        "message": {
+          "id": "constructor",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000060.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message under node id constructor"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "__proto__",
+        "children": [
+          "10"
+        ]
+      },
+      "10": {
+        "id": "10",
+        "message": {
+          "id": "10",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000120.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message under node id 10"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "constructor",
+        "children": [
+          "9"
+        ]
+      },
+      "9": {
+        "id": "9",
+        "message": {
+          "id": "9",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000180.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message under node id 9"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "10",
+        "children": [
+          "2"
+        ]
+      },
+      "2": {
+        "id": "2",
+        "message": {
+          "id": "2",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000240.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message under node id 2"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "9",
+        "children": [
+          "dup-node"
+        ]
+      },
+      "dup-node": {
+        "id": "dup-node",
+        "message": {
+          "id": "dup-node",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000300.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic FIRST body of the duplicated node id (shadowed)"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "2",
+        "children": [
+          "dup-content-type"
+        ]
+      },
+      "dup-node": {
+        "id": "dup-node",
+        "message": {
+          "id": "dup-node",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000300.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message under node id dup-node"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "2",
+        "children": [
+          "dup-content-type"
+        ]
+      },
+      "dup-content-type": {
+        "id": "dup-content-type",
+        "message": {
+          "id": "dup-content-type",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000360.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "content_type": "multimodal_text",
+            "parts": [
+              "synthetic text of the duplicated content_type"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "dup-node",
+        "children": [
+          "string-with-dup-lookalike"
+        ]
+      },
+      "string-with-dup-lookalike": {
+        "id": "string-with-dup-lookalike",
+        "message": {
+          "id": "string-with-dup-lookalike",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000420.123456,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "{\"a\":1,\"a\":2} is just text"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "dup-content-type",
+        "children": []
+      }
+    },
+    "current_node": "string-with-dup-lookalike",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  }
+]

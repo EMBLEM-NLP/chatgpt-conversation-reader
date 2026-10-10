@@ -4,12 +4,14 @@
  */
 import assert from 'node:assert/strict';
 import { crc32 } from 'node:zlib';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdir, open as openFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { GcrError } from '../../src/errors.js';
 import { SafeZipReader, sanitizeEntryName } from '../../src/ingest/zip.js';
 import { buildZip } from '../helpers/zip-builder.js';
+import type { ZipEntrySpec } from '../helpers/zip-builder.js';
 import { withTempDir } from '../helpers/tmp.js';
 
 /** Deterministic pseudo-random, moderately compressible bytes (no Math.random: results must be reproducible). */
@@ -356,4 +358,68 @@ test('sanitizeEntryName(): escapes non-printables, keeps letters, truncates to 8
   assert.ok(long.endsWith('...'));
   const escapedLong = sanitizeEntryName('\u0001'.repeat(100));
   assert.ok(escapedLong.length <= 80, `length ${escapedLong.length}`);
+});
+
+test('static policy: ingest modules import only allowed built-ins, no network, console, any, clock or randomness', () => {
+  const files = ['limits.ts', 'zip.ts', 'json-stream.ts'];
+  const allowedImports = new Set(['node:fs/promises', 'node:stream', 'node:zlib', '../errors.js', './limits.js']);
+  for (const f of files) {
+    const src = readFileSync(new URL(`../../../src/ingest/${f}`, import.meta.url), 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    for (const m of src.matchAll(/^import (?:type )?[^;]*? from '([^']+)';$/gm)) {
+      assert.ok(allowedImports.has(m[1] as string), `${f}: unexpected import ${String(m[1])}`);
+    }
+    assert.ok(!/node:(?:http|https|http2|net|tls|dns|dgram|child_process|worker_threads|cluster)/.test(code), `${f}: network/process module referenced`);
+    assert.ok(!/\bfetch\s*\(|\bXMLHttpRequest\b|\bWebSocket\b/.test(code), `${f}: network API referenced`);
+    assert.ok(!/\bconsole\s*\./.test(code), `${f}: console.* is forbidden outside cli/`);
+    assert.ok(!/:\s*any\b|\bas any\b|<any>/.test(code), `${f}: \`any\` is forbidden`);
+    assert.ok(!/Date\.now\s*\(|new Date\s*\(|Math\.random\s*\(/.test(code), `${f}: results must not depend on the clock or randomness`);
+    assert.ok(!/\bexec(?:Sync)?\s*\(|\beval\s*\(|new Function\s*\(/.test(code), `${f}: dynamic code execution`);
+    assert.ok(!/\bwriteFile|\bmkdir|\bcreateWriteStream|\bunlink|\brename\s*\(/.test(code), `${f}: the ingest layer must never write to disk`);
+  }
+});
+
+test('ZIP64 with REAL offsets beyond 4 GiB (sparse file): a local header, the central directory and the end records all sit above 2^32', { timeout: 30_000 }, async (t) => {
+  const GAP = 5 * 1024 ** 3; // a 5 GiB hole between the two entries; the file is sparse so it costs no disk space
+  const first: ZipEntrySpec = { name: 'first.bin', data: 'first entry data', method: 'store' };
+  const second: ZipEntrySpec = { name: 'second.txt', data: 'second entry lives above four gibibytes', method: 'deflate' };
+  const layout = (gap: number, secondLocal: number, cdStart: number, recordPos: number): Buffer =>
+    buildZip([first, { ...second, zip64: { offset: true }, localOffsetOverride: secondLocal + gap }], {
+      zip64Eocd: { cdOffsetOverride: cdStart + gap, locatorOffsetOverride: recordPos + gap },
+    });
+  // Pass 1 learns where things are (offset values do not change any field width); pass 2 writes the real values.
+  const pass1 = layout(0, 0, 0, 0);
+  const secondLocal = pass1.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]), 1);
+  const cdStart = pass1.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  const recordPos = pass1.length - 22 - 20 - 56;
+  assert.ok(secondLocal > 0 && cdStart > secondLocal && recordPos > cdStart, 'sanity: layout probe');
+  const archive = layout(GAP, secondLocal, cdStart, recordPos);
+  assert.equal(archive.length, pass1.length);
+
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'sparse.zip');
+    const fh = await openFile(path, 'w');
+    try {
+      await fh.write(archive, 0, secondLocal, 0);
+      await fh.write(archive, secondLocal, archive.length - secondLocal, secondLocal + GAP);
+    } catch (e) {
+      await fh.close();
+      t.skip(`file system cannot create a sparse 5 GiB file: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    await fh.close();
+    const r = await SafeZipReader.open(path);
+    assert.deepEqual(
+      r.entries().map((e) => e.name),
+      ['first.bin', 'second.txt'],
+    );
+    assert.equal((await r.readBuffer('first.bin')).toString(), 'first entry data');
+    assert.equal((await r.readBuffer('second.txt')).toString(), 'second entry lives above four gibibytes');
+    await r.close();
+    // The same file with a smaller maxZipFileBytes is refused as a limit trip before anything else is parsed.
+    await assert.rejects(
+      SafeZipReader.open(path, { maxZipFileBytes: 4 * 1024 ** 3 }),
+      (e: unknown) => e instanceof GcrError && e.code === 'IMPORT_LIMIT_EXCEEDED' && e.details?.['reason'] === 'ARCHIVE_TOO_LARGE',
+    );
+  });
 });

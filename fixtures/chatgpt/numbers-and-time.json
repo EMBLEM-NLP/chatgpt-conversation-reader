@@ -1,0 +1,520 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-00000000000a",
+    "conversation_id": "00000000-0000-4000-8000-00000000000a",
+    "title": "GCR-SYNTHETIC-FIXTURE F10 numbers and time forms",
+    "create_time": "1760000000.5",
+    "update_time": "2025-10-09T08:53:20+00:00",
+    "mapping": {
+      "client-created-root": {
+        "id": "client-created-root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "00000000-0000-4000-8000-000000000010"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000010": {
+        "id": "00000000-0000-4000-8000-000000000010",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000010",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time integer"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "client-created-root",
+        "children": [
+          "00000000-0000-4000-8000-000000000011"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000011": {
+        "id": "00000000-0000-4000-8000-000000000011",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000011",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000.123456789,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time float with 9 fractional digits"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000010",
+        "children": [
+          "00000000-0000-4000-8000-000000000012"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000012": {
+        "id": "00000000-0000-4000-8000-000000000012",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000012",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000000000,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time milliseconds (out of range)"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000011",
+        "children": [
+          "00000000-0000-4000-8000-000000000013"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000013": {
+        "id": "00000000-0000-4000-8000-000000000013",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000013",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 0,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time zero"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000012",
+        "children": [
+          "00000000-0000-4000-8000-000000000014"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000014": {
+        "id": "00000000-0000-4000-8000-000000000014",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000014",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": -5,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time negative"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000013",
+        "children": [
+          "00000000-0000-4000-8000-000000000015"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000015": {
+        "id": "00000000-0000-4000-8000-000000000015",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000015",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1e20,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time 1e20"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000014",
+        "children": [
+          "00000000-0000-4000-8000-000000000016"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000016": {
+        "id": "00000000-0000-4000-8000-000000000016",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000016",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1e999,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time 1e999 (Infinity once parsed)"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000015",
+        "children": [
+          "00000000-0000-4000-8000-000000000017"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000017": {
+        "id": "00000000-0000-4000-8000-000000000017",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000017",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": -0,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time negative zero"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000016",
+        "children": [
+          "00000000-0000-4000-8000-000000000018"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000018": {
+        "id": "00000000-0000-4000-8000-000000000018",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000018",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": "1760000100.5",
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time numeric string"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000017",
+        "children": [
+          "00000000-0000-4000-8000-000000000019"
+        ]
+      },
+      "00000000-0000-4000-8000-000000000019": {
+        "id": "00000000-0000-4000-8000-000000000019",
+        "message": {
+          "id": "00000000-0000-4000-8000-000000000019",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": "2025-10-09T10:55:20.250+02:00",
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time ISO string with offset"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000018",
+        "children": [
+          "00000000-0000-4000-8000-00000000001a"
+        ]
+      },
+      "00000000-0000-4000-8000-00000000001a": {
+        "id": "00000000-0000-4000-8000-00000000001a",
+        "message": {
+          "id": "00000000-0000-4000-8000-00000000001a",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": "2025-10-09T08:56:20Z",
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time ISO string with Z"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-000000000019",
+        "children": [
+          "00000000-0000-4000-8000-00000000001b"
+        ]
+      },
+      "00000000-0000-4000-8000-00000000001b": {
+        "id": "00000000-0000-4000-8000-00000000001b",
+        "message": {
+          "id": "00000000-0000-4000-8000-00000000001b",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": "2025-10-09T08:57:20",
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time zone-less ISO string (refused)"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-00000000001a",
+        "children": [
+          "00000000-0000-4000-8000-00000000001c"
+        ]
+      },
+      "00000000-0000-4000-8000-00000000001c": {
+        "id": "00000000-0000-4000-8000-00000000001c",
+        "message": {
+          "id": "00000000-0000-4000-8000-00000000001c",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": true,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time boolean"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-00000000001b",
+        "children": [
+          "00000000-0000-4000-8000-00000000001d"
+        ]
+      },
+      "00000000-0000-4000-8000-00000000001d": {
+        "id": "00000000-0000-4000-8000-00000000001d",
+        "message": {
+          "id": "00000000-0000-4000-8000-00000000001d",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": null,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time null"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-00000000001c",
+        "children": [
+          "00000000-0000-4000-8000-00000000001e"
+        ]
+      },
+      "00000000-0000-4000-8000-00000000001e": {
+        "id": "00000000-0000-4000-8000-00000000001e",
+        "message": {
+          "id": "00000000-0000-4000-8000-00000000001e",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000190,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time zero weight written as 0.0"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": null,
+          "weight": 0.0,
+          "metadata": {
+            "timestamp_": "absolute"
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-00000000001d",
+        "children": [
+          "00000000-0000-4000-8000-00000000001f"
+        ]
+      },
+      "00000000-0000-4000-8000-00000000001f": {
+        "id": "00000000-0000-4000-8000-00000000001f",
+        "message": {
+          "id": "00000000-0000-4000-8000-00000000001f",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1760000200,
+          "update_time": null,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "synthetic message with create_time weights and sizes"
+            ]
+          },
+          "status": "finished_successfully",
+          "end_turn": true,
+          "weight": 1e308,
+          "metadata": {
+            "timestamp_": "absolute",
+            "attachments": [
+              {
+                "id": "file-SYNBIG0001",
+                "name": "synthetic-big.bin",
+                "mime_type": "application/octet-stream",
+                "size": 9007199254740993
+              }
+            ]
+          },
+          "recipient": "all"
+        },
+        "parent": "00000000-0000-4000-8000-00000000001e",
+        "children": []
+      }
+    },
+    "current_node": "00000000-0000-4000-8000-00000000001f",
+    "moderation_results": [],
+    "plugin_ids": null,
+    "conversation_template_id": null,
+    "gizmo_id": null,
+    "gizmo_type": null,
+    "is_archived": false,
+    "is_starred": null,
+    "safe_urls": [],
+    "blocked_urls": [],
+    "conversation_origin": null,
+    "voice": null,
+    "async_status": null,
+    "disabled_tool_ids": [],
+    "default_model_slug": "synthetic-default-model"
+  }
+]

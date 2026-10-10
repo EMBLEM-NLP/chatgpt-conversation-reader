@@ -359,6 +359,29 @@ limitCase('array', '[' + '1,'.repeat(100) + '2]');
 limitCase('scalar', '123456789012345678901234567890');
 limitCase('multi-byte', '"' + '\ud83d\ude00'.repeat(40) + '"'); // the limit is in BYTES (4 per emoji), not characters
 
+test('limit trips are defined by ABSOLUTE byte position: same error and offset for every chunking, ordered against structural errors', async () => {
+  // Regression for a chunk-dependent bug found by the property tests: the offset used to be "where the chunk ended" and a
+  // later structural error could win over an earlier size violation depending on how the bytes were cut.
+  const limitAt = async (gen: Gen, input: string, max: number, offset: number, index = 0): Promise<void> => {
+    const o = await invariant(gen, input, { maxElementBytes: max });
+    assert.equal(o.error?.code, 'IMPORT_LIMIT_EXCEEDED', input);
+    assert.equal(o.error?.details?.['byteOffset'], offset, `${input}: offset of the first byte that does not fit`);
+    assert.equal(o.error?.details?.['elementIndex'], index);
+  };
+  await limitAt(arr, '[[[[[[', 4, 5); // element starts at 1; its 5th byte (offset 5) is the first that does not fit
+  await limitAt(arr, '[[[[[[}', 4, 5); // the mismatched `}` at offset 6 comes LATER, so the size violation is reported
+  await limitAt(arr, '[1234567]', 4, 5); // scalar
+  await limitAt(arr, '["abcdef"]', 4, 5); // string
+  await limitAt(arr, '[1,{"k":"vvvv"}]', 5, 8, 1); // second element, starts at offset 3
+  await limitAt(lines, '[[[[[[', 4, 4);
+  await limitAt(lines, '{"a":1}\n[[[[[[[[\n', 7, 15, 1); // line 2 starts at offset 8; its 8th byte is offset 15
+  // Exactly at the limit is fine, so a structural error right AFTER the element is the one reported.
+  await fails(arr, '[{"a":1}x]', 'UNEXPECTED_BYTE', 8, { maxElementBytes: 7 });
+  await fails(arr, '[1234 5]', 'MISSING_COMMA', 6, { maxElementBytes: 4 });
+  // An open element that simply ends the input at the limit is UNTERMINATED, not "too large".
+  await fails(arr, '[[[[', 'UNTERMINATED_ARRAY', 4, { maxElementBytes: 3 });
+});
+
 test('maxElementBytes bounds memory: a never-ending string is cut off after ~limit bytes of input, not consumed to the end', async () => {
   let pulled = 0;
   async function* endless(): AsyncGenerator<Buffer> {
@@ -386,6 +409,14 @@ test('invalid maxElementBytes is INVALID_ARGUMENT; defaults apply when omitted',
       })(),
       (e: unknown) => e instanceof GcrError && e.code === 'INVALID_ARGUMENT',
       String(bad),
+    );
+  }
+  for (const gen of [arr, lines]) {
+    await assert.rejects(
+      (async () => {
+        for await (const el of gen(chunked(Buffer.from('[1]'), 3), null as unknown as JsonStreamOptions)) void el;
+      })(),
+      (e: unknown) => e instanceof GcrError && e.code === 'INVALID_ARGUMENT' && e.details?.['reason'] === 'BAD_OPTIONS',
     );
   }
   assert.deepEqual(await texts(arr, '[1]', {}), ['1']);
