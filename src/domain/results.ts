@@ -92,6 +92,27 @@ export interface ImportWarningSummary {
   sampleIds: string[];
 }
 
+/** Observed facts about an export (NOT a guessed version number). `audit`/`stats` print it so e.g. role counts of a trimmed export are not over-interpreted. */
+export interface FormatProfile {
+  layout: 'single' | 'sharded' | 'nested' | 'directory' | 'stdin' | 'unknown';
+  manifest: 'present' | 'absent' | 'invalid';
+  wrapperObject: boolean;
+  conversations: number;
+  conversationsWithCurrentNode: number;
+  /** Nodes whose source object had a `children` array vs nodes where it was absent (derived). */
+  nodesWithChildrenDeclared: number;
+  nodesWithChildrenAbsent: number;
+  roleCounts: Record<string, number>;
+  messagesWithRecipient: number;
+  messagesWithStatus: number;
+  messagesWithModelSlug: number;
+  hiddenMessages: number;
+  rootIsLiteralClientCreatedRoot: boolean;
+  /** Names only; auxiliary files (user.json, feedback, ...) are never read. */
+  auxiliaryFilesIgnored: number;
+  assetsExtensionless: boolean;
+}
+
 export interface ImportReport {
   batchId: string;
   provider: Provider;
@@ -104,5 +125,6 @@ export interface ImportReport {
   conversations: { read: number; stored: number; failed: number; newlyInserted: number };
   messages: { stored: number; newlyInserted: number; structural: number };
   warnings: ImportWarningSummary[];
+  formatProfile?: FormatProfile;
   durationMs: number;
 }

@@ -58,7 +58,12 @@ export interface MessageRecord {
   id: string;
   conversationId: string;
   parentId: string | null;
-  /** Children as DECLARED by the source, in source order (order is meaningful: later = newer edit/regeneration). */
+  /**
+   * Children as DECLARED by the source, in source order (order is meaningful: later = newer edit/regeneration).
+   * When the source OMITS the `children` key entirely (reported for exports since mid-2026) the adapter DERIVES them from
+   * parent pointers (order: createdAt asc nulls last, ordinal, id) and records the conversation warning CHILDREN_ABSENT once.
+   * The parent pointer is authoritative; `childIds` is an ordering hint.
+   */
   childIds: string[];
   nodeKind: NodeKind;
   /** Preserve unrecognized role strings verbatim ('user' | 'assistant' | 'system' | 'tool' | ...). '' for structural nodes. */
