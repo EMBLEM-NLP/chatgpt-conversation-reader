@@ -137,6 +137,13 @@ const MAX_FRAME_POINTERS = 1000;
 const MAX_ASSET_PREFIX_PROBES = 64;
 const MAX_TRACK_DEPTH = 24;
 /**
+ * Distinct unknown `content_type` values that get their own UNKNOWN_CONTENT_TYPE warning per conversation. WHY: a hostile or
+ * badly drifting export can carry one different type per message (500,000 nodes would mean 500,000 warnings, each stored,
+ * validated and reported). Further types are counted together in ONE summary warning; every message still keeps its own
+ * `contentType` and raw content.
+ */
+const MAX_DISTINCT_UNKNOWN_CONTENT_TYPES = 100;
+/**
  * Deepest nesting kept inside rawSource / rawMetadata / block metadata. WHY: JSON.parse accepts nesting of a million levels,
  * but JSON.stringify and structuredClone throw RangeError from a few thousand levels on (measured: 5,000 on Node 22), so a
  * hostile message could make the storage layer crash while it serializes `rawSource`. Real exports nest roughly 10 levels.
@@ -282,6 +289,8 @@ interface WarnEntry {
  */
 class WarningCollector {
   private readonly entries = new Map<string, WarnEntry>();
+  /** Distinct variants seen per code by addBounded. */
+  private readonly boundedVariants = new Map<string, number>();
 
   /** `ids` may be one id, several ids (counted as ONE occurrence) or none. `count` lets a caller report many occurrences at once. */
   add(code: ChatGPTAdapterWarningCode, message: string, ids?: string | readonly string[], variant = '', count = 1): void {
@@ -300,6 +309,24 @@ class WarningCollector {
       e.idSet.add(id);
       e.ids.push(id.length > MAX_WARNING_ID_LENGTH ? id.slice(0, MAX_WARNING_ID_LENGTH) : id);
     }
+  }
+
+  /**
+   * Like `add`, but at most `maxVariants` distinct `variant`s of `code` get an entry of their own; every further variant is
+   * merged (count and ids) into one overflow entry with `overflowMessage`. Keeps the warning list bounded by a constant.
+   */
+  addBounded(code: ChatGPTAdapterWarningCode, message: string, overflowMessage: string, ids: string | readonly string[], variant: string, maxVariants: number): void {
+    const key = variant === '' ? code : `${code}\u0001${variant}`;
+    if (!this.entries.has(key)) {
+      const seen = this.boundedVariants.get(code) ?? 0;
+      if (seen >= maxVariants) {
+        // '\u0002' can never start a regular entry key (those start with a code name), so the overflow entry cannot be forged by a variant.
+        this.add(code, overflowMessage, ids, `\u0002overflow`);
+        return;
+      }
+      this.boundedVariants.set(code, seen + 1);
+    }
+    this.add(code, message, ids, variant);
   }
 
   toWarnings(): Warning[] {

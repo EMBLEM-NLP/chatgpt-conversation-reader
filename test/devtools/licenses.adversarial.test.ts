@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { cp, copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -199,6 +199,29 @@ describe('adversarial: text written next to the copyright line is not part of th
     await withTempDir(async (dir) => {
       await makeProject(dir, [{ key: 'node_modules/a', manifest: manifestOf('a', {}), files: { LICENSE: `Copyright 2020 Foo. Commercial use requires a paid license.\n\n${MIT_BODY}` } }]);
       assert.equal(only(await collectLicenses(dir), 'a').source, 'unknown');
+    });
+  });
+});
+
+describe('adversarial: a license file that is a symlink is not the package\'s own license', () => {
+  it('a LICENSE symlinked to a text outside the package is not trusted (and cannot be used to read arbitrary files)', async (t) => {
+    await withTempDir(async (dir) => {
+      await makeProject(dir, [{ key: 'node_modules/a', manifest: manifestOf('a', {}) }]);
+      await put(join(dir, 'outside', 'MIT.txt'), `MIT License\n\nCopyright (c) 2020 Someone Else\n\n${MIT_BODY}`);
+      try {
+        await symlink(join(dir, 'outside', 'MIT.txt'), join(dir, 'node_modules', 'a', 'LICENSE'));
+      } catch {
+        t.skip('symlink creation is not permitted here');
+        return;
+      }
+      const p = only(await collectLicenses(dir), 'a');
+      assert.deepEqual([p.license, p.source], ['unknown', 'unknown']);
+    });
+  });
+  it('a regular LICENSE next to it is still classified', async () => {
+    await withTempDir(async (dir) => {
+      await makeProject(dir, [{ key: 'node_modules/a', manifest: manifestOf('a', {}), files: { LICENSE: `MIT License\n\nCopyright (c) 2020 Foo\n\n${MIT_BODY}` } }]);
+      assert.equal(only(await collectLicenses(dir), 'a').license, 'MIT');
     });
   });
 });

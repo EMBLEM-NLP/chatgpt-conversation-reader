@@ -161,7 +161,8 @@ function unsafe(reason: ZipReason, entryIndex?: number, extra?: Record<string, u
   });
 }
 
-function limitExceeded(reason: ZipReason, limit: keyof ImportLimits, max: number, entryIndex?: number, observed?: number): GcrError {
+/** `maxBytes` names the per-call cap of readBuffer(), which is not one of the ImportLimits. */
+function limitExceeded(reason: ZipReason, limit: keyof ImportLimits | 'maxBytes', max: number, entryIndex?: number, observed?: number): GcrError {
   const where = entryIndex === undefined ? 'archive' : `entry #${entryIndex}`;
   return new GcrError('IMPORT_LIMIT_EXCEEDED', `ZIP ${where} exceeds a safety limit (${reason}, ${limit}).`, {
     remedy: 'The archive is larger or denser than the configured import limits. Raise the limit only if you trust the file.',
@@ -205,15 +206,22 @@ function normalizeValidationError(e: unknown): GcrError {
  * character, letter or digit as \u{hex} and cut it to at most 80 characters. Exported for tests.
  */
 export function sanitizeEntryName(name: string, maxChars = 80): string {
+  // The text is assembled from whole "pieces" (one code point, or one \u{hex} escape). Truncation keeps only whole
+  // pieces, so it can neither leave half of a surrogate pair (an ill-formed string) nor half an escape sequence.
+  const keep = Math.max(0, maxChars - 3); // room for the "..." marker
   let out = '';
+  let cut = ''; // longest prefix of whole pieces that still leaves room for the marker
+  let cutClosed = false;
   for (const ch of name) {
     const cp = ch.codePointAt(0) as number;
     const plain = (cp >= 0x20 && cp < 0x7f) || (cp > 0x9f && /^[\p{L}\p{N}]$/u.test(ch));
     const piece = plain ? ch : `\\u{${cp.toString(16)}}`;
-    if (out.length + piece.length > maxChars) {
-      return out.slice(0, Math.max(0, maxChars - 3)) + '...';
-    }
+    if (out.length + piece.length > maxChars) return cut + '...';
     out += piece;
+    if (!cutClosed) {
+      if (out.length <= keep) cut = out;
+      else cutClosed = true;
+    }
   }
   return out;
 }
@@ -819,10 +827,14 @@ export class SafeZipReader {
     } catch (e) {
       const code = errnoCode(e);
       // Never put the path in the message (it can be an absolute private path).
-      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EACCES' || code === 'EPERM') {
+      // Every errno that means "this path, as given by the user, cannot be opened" is an input problem, not an internal
+      // one: missing / not a directory / name too long => NOT_FOUND; permission, symlink loop, device without a backend
+      // => NOT_READABLE. Only resource exhaustion and genuinely unexpected failures stay INTERNAL_ERROR below.
+      const notFound = code === 'ENOENT' || code === 'ENOTDIR' || code === 'ENAMETOOLONG';
+      if (notFound || code === 'EACCES' || code === 'EPERM' || code === 'ELOOP' || code === 'ENXIO' || code === 'ENODEV') {
         throw new GcrError('IMPORT_INPUT_NOT_FOUND', 'The import file does not exist or is not readable.', {
           remedy: 'Check the path and permissions.',
-          details: { reason: code === 'ENOENT' || code === 'ENOTDIR' ? 'NOT_FOUND' : 'NOT_READABLE' },
+          details: { reason: notFound ? 'NOT_FOUND' : 'NOT_READABLE' },
         });
       }
       if (code === 'EISDIR') throw notAZip();
@@ -907,7 +919,10 @@ export class SafeZipReader {
     const entry = this.lookupFile(name);
     const cap = maxBytes ?? this.limits.maxElementBytes;
     if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) throw invalidArgument('maxBytes must be a positive, finite number.', 'BAD_MAX_BYTES');
-    if (entry.uncompressedSize > cap) throw limitExceeded('ENTRY_EXCEEDS_READ_LIMIT', 'maxEntryUncompressedBytes', cap, entry.index, entry.uncompressedSize);
+    if (entry.uncompressedSize > cap) {
+      // Name the limit that actually tripped: the configured default (maxElementBytes) or the caller's explicit cap.
+      throw limitExceeded('ENTRY_EXCEEDS_READ_LIMIT', maxBytes === undefined ? 'maxElementBytes' : 'maxBytes', cap, entry.index, entry.uncompressedSize);
+    }
     const chunks: Buffer[] = [];
     let total = 0;
     for await (const chunk of this.stream(name)) {

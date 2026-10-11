@@ -863,7 +863,9 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
           const before = toks[k - 1];
           const declares = before !== undefined && before.kind === 'ident' && !before.afterDot && DECLARATION_WORDS.has(before.text);
           const member = isPunct(next, '.') || isPunct(next, '?.') || isPunct(next, '[');
-          const key = (isPunct(next, ':') || isPunct(next, '?')) && before !== undefined && before.kind === 'punct' && ['{', ',', ';'].includes(before.text);
+          // An object key, interface member or parameter *named* global (`{ global: true }`, `global?: boolean`, `(global: boolean)`).
+          const keyBefore = before !== undefined && before.kind === 'punct' && ['{', ',', ';', '('].includes(before.text);
+          const key = keyBefore && (isPunct(next, ':') || (isPunct(next, '?') && isPunct(toks[k + 2], ':')));
           if (!declares && !member && !key) {
             add('forbidden-global', t.line, `${t.text} used as a value: an alias or reflection target hides fetch/WebSocket/... from this scan (use ${t.text}.name directly)`);
           }
@@ -1862,6 +1864,7 @@ describe('adversarial: process / globalThis laundering', () => {
     ['property descriptor of globalThis', "Object.getOwnPropertyDescriptor(globalThis, 'fetch');"],
     ['spread of globalThis', 'const copy = { ...globalThis };'],
     ['globalThis passed as an argument', 'inspect(globalThis);'],
+    ['global in a ternary', 'const g = ok ? global : other;'],
   ];
   for (const [name, src] of positives) {
     it(`flags: ${name}`, () => {
@@ -1875,6 +1878,7 @@ describe('adversarial: process / globalThis laundering', () => {
     ['named imports of ordinary process members', "import { argv, env } from 'node:process';"],
     ['typeof process', "const hasProcess = typeof process !== 'undefined';"],
     ['an object key named process', 'const o = { process: 1 }; o.process;'],
+    ['options, members and parameters named global', 'interface Opts { global: boolean; globalThis?: string } function f(global: boolean, other = 1) {} const o = { global: true };'],
     ['member access on globalThis with a literal name', "const c = globalThis.structuredClone(x); const d = globalThis['structuredClone'];"],
     ['typeof globalThis', "const ok = typeof globalThis === 'object';"],
     ['a member called binding on a first-party object (not a call)', 'const b = stmt.binding;'],

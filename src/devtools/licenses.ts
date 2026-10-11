@@ -12,7 +12,7 @@
  * Everything else is "unknown", and unknown is never a statement that a package is unlicensed. The report is an
  * inventory to help a human decide; it is not legal advice.
  */
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { GcrError } from '../errors.js';
 
@@ -246,9 +246,10 @@ export function classifyLicenseText(text: string): string | null {
 const LICENSE_FILE_NAME = /^(?:licen[sc]e|copying)(?:[-_.][a-z0-9._+-]{1,32})?$/i;
 const NOT_A_LICENSE_TEXT = /\.(?:js|mjs|cjs|ts|mts|cts|json|map|node|wasm|html|css)$/i;
 
-async function readSmallText(path: string, maxBytes: number): Promise<string | null> {
+/** `followSymlinks: false` refuses a symlink: a license file must be the package's own bytes, not a pointer to some other file. */
+async function readSmallText(path: string, maxBytes: number, followSymlinks: boolean): Promise<string | null> {
   try {
-    const info = await stat(path);
+    const info = await (followSymlinks ? stat(path) : lstat(path));
     if (!info.isFile() || info.size > maxBytes) return null;
     return await readFile(path, 'utf8');
   } catch {
@@ -268,7 +269,7 @@ async function licenseFromFiles(dir: string): Promise<string | null> {
   if (names.length === 0) return null;
   const found = new Set<string>();
   for (const name of names) {
-    const text = await readSmallText(join(dir, name), MAX_LICENSE_FILE_BYTES);
+    const text = await readSmallText(join(dir, name), MAX_LICENSE_FILE_BYTES, false);
     const id = text === null ? null : classifyLicenseText(text);
     if (id === null) return null;
     found.add(id);
@@ -476,7 +477,7 @@ function installDir(root: string, key: string): string | null {
 }
 
 async function readPackageJson(dir: string): Promise<Record<string, unknown> | null> {
-  const text = await readSmallText(join(dir, 'package.json'), MAX_PACKAGE_JSON_BYTES);
+  const text = await readSmallText(join(dir, 'package.json'), MAX_PACKAGE_JSON_BYTES, true);
   if (text === null) return null;
   try {
     const parsed: unknown = JSON.parse(text.replace(/^\uFEFF/, '')); // some published packages carry a BOM; npm reads them
