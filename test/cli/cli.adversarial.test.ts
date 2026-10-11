@@ -98,6 +98,24 @@ describe('a failed import leaves no empty database and no ./.gcr behind', () => 
     assert.equal(await total(dbPath), before);
   });
 
+  it('when the database cannot even be opened, the default ./.gcr that was prepared for it is taken back too', async () => {
+    const { Gcr } = await import('../../src/sdk/gcr.js');
+    const cwd = tempDir();
+    const good = writeFile(cwd, 'conversations.json', (await templateDb()).std.json);
+    mock.method(Gcr, 'open', () => {
+      throw new GcrError('DB_ERROR', 'The database file could not be created.', { remedy: 'Choose a different --db path.' });
+    });
+    try {
+      const out = createBufferOutput();
+      const code = await runCli({ argv: ['import', good], env: {}, cwd, out, stdin: { isTTY: false, async *[Symbol.asyncIterator]() {} }, lifecycle: new Lifecycle() });
+      assert.equal(code, EXIT_CODES.DB_ERROR, out.err.join(''));
+      assert.equal(existsSync(join(cwd, '.gcr')), false, 'no empty ./.gcr is left behind');
+      assert.equal(out.err.join('').includes('note:'), false, 'and no claim that it was created');
+    } finally {
+      mock.restoreAll();
+    }
+  });
+
   it('a successful import still creates the database and says so (the note is only dropped when nothing is kept)', async () => {
     const cwd = tempDir();
     const good = writeFile(cwd, 'conversations.json', (await templateDb()).std.json);
@@ -354,8 +372,13 @@ describe('SIGINT in the middle of an import', () => {
     const exportPath = writeFile(dir, 'conversations.json', `[${parts.join(',')}]`);
     const db = join(dir, 'interrupted.sqlite');
     const child = spawnCli(['import', exportPath, '--db', db, '--format', 'json']);
-    setTimeout(() => child.kill('SIGINT'), 600);
-    const r = await collect(child, { timeoutMs: 110_000 });
+    const done = collect(child, { timeoutMs: 110_000 });
+    // The handlers are installed long before the database file exists; wait for it (not for a fixed time: a slow machine must not
+    // see the signal arrive before the process has installed them), then let the import get into its transaction.
+    for (let waited = 0; !existsSync(db) && waited < 60_000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    child.kill('SIGINT');
+    const r = await done;
     assert.ok(r.code === 130 || r.code === 0, `exit ${String(r.code)}; stderr: ${r.stderr}`);
     if (r.code === 130) {
       assert.equal(r.stdout, '', 'an interrupted import prints no report');

@@ -113,6 +113,27 @@ export function dbNotFound(path: string): GcrError {
   });
 }
 
+/**
+ * Remove a database file this command created (with SQLite's side files) and, when the command also created the default `./.gcr`
+ * directory, that directory too (it goes only while empty). Best effort; never throws.
+ */
+function removeCreated(dbPath: string, createdDir: string | undefined): void {
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    try {
+      rmSync(dbPath + suffix, { force: true });
+    } catch {
+      // best effort
+    }
+  }
+  if (createdDir !== undefined) {
+    try {
+      rmdirSync(createdDir); // only succeeds while the directory is empty
+    } catch {
+      // someone else put something there: leave it
+    }
+  }
+}
+
 /** A database file (and, for the default location, its directory) that THIS command created and may therefore take back. */
 interface FreshDatabase {
   readonly gcr: Gcr;
@@ -196,20 +217,7 @@ export class CommandContext {
     } catch {
       // the file is what matters now
     }
-    for (const suffix of ['', '-wal', '-shm', '-journal']) {
-      try {
-        rmSync(this.db.path + suffix, { force: true });
-      } catch {
-        // best effort
-      }
-    }
-    if (fresh.dir !== undefined) {
-      try {
-        rmdirSync(fresh.dir); // only succeeds while the directory is empty
-      } catch {
-        // someone else put something there: leave it
-      }
-    }
+    removeCreated(this.db.path, fresh.dir);
   }
 
   renderOptions(extra: { includeHidden?: boolean } = {}): RenderOptions {
@@ -265,7 +273,13 @@ export class CommandContext {
       this.keptNotes.push('created ./.gcr (mode 0700) for the default database');
     }
     const { Gcr: GcrClass } = await import('../sdk/gcr.js');
-    const gcr = GcrClass.open({ dbPath: this.db.path, actor: 'cli' });
+    let gcr: Gcr;
+    try {
+      gcr = GcrClass.open({ dbPath: this.db.path, actor: 'cli' });
+    } catch (e) {
+      if (!existed) removeCreated(this.db.path, createdDir); // the open itself failed: take back what was prepared for it
+      throw e;
+    }
     this.io.lifecycle.add(() => gcr.close());
     if (!existed) this.fresh = { gcr, dir: createdDir };
     return gcr;

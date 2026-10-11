@@ -171,8 +171,8 @@ describe('scripts/perf-baseline.mjs is deterministic (LONG)', { timeout: 300_000
 
   it('the script itself uses no unseeded randomness and does not read the clock', () => {
     const source = readFileSync(PERF, 'utf8');
-    assert.ok(!/Math\.random|Date\.now|new Date\(|randomBytes|randomUUID/.test(source));
-    assert.ok(!/hostname|userInfo|homedir/.test(source), 'it never asks the OS for a host or user name');
+    assert.ok(!/Math\.random\(|Date\.now\(|new Date\(|randomBytes\(|randomUUID\(/.test(source), 'no call to a random or clock API');
+    assert.ok(!/hostname\(|userInfo\(|homedir\(/.test(source), 'it never asks the OS for a host or user name');
   });
 });
 
@@ -210,6 +210,7 @@ describe('scripts/perf-baseline.mjs --write-doc', { timeout: 300_000 }, () => {
     assert.match(doc, /\| Total memory \| [\d,]+ MiB \|/);
     assert.match(doc, /## Method/);
     assert.match(doc, /## Results/);
+    assert.match(doc, /## Notes on this run\n\n\* The 1-minute load average \(/);
     assert.match(doc, /ONE shared sandbox with other processes running/);
     assert.match(doc, /SYNTHETIC text/);
     assert.match(doc, /not from a real ChatGPT export/);

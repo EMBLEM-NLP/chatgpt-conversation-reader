@@ -6,7 +6,7 @@
  * SAFETY MODEL (each point has tests in test/mcp)
  *  - Read tools are annotated read-only and are: they call SDK reads only, and a test compares a full database content hash
  *    before and after calling every one of them in a random order.
- *  - Write tools (drafts, annotations, import) are annotated `readOnlyHint:false, destructiveHint:false` explicitly (the
+ *  - Write tools (drafts, annotations, import) are annotated `readOnlyHint:false, destructiveHint:false` explicitly (except gcr_update_local_annotation, which overwrites and is destructiveHint:true) (the
  *    protocol default for destructiveHint is TRUE). Annotations are only hints, so the server ENFORCES the policy itself:
  *    unless the operator started the server with --allow-local-writes (GCR_MCP_ALLOW_WRITES=1) every write tool answers
  *    WRITE_FORBIDDEN with the remedy. The tool list stays the same either way, so clients see a stable server.
@@ -410,8 +410,10 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
   const updateAnnotation = defineTool({
     name: 'gcr_update_local_annotation',
     title: 'Create or update a local annotation',
-    description: `Create a local annotation (give conversation and body) or update one (give annotationId, body and the expectedVersion you last saw). Stored in the local database only: imported data and ChatGPT are never changed. Disabled unless the server was started with --allow-local-writes. ${UNTRUSTED}`,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: `Create a local annotation (give conversation and body) or update one (give annotationId, body and the expectedVersion you last saw). An UPDATE REPLACES the old text for good (destructive). Local database only: imported data and ChatGPT are never changed. Needs --allow-local-writes. ${UNTRUSTED}`,
+    // destructiveHint is TRUE on purpose: an update overwrites the previous body irrecoverably (local data only). Clients that gate
+    // destructive tools behind a confirmation should do so here. Creating a draft/annotation or importing never overwrites anything.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     input: z.strictObject({
       body: z.string().min(1).max(16_384).describe('The annotation text (at most 16 KiB of text).'),
       annotationId: z.string().min(1).max(128).regex(LOCAL_ID_PATTERN).optional().describe('UPDATE: id of the annotation to change. Omit to create a new one.'),

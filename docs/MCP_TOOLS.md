@@ -118,11 +118,12 @@ This does not make a **model** immune to prompt injection: it makes the server n
 | Tools | readOnlyHint | destructiveHint | idempotentHint | openWorldHint |
 |---|---|---|---|---|
 | `gcr_list` `gcr_get` `gcr_search` `gcr_branches` `gcr_thread` `gcr_stats` `gcr_audit` `gcr_graph_query` `gcr_doctor` | true | false | true | false |
-| `gcr_create_local_draft`, `gcr_update_local_annotation` | false | false | false | false |
+| `gcr_create_local_draft` | false | false | false | false |
+| `gcr_update_local_annotation` | false | **true** (an update replaces the previous text; the old text is not kept) | false | false |
 | `gcr_import_export` | false | false | true (identical re-import is a no-op, FR-10) | false |
 
 Every hint is set explicitly (the protocol default for `destructiveHint` is true). "Truthful" is tested: a content hash of every table of the database does not change across any call of any read-only tool, in many random orders, on a server where writes are enabled.
-`gcr_update_local_annotation` replaces an annotation's body (guarded by `expectedVersion`); it is annotated `destructiveHint: false` as specified, but the previous body is not kept.
+`gcr_update_local_annotation` replaces an annotation's body (guarded by `expectedVersion`) and the previous body is not kept, so it is annotated `destructiveHint: true` (decision recorded after the MCP review: a hint that understates an overwrite would be untruthful). Creating a draft or annotation, and importing, never overwrite anything.
 
 ## 4. Results: one envelope for everything
 
@@ -328,7 +329,7 @@ a bad table (illegal name, collision, unknown or aliased canonical) stops the se
 ```bash
 npm run dump:mcp-schemas                       # builds, then rewrites docs/mcp-tool-schemas.json (deterministic: sorted keys, no timestamps)
 node scripts/dump-mcp-schemas.mjs --check       # exit 1 if the committed file is stale (CI)
-npm test                                        # includes test/mcp/*.test.ts (421 tests)
+npm test                                        # includes test/mcp/*.test.ts (422 tests)
 node --test "dist-test/test/mcp/*.test.js"      # only the MCP tests, after npm run build:test
 ```
 

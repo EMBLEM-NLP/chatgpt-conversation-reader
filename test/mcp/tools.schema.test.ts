@@ -155,7 +155,7 @@ const READ_ONLY_HINTS = { readOnlyHint: true, destructiveHint: false, idempotent
 const ANNOTATION_SNAPSHOT: Record<string, Record<string, unknown>> = {
   ...Object.fromEntries(READ_ONLY_TOOLS.map((n) => [n, READ_ONLY_HINTS])),
   gcr_create_local_draft: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-  gcr_update_local_annotation: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  gcr_update_local_annotation: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   gcr_import_export: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 };
 
@@ -257,10 +257,10 @@ describe('tools/list', () => {
       }
     });
 
-    it('no tool talks to an open world; only the three write tools are not read-only; none is destructive', () => {
+    it('no tool talks to an open world; only the three write tools are not read-only; only the annotation UPDATE (which overwrites the old text) is destructive', () => {
       for (const tool of tools) {
         assert.equal(tool.annotations?.openWorldHint, false, tool.name);
-        assert.equal(tool.annotations?.destructiveHint, false, tool.name);
+        assert.equal(tool.annotations?.destructiveHint, tool.name === 'gcr_update_local_annotation', tool.name);
         assert.equal(tool.annotations?.readOnlyHint, READ_ONLY_TOOLS.includes(tool.name), tool.name);
       }
       assert.deepEqual(tools.filter((t) => t.annotations?.readOnlyHint !== true).map((t) => t.name), ['gcr_create_local_draft', 'gcr_update_local_annotation', 'gcr_import_export']);

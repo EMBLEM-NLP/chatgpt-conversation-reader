@@ -439,7 +439,8 @@ async function main() {
     process.stderr.write('coverage-summary: no coverage data for any file under src/ (is the LCOV file empty, or were the tests compiled elsewhere?).\n');
     process.exit(1);
   }
-  const meta = { date: opts.date, node: process.version, tests, command: `npm run coverage-summary${opts.writeDoc ? ' -- --write-doc' : ''}${opts.date === 'unknown' ? '' : ` --date ${opts.date}`}` };
+  const flags = [...(opts.writeDoc ? ['--write-doc'] : []), ...(opts.date === 'unknown' ? [] : ['--date', opts.date])];
+  const meta = { date: opts.date, node: process.version, tests, command: `npm run coverage-summary${flags.length === 0 ? '' : ` -- ${flags.join(' ')}`}` };
   if (opts.json) process.stdout.write(`${JSON.stringify({ node: process.version, date: opts.date, tests, problems, ...summary }, null, 2)}\n`);
   else if (opts.writeDoc) {
     if (failedTests) {

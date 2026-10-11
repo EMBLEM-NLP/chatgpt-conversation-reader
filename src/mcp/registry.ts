@@ -14,7 +14,7 @@
  *    seconds of blocked event loop and hundreds of megabytes of memory, for one call of a tool that takes at most ten values.
  *  - ONE error path: `GcrError` -> its envelope; anything else -> the generic INTERNAL_ERROR (raw messages can embed paths
  *    or conversation text). Only the error NAME is logged, never its message.
- *  - A server-side deadline per call (`AbortSignal.any([client signal, AbortSignal.timeout(ms)])`), because the SDK has none
+ *  - A server-side deadline per call (`AbortSignal.any([client signal, deadline signal])`, its timer cleared when the call ends), because the SDK has none
  *    and the client default is 60 s. Cancellation is cooperative: a client abort or timeout only flips `ctx.signal`. Work that
  *    is synchronous (every read: node:sqlite is synchronous) cannot be interrupted, so it is bounded by its input limits
  *    instead; asynchronous work (writes, imports) is awaited through `ctx.abortable`, which stops WAITING when the signal
@@ -291,7 +291,12 @@ export class ToolRegistry {
     }
 
     const deadlineMs = entry.deadlineMs ?? this.runtime.defaultDeadlineMs;
-    const signal = AbortSignal.any([extra.signal, AbortSignal.timeout(deadlineMs)]);
+    // Not AbortSignal.timeout(): that timer cannot be cancelled, so every finished call would keep its signal alive for the whole
+    // deadline (about 2.8 KB each, hundreds of megabytes for a client that floods the server). This one is cleared in `finally`.
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(new DOMException('The tool call exceeded its deadline.', 'TimeoutError')), deadlineMs);
+    timer.unref();
+    const signal = AbortSignal.any([extra.signal, deadline.signal]);
     try {
       signal.throwIfAborted();
       const result = await entry.run(args, makeContext(signal, extra));
@@ -318,6 +323,8 @@ export class ToolRegistry {
         return errorEnvelope(new GcrError('INTERNAL_ERROR', 'The call was cancelled by the client.', { details: { reason: 'cancelled' } }));
       }
       return errorEnvelope(this.internal(name, e));
+    } finally {
+      clearTimeout(timer);
     }
   }
 

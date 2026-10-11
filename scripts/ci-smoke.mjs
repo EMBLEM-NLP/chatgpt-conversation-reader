@@ -86,6 +86,8 @@ const F02_ACTIVE_BRANCH = '00000000-0000-4000-8000-000000000013';
 const READ_TOOLS = ['gcr_list', 'gcr_get', 'gcr_search', 'gcr_branches', 'gcr_thread', 'gcr_stats', 'gcr_audit', 'gcr_graph_query', 'gcr_doctor'];
 const WRITE_TOOLS = ['gcr_create_local_draft', 'gcr_update_local_annotation', 'gcr_import_export'];
 const DOCUMENTED_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS].sort();
+/** docs/MCP_TOOLS.md 3.5: the only tool that destroys data is the annotation update (it replaces the previous body). */
+const DESTRUCTIVE_TOOLS = ['gcr_update_local_annotation'];
 const COMPLETENESS = ['exported_tree', 'rendered_active_view_only', 'partial_user_supplied', 'api_owned_conversation', 'unknown', 'mixed'];
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -860,7 +862,7 @@ async function main() {
     for (const t of tools) {
       const expectReadOnly = READ_TOOLS.includes(t.name);
       same(t.annotations?.readOnlyHint, expectReadOnly, `${t.name} readOnlyHint`);
-      same(t.annotations?.destructiveHint, false, `${t.name} destructiveHint`);
+      same(t.annotations?.destructiveHint, DESTRUCTIVE_TOOLS.includes(t.name), `${t.name} destructiveHint`);
       same(t.annotations?.openWorldHint, false, `${t.name} openWorldHint`);
       must(typeof t.inputSchema === 'object' && t.inputSchema.type === 'object', `${t.name} has no object input schema`);
     }

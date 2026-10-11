@@ -290,6 +290,7 @@ Listed so that nobody over-trusts the tests. Items marked NOT VERIFIED have no t
 * **Id ordering.** A reviewer noted that branch code compares ids as JavaScript strings (UTF-16 code units) while SQLite orders text by UTF-8 bytes; the two orders differ only for ids that mix characters above U+FFFF with characters in the range U+E000 to U+FFFF. NOT VERIFIED by a test.
 * **A conversation object that has both `mapping` and a `conversations` array is skipped** by the ChatGPT adapter (`NOT_A_CONVERSATION`), while the runner unwraps objects that have `conversations` and no `mapping` (`docs/IMPORT_GUIDE.md` section 14). The reviewers asked for the intended rule to be confirmed.
 * **Provider detection** sniffs at most the first 20 conversation-looking elements of each file; select the provider explicitly if that fails (`PROVIDER_UNDETECTED`).
+* **Duplicate conversations.** When the same conversation id occurs twice in one import, one copy wins by a fixed rule; if the winner then fails normalization the loser is not tried (a documented limitation, `test/ingest/import-runner.adversarial.test.ts`).
 
 **ZIP and JSON parsing**
 
@@ -302,6 +303,7 @@ Listed so that nobody over-trusts the tests. Items marked NOT VERIFIED have no t
 * **Timeout and cancellation semantics.** Deadlines and client timeouts are cooperative. Every read is a synchronous `node:sqlite` call that cannot be interrupted, so reads are bounded by their input limits, not by a timer. For writes and imports the server stops waiting at the deadline (30 s, 600 s for import) and answers `INTERNAL_ERROR` with `deadline_exceeded`, but the work continues and may still commit. A client timeout (the SDK default is 60 s) or abort only flips a signal. Check before repeating a write.
 * **Approved-root check window.** The check and the later open are two file-system operations; a root must be a directory only the operator can write to.
 * **A single message larger than the result cap cannot be returned over MCP**; use the CLI.
+* **The stdout guard covers JavaScript, not native code.** Code or a child process that wrote to file descriptor 1 directly would corrupt the stream; none exists in this repository (documented in `src/mcp/stdout-guard.ts`).
 * **Other hosts.** VS Code, Claude Desktop and Codex, HTTP and SSE transports: never used. Conformance rests on the official SDK; the MCP specification text was not read.
 
 **Output and rendering**
@@ -343,12 +345,11 @@ All on 2026-10-11 (UTC), Linux x86_64, Node v22.22.0, npm 10.9.4 unless stated. 
 | What | Command | Result |
 |---|---|---|
 | Build | `npm run build` | exit 0 |
-| Whole compiled suite, Node v22.22.0 | `node --test --test-concurrency=2 "dist-test-pmsec/test/**/*.test.js"` | [[FULL_RUN]] |
-| Suite per area, Node v22.22.0 and v22.16.0 | one `node --test` per directory under `test/` | [[AREA_SUMMARY]] |
+| Compiled suite on Node v22.22.0 and on Node v22.16.0 | `npx tsc -p tsconfig.json --outDir dist-test-pmfinal`, then one `node --test --test-concurrency=2 "dist-test-pmfinal/test/<directory>/*.test.js"` per directory under `test/` | Node v22.22.0: 6,665 tests in 192 files across 14 directories, 6,663 pass, 0 fail, 2 skipped (sum of the per-area runs below, compiled 12:47 UTC). Node v22.16.0: 6,665 tests, 6,663 pass, 0 fail, 2 skipped; per-directory table in `docs/PARITY_MATRIX.md` section 0 |
 | Dependency audit | `npm audit --omit=dev --audit-level=high`; `npm audit` | "found 0 vulnerabilities" both times (12:22 UTC; advisory data changes daily) |
 | License summary | `node scripts/licenses.mjs` | 0 unknown, 0 non-permissive, release gate PASS |
-| Privacy scan | `node scripts/privacy-scan.mjs --root .` | [[PRIVACY]] |
-| Smoke test under the network guard | `node scripts/ci-smoke.mjs` | [[SMOKE]] |
+| Privacy scan | `node scripts/privacy-scan.mjs --root .` | PRIVACY-PENDING |
+| Smoke test under the network guard | `node scripts/ci-smoke.mjs` | SMOKE-PENDING |
 | Browser gate | `node scripts/test-browser-gated.mjs` | prints `NOT_RUN: no browser code exists in this build ...`; exit 0 |
 | File modes | `gcr import`, `gcr graph build`, `gcr graph export --out` under `umask 000`/`077`; stat of results | see section 4.1 |
 | Link handling | `gcr get` with an imported id, a never-imported id, a `/share/` link, a `chat.openai.com` link | exit 0, 3, 2, 2 |
