@@ -619,19 +619,30 @@ describe('stats, audit and listBatches', () => {
     assert.equal(env.warnings[0]?.code, 'SOURCE_NOT_FULL_HISTORY');
   });
 
-  it('stats grouped by provider or day holds no imported strings, so untrustedContent is false (when no warning cites ids)', async () => {
+  it('stats grouped by provider or day holds no imported strings, so untrustedContent is false (when no warning cites ids and no FormatProfile is attached)', async () => {
     const dir = await makeTempDir();
-    const gcr = Gcr.open({ dbPath: ':memory:', clock: fixedClock });
+    const dbPath = `${dir}/stats.sqlite`;
+    const gcr = Gcr.open({ dbPath, clock: fixedClock });
+    let reopened: Gcr | undefined;
     try {
       await importBuilders(gcr, dir, [chat(ID.linear, 'one', [['alpha', 'beta']]), branched(ID.branched, 'two').builder]);
-      const byProvider = gcr.stats({ groupBy: 'provider' });
+      // The handle that did the import also attaches the batch's FormatProfile, whose role counts are keyed by the export's own
+      // role names (imported text): the flag is true there (see provenance.adversarial.test.ts for a hostile role name).
+      assert.equal(gcr.stats({ groupBy: 'provider' }).data.formatProfiles.length, 1);
+      assert.equal(gcr.stats({ groupBy: 'provider' }).untrustedContent, true);
+      assert.equal(gcr.stats({ groupBy: 'day' }).untrustedContent, true);
+      gcr.close();
+      reopened = Gcr.open({ dbPath, readOnly: true });
+      const byProvider = reopened.stats({ groupBy: 'provider' });
       assert.deepEqual(byProvider.data.rows.map((r) => r.key), ['chatgpt']);
+      assert.deepEqual(byProvider.data.formatProfiles, []);
       assert.equal(byProvider.completeness, 'exported_tree');
       assert.equal(byProvider.untrustedContent, false);
-      assert.equal(gcr.stats({ groupBy: 'day' }).untrustedContent, false);
-      assert.equal(gcr.stats({ groupBy: 'model' }).untrustedContent, true, 'model slugs are imported strings');
-      assert.equal(gcr.stats({ groupBy: 'conversation' }).untrustedContent, true, 'titles are imported text');
+      assert.equal(reopened.stats({ groupBy: 'day' }).untrustedContent, false);
+      assert.equal(reopened.stats({ groupBy: 'model' }).untrustedContent, true, 'model slugs are imported strings');
+      assert.equal(reopened.stats({ groupBy: 'conversation' }).untrustedContent, true, 'titles are imported text');
     } finally {
+      reopened?.close();
       gcr.close();
       await removeDir(dir);
     }

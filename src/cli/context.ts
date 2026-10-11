@@ -45,6 +45,8 @@ export interface CliEnvironment {
 /** Things to close when the command ends or a signal arrives. Closers must be idempotent. */
 export class Lifecycle {
   private readonly closers = new Set<() => void>();
+  /** A command that runs its own graceful shutdown on SIGINT/SIGTERM (mcp) sets this; the CLI's handlers then stand down. */
+  signalsDelegated = false;
 
   /** Register a closer; the returned function unregisters it. */
   add(closer: () => void): () => void {
@@ -154,8 +156,13 @@ export class CommandContext {
     return gcr;
   }
 
-  /** Open the database for writing, creating it (and, for the default location only, its directory) on first use. */
-  async openWrite(): Promise<Gcr> {
+  /**
+   * Open the database for writing. By default a missing file is created (and, for the default location only, its
+   * directory); `mustExist` is for commands that only make sense on imported data (graph build, drafts, annotations):
+   * they fail with DB_NOT_FOUND instead of leaving an empty database behind.
+   */
+  async openWrite(opts: { mustExist?: boolean } = {}): Promise<Gcr> {
+    if (opts.mustExist === true && statSync(this.db.path, { throwIfNoEntry: false }) === undefined) throw dbNotFound(this.db.path);
     const dir = dirname(this.db.path);
     if (this.db.origin === 'default' && !existsSync(dir)) {
       try {

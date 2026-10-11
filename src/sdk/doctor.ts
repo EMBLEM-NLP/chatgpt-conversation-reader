@@ -13,8 +13,9 @@
  *  - the function never throws for bad input: a bad path is a status, not an exception.
  */
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
 import { sqliteErrcode } from '../db/open.js';
 import { GCR_APPLICATION_ID } from '../db/schema.js';
 import { listAdapters } from '../ingest/registry.js';
@@ -181,6 +182,30 @@ function canWrite(path: string): boolean {
   }
 }
 
+/**
+ * Open an existing database file read-only WITHOUT leaving anything behind. A plain read-only open of a WAL-mode database
+ * creates the `-wal` and `-shm` side files (and cannot remove them again), which would contradict "creates and writes nothing".
+ * When no WAL file holds data the main file is complete by itself, so it is opened as `immutable` (no locks, no side files).
+ * With a live WAL (another handle or process is using the database) the plain read-only open is used: it reads the WAL and
+ * the side files already exist. Every path reaching this function was checked: no NUL byte, no `file:` text of its own.
+ */
+function openReadOnlyQuietly(dbPath: string): DatabaseSync {
+  let liveWal = false;
+  try {
+    liveWal = statSync(`${dbPath}-wal`).size > 0;
+  } catch {
+    liveWal = false;
+  }
+  if (!liveWal) {
+    try {
+      return new DatabaseSync(`${pathToFileURL(resolve(dbPath)).href}?immutable=1`, { readOnly: true });
+    } catch {
+      /* fall back to the plain read-only open below */
+    }
+  }
+  return new DatabaseSync(dbPath, { readOnly: true });
+}
+
 const INVALID_PATH_STATUS: DoctorDatabase = { label: '(invalid path)', exists: false, writable: false, schemaVersion: null, schemaStatus: 'invalid_path' };
 
 /** Same refusals as openDatabase: empty, NUL bytes, "file:" URIs (which could smuggle SQLite open options). */
@@ -211,8 +236,8 @@ function inspectFile(dbPath: unknown): DoctorDatabase {
   const writable = canWrite(dbPath);
   let db: DatabaseSync | undefined;
   try {
-    // readOnly: the file is not created, migrated or modified. query_only is implied by the read-only open.
-    db = new DatabaseSync(dbPath, { readOnly: true });
+    // readOnly: the file is not created, migrated or modified (and, see openReadOnlyQuietly, no side file appears).
+    db = openReadOnlyQuietly(dbPath);
     const version = Number(db.prepare('PRAGMA user_version').get()?.['user_version'] ?? 0);
     const appId = Number(db.prepare('PRAGMA application_id').get()?.['application_id'] ?? 0);
     const objects = Number(db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").get()?.['n'] ?? 0);
@@ -231,6 +256,49 @@ function inspectFile(dbPath: unknown): DoctorDatabase {
     const code = sqliteErrcode(e);
     const notADb = code !== null && (code & 0xff) === 26;
     return { label, exists: true, writable, schemaVersion: null, schemaStatus: notADb ? 'not_a_gcr_database' : 'unreadable' };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* nothing to add */
+    }
+  }
+}
+
+/** Why a read-write open of an EXISTING file must be refused before SQLite touches it. */
+export type OpenRefusal = { kind: 'foreign' } | { kind: 'newer'; fileVersion: number };
+
+/**
+ * A read-write open (db/open.ts) runs `PRAGMA journal_mode = WAL` BEFORE it checks whose file this is, and that pragma rewrites
+ * bytes 18-19 of the header. A file of another application, or one written by a newer GCR, would therefore be modified even
+ * though the open then fails ("GCR never writes into databases it did not create"). `Gcr.open` calls this first: it looks at
+ * the file read-only (no side files, see openReadOnlyQuietly) and reports the cases the open would refuse anyway.
+ * The criteria mirror applyMigrations / assertCompatible; everything else (missing, empty, not SQLite at all, damaged,
+ * unreadable) is `null` and left to the real open, which reports it as before.
+ */
+export function peekOpenRefusal(dbPath: string): OpenRefusal | null {
+  if (typeof dbPath !== 'string' || dbPath === '' || dbPath.includes('\0') || dbPath === ':memory:' || /^file:/i.test(dbPath)) return null;
+  try {
+    const st = statSync(dbPath);
+    if (!st.isFile() || st.size === 0) return null;
+  } catch {
+    return null;
+  }
+  let db: DatabaseSync | undefined;
+  try {
+    db = openReadOnlyQuietly(dbPath);
+    const version = Number(db.prepare('PRAGMA user_version').get()?.['user_version'] ?? 0);
+    const appId = Number(db.prepare('PRAGMA application_id').get()?.['application_id'] ?? 0);
+    if (version > SCHEMA_VERSION) return { kind: 'newer', fileVersion: version };
+    if (version < 0) return { kind: 'foreign' };
+    if (appId !== 0 && appId !== GCR_APPLICATION_ID) return { kind: 'foreign' };
+    if (version === 0 && appId === 0) {
+      const objects = Number(db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").get()?.['n'] ?? 0);
+      if (objects > 0) return { kind: 'foreign' };
+    }
+    return null;
+  } catch {
+    return null; // not SQLite, damaged, locked, a hot journal...: the real open decides and reports
   } finally {
     try {
       db?.close();

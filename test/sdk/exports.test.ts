@@ -140,7 +140,7 @@ describe('public export snapshot', () => {
       .filter((n) => typeof Object.getOwnPropertyDescriptor(sdk.Gcr.prototype, n)?.value === 'function')
       .sort();
     // Methods that are TypeScript-private are still own properties at runtime; they are listed here so a rename is visible too.
-    const privateOnes = ['anchorRef', 'closeHandle', 'filterRef', 'assertOpen', 'assertWritableHandle', 'read', 'exclusive', 'envelope', 'conversationCompleteness', 'scopeContributions', 'anchorContributions', 'graphContributions', 'formatProfilesFor', 'importEnvelope', 'parseThreadOptions', 'loadConversation', 'messageHitContributions', 'searchAll', 'graphEnvelope', 'edgesAmong', 'draftEnvelope'];
+    const privateOnes = ['anchorRef', 'closeHandle', 'filterRef', 'assertOpen', 'assertWritableHandle', 'read', 'exclusive', 'envelope', 'conversationCompleteness', 'scopeContributions', 'anchorContributions', 'graphProvenance', 'computeGraphProvenance', 'supersededAmong', 'prepare', 'formatProfilesFor', 'importEnvelope', 'parseThreadOptions', 'loadConversation', 'messageHitContributions', 'searchAll', 'graphEnvelope', 'edgesAmong', 'draftEnvelope'];
     const publicMethods = methods.filter((m) => !privateOnes.includes(m));
     assert.deepEqual(publicMethods, [
       'archiveDraft',

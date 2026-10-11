@@ -25,6 +25,7 @@
  *   explicit `branch` > the source's current_node > exactly one branch in the tree > the caller's opt-in `branchPolicy`
  *   heuristic (always flagged ACTIVE_BRANCH_HEURISTIC) > ACTIVE_BRANCH_UNKNOWN.
  */
+import { resolve } from 'node:path';
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 import { closeDatabase, isSqliteError, openDatabase, toDbError } from '../db/open.js';
 import type { GcrDatabase } from '../db/open.js';
@@ -38,7 +39,7 @@ import { runAudit } from '../analysis/audit.js';
 import type { AuditOptions, AuditResult } from '../analysis/audit.js';
 import { analyzeTree, selectBranchByPolicy } from '../domain/branches.js';
 import type { BranchPolicy } from '../domain/branches.js';
-import { isUuid, parseChatGptUrl, parseConversationRef } from '../domain/ids.js';
+import { MAX_URL_LENGTH, isUuid, parseChatGptUrl, parseConversationRef } from '../domain/ids.js';
 import type { BatchInfo, BranchListResult, ConversationSummary, FormatProfile, ImportReport, Page, SearchHit, ThreadResult } from '../domain/results.js';
 import type { Branch, BranchActiveness, Completeness, ConversationRecord, ConversationRef, MessageRecord, ResultEnvelope, TreeAnalysis } from '../domain/types.js';
 import { LocalStore } from '../drafts/drafts.js';
@@ -69,11 +70,12 @@ import { runImport } from '../ingest/import-runner.js';
 import type { ImportOptions } from '../ingest/import-runner.js';
 import { runManualCopyImport } from '../ingest/manual-copy.js';
 import { log } from '../logger.js';
+import { SCHEMA_VERSION } from '../version.js';
 import { buildEnvelope, buildProvenance, mergeWarnings, normalizeCompleteness, uniq, warningsCarryIds } from './envelope.js';
 import type { BatchLookup, Contribution, EnvelopeParts, Provenance } from './envelope.js';
-import { runDoctor } from './doctor.js';
-import type { DoctorOptions, DoctorReport } from './doctor.js';
-import { checkKeys, invalidArgument, normalizeRef, optBool, optEnum, optInt, optString, resolveSummary, withBatchPin } from './resolve.js';
+import { peekOpenRefusal, runDoctor } from './doctor.js';
+import type { DoctorOptions, DoctorReport, OpenRefusal } from './doctor.js';
+import { checkKeys, invalidArgument, looksLikeHttpLink, normalizeRef, optBool, optEnum, optInt, optString, resolveSummary, withBatchPin } from './resolve.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // Public types
@@ -275,6 +277,39 @@ const DRAFT_INPUT_KEYS = ['conversationRef', 'anchorMessageId', 'title', 'body',
 const ANNOTATION_INPUT_KEYS = ['conversationRef', 'messageId', 'kind', 'body', 'namespace'];
 const DRAFT_FILTER_KEYS = ['conversationRef', 'namespace', 'status', 'limit', 'offset'];
 const ANNOTATION_FILTER_KEYS = ['conversationRef', 'messageId', 'namespace', 'kind', 'limit', 'offset'];
+// Options of the analysis and graph modules. Those modules validate VALUES but ignore unknown names; the facade rejects
+// unknown names (a misspelled optional filter would silently widen the answer). test/sdk/option-keys.test.ts compares
+// these lists with the option interfaces in the module sources, so a new module option cannot be forgotten unnoticed.
+const STATS_KEYS = ['groupBy', 'provider', 'accountLabel', 'role', 'createdAfter', 'createdBefore', 'includeHidden', 'allBatches', 'tz', 'limit', 'offset'];
+const AUDIT_KEYS = ['checks', 'provider', 'accountLabel', 'allBatches', 'sampleSize'];
+const BUILD_GRAPH_KEYS = [
+  'provider', 'accountLabel', 'minEntityConversations', 'maxEntitiesPerMessage', 'kinds', 'clusterMethod', 'maxIterations', 'maxEvidencePerEdge', 'maxTextChars', 'now',
+];
+const GRAPH_QUERY_KEYS = ['term', 'depth', 'maxNodes', 'kinds'];
+const SHORTEST_PATH_KEYS = ['maxDepth', 'maxExplored'];
+const NEIGHBORS_KEYS = ['limit', 'kinds', 'edgeKinds'];
+const GOD_NODES_KEYS = ['limit', 'kinds'];
+const EXPLAIN_KEYS = ['limit'];
+const EDGE_REF_KEYS = ['edgeId', 'src', 'dst', 'kind'];
+
+/** The accepted option names per options object (exported for test/sdk/option-keys.test.ts; not part of the public API). */
+export const OPTION_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  stats: STATS_KEYS,
+  audit: AUDIT_KEYS,
+  buildGraph: BUILD_GRAPH_KEYS,
+  graphQuery: GRAPH_QUERY_KEYS,
+  graphPath: SHORTEST_PATH_KEYS,
+  graphNeighbors: NEIGHBORS_KEYS,
+  graphGodNodes: GOD_NODES_KEYS,
+  graphExplain: EXPLAIN_KEYS,
+  edgeRef: EDGE_REF_KEYS,
+  list: LIST_KEYS,
+  thread: THREAD_KEYS,
+  get: GET_KEYS,
+  search: SEARCH_KEYS,
+  importExport: IMPORT_KEYS,
+  graphExportHtml: GRAPH_HTML_KEYS,
+});
 
 /** Scope "all" scans the title stream up to offset+limit hits to find where the message stream starts; this bounds that work. */
 const MAX_ALL_SCOPE_WINDOW = 10_000;
@@ -308,6 +343,20 @@ export function normalizeError(e: unknown): GcrError {
   return toGcrError(e);
 }
 
+/** The error db/schema.ts would raise for the same file (same code, text and details), raised before anything is written. */
+function openRefusalError(r: OpenRefusal): GcrError {
+  if (r.kind === 'newer') {
+    return new GcrError('DB_SCHEMA_TOO_NEW', `Database schema version ${r.fileVersion} is newer than this tool supports (${SCHEMA_VERSION}).`, {
+      remedy: 'Upgrade GCR, or use a different database file. The file was not modified.',
+      details: { fileVersion: r.fileVersion, supportedVersion: SCHEMA_VERSION },
+    });
+  }
+  return new GcrError('DB_ERROR', 'The file is a SQLite database but not a GCR database; refusing to use or modify it.', {
+    remedy: 'Choose a different --db path. GCR never writes into databases it did not create.',
+    details: { reason: 'not_gcr_database' },
+  });
+}
+
 function closedError(): GcrError {
   return new GcrError('DB_ERROR', 'This Gcr handle is closed.', { remedy: 'Open a new handle with Gcr.open().', details: { reason: 'closed' } });
 }
@@ -323,6 +372,29 @@ function writeForbiddenError(): GcrError {
   return new GcrError('WRITE_FORBIDDEN', 'This handle was opened read-only; imports, graph builds, drafts and annotations are not allowed.', {
     remedy: 'Open the database without readOnly to change it.',
   });
+}
+
+/** What the derived graph's facts were extracted from (see Gcr.graphProvenance). */
+interface GraphProvenance {
+  contributions: Contribution[];
+  /** Sorted ids of the conversations whose newest snapshot differs from the one the graph was built from. */
+  superseded: string[];
+}
+
+const MAX_STALE_IDS = 20;
+
+/** GRAPH_STALE for the given conversations (none: no warning). The text names the remedy; ids are capped. */
+function supersededWarnings(conversationIds: readonly string[]): Warning[] {
+  if (conversationIds.length === 0) return [];
+  return [
+    {
+      code: 'GRAPH_STALE',
+      message:
+        `${conversationIds.length} conversation(s) have a newer imported snapshot than the one the graph was built from: ` +
+        'the graph facts (and the source cited here) describe the OLDER snapshot. Rebuild the graph (buildGraph, CLI: gcr graph build) to bring it up to date.',
+      ids: conversationIds.slice(0, MAX_STALE_IDS),
+    },
+  ];
 }
 
 function echoId(id: string): string {
@@ -347,18 +419,42 @@ function noBranches(s: ConversationSummary): GcrError {
 const ACTIVE_BRANCH_REMEDY =
   'GCR does not guess which branch is active. List the branches with "gcr branches <conversation>" and pass --branch <id>, or opt in to a labelled heuristic with --branch-policy last_child|latest_leaf (the result is then flagged ACTIVE_BRANCH_HEURISTIC).';
 
+/**
+ * The source DID name the active node (current_node is valid) but the tree has more branches than the analysis enumerates
+ * (BRANCH_LIMIT_EXCEEDED) and the branch holding that node was not among them. The active branch is then KNOWN yet cannot be
+ * listed or built; saying "the source did not identify it" would be false, and a heuristic would overrule the source.
+ */
+function currentBranchNotEnumerated(s: ConversationSummary, analysis: TreeAnalysis): boolean {
+  return (
+    s.currentNodeId !== null &&
+    analysis.activeBranchId === null &&
+    analysis.warnings.some((w) => w.code === 'BRANCH_LIMIT_EXCEEDED') &&
+    !analysis.warnings.some((w) => w.code === 'INVALID_CURRENT_NODE' || w.code === 'NO_CURRENT_NODE')
+  );
+}
+
+const NOT_ENUMERATED_REMEDY =
+  'The conversation has more branches than can be enumerated, so only some can be named. Pass --branch <id> for one of the enumerated branches (gcr branches lists them). No heuristic is applied: the source\'s own current_node exists, and a heuristic could contradict it.';
+
 function activeBranchUnknown(s: ConversationSummary, analysis: TreeAnalysis, extra: Record<string, unknown> = {}): GcrError {
   const ids = analysis.branches.map((b) => b.branchId);
-  return new GcrError('ACTIVE_BRANCH_UNKNOWN', `The source did not identify the active branch (no valid current_node) and the conversation has ${ids.length} branches.`, {
-    remedy: ACTIVE_BRANCH_REMEDY,
-    details: {
-      conversationId: s.conversationId,
-      branchCount: ids.length,
-      branchIds: ids.slice(0, MAX_BRANCH_IDS_IN_ERROR),
-      branchIdsTruncated: ids.length > MAX_BRANCH_IDS_IN_ERROR,
-      ...extra,
+  const notEnumerated = extra['reason'] === 'active_branch_not_enumerated';
+  return new GcrError(
+    'ACTIVE_BRANCH_UNKNOWN',
+    notEnumerated
+      ? `The source's current_node is known, but its branch is beyond the branch enumeration limit (${ids.length} of ${analysis.leafIds.length} branches were enumerated), so the active thread cannot be built without guessing.`
+      : `The source did not identify the active branch (no valid current_node) and the conversation has ${ids.length} branches.`,
+    {
+      remedy: notEnumerated ? NOT_ENUMERATED_REMEDY : ACTIVE_BRANCH_REMEDY,
+      details: {
+        conversationId: s.conversationId,
+        branchCount: ids.length,
+        branchIds: ids.slice(0, MAX_BRANCH_IDS_IN_ERROR),
+        branchIdsTruncated: ids.length > MAX_BRANCH_IDS_IN_ERROR,
+        ...extra,
+      },
     },
-  });
+  );
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -436,6 +532,13 @@ function selectPrimary(a: {
   const only = branches[0];
   if (only !== undefined && branches.length === 1 && analysis.leafIds.length === 1) {
     return { branch: only, path: only.path, activeness: only.activeness, policy: 'only_branch', warnings: [], supersedes: [] };
+  }
+
+  // 3b. The source named the active node but its branch was not enumerated: known, yet unavailable. Refuse; never let an
+  // opt-in heuristic overrule a pointer the source gave.
+  if (currentBranchNotEnumerated(summary, analysis)) {
+    if (a.required) throw activeBranchUnknown(summary, analysis, { reason: 'active_branch_not_enumerated' });
+    return null;
   }
 
   // 4. Explicit, labelled heuristic (never the default).
@@ -533,16 +636,21 @@ function isPromiseLike(v: unknown): v is PromiseLike<unknown> {
   return typeof v === 'object' && v !== null && typeof (v as { then?: unknown }).then === 'function';
 }
 
-/** A conversation filter given as a link or UUID is reduced to the id the database stores; anything else is a raw id. */
-function conversationFilter(v: unknown): string | undefined {
+/**
+ * A conversation filter given as a link or UUID is reduced to the id the database stores; anything else is a raw id.
+ * `viaUrl` tells the caller that the text was a chatgpt.com link: such a link names a CHATGPT conversation only, so the
+ * search must not match another provider's conversation that happens to share the id.
+ */
+function conversationFilter(v: unknown): { id: string; viaUrl: boolean } | undefined {
   if (v === undefined) return undefined;
-  if (typeof v !== 'string' || v.length === 0 || v.length > 512 || v.includes('\0')) throw invalidArgument('conversationId', 'expected a non-empty string without NUL bytes (max 512 characters)');
-  if (isUuid(v)) return v.toLowerCase();
+  const max = typeof v === 'string' && looksLikeHttpLink(v) ? MAX_URL_LENGTH : 512;
+  if (typeof v !== 'string' || v.length === 0 || v.length > max || v.includes('\0')) throw invalidArgument('conversationId', 'expected a non-empty string without NUL bytes (max 512 characters)');
+  if (isUuid(v)) return { id: v.toLowerCase(), viaUrl: false };
   // Only an http(s) link is read as a link (and then must be the exact chatgpt.com/c/<uuid> form, with the domain layer's
   // errors). Any other text is a RAW stored id, even one that contains a colon ("col:quokka"): treating every "word:" prefix
   // as a URL scheme would make such ids unsearchable and turn an id filter into a URL error.
-  if (/^[\t\n\f\r ]*https?:/i.test(v)) return parseConversationRef(v).conversationId;
-  return v;
+  if (looksLikeHttpLink(v)) return { id: parseConversationRef(v).conversationId, viaUrl: true };
+  return { id: v, viaUrl: false };
 }
 
 function pickDefined(o: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
@@ -595,10 +703,13 @@ export class Gcr {
   private writeTail: Promise<void> = Promise.resolve();
   /** true only while a mutator's body is executing (see "While a mutator is RUNNING" in the file header). */
   private writing = false;
+  /** Cached graph provenance (see graphProvenance). */
+  private graphCache: { dataVersion: number; value: GraphProvenance } | null = null;
 
   private constructor(handle: GcrDatabase, dbPath: string, actor: LocalActor, clock: () => string) {
     this.handle = handle;
-    this.dbPath = dbPath;
+    // Absolute from now on: the instance doctor() must inspect THIS file even if the process changes directory later.
+    this.dbPath = dbPath === ':memory:' ? dbPath : resolve(dbPath);
     this.actorName = actor;
     this.clock = clock;
     this.repo = new Repository(handle.db);
@@ -623,6 +734,13 @@ export class Gcr {
       const clockOpt = o['clock'];
       if (clockOpt !== undefined && typeof clockOpt !== 'function') throw invalidArgument('clock', 'expected a function');
       const clock = (clockOpt as (() => string) | undefined) ?? ((): string => new Date().toISOString());
+
+      // db/open.ts switches a writable connection to WAL before it checks whose file this is, which rewrites header bytes of a
+      // foreign or newer database even though the open then fails. Look first (read-only, no side files) and refuse untouched.
+      if (!readOnly) {
+        const refusal = peekOpenRefusal(dbPath);
+        if (refusal !== null) throw openRefusalError(refusal);
+      }
 
       let handle: GcrDatabase;
       try {
@@ -716,6 +834,7 @@ export class Gcr {
     const run = this.writeTail.then(async (): Promise<T> => {
       if (this.closed) throw closedError();
       this.writing = true;
+      this.graphCache = null;
       try {
         const result = fn();
         return isPromiseLike(result) ? ((await result) as T) : result;
@@ -723,6 +842,7 @@ export class Gcr {
         throw normalizeError(e);
       } finally {
         this.writing = false;
+        this.graphCache = null; // an import may have moved the newest snapshot of conversations the graph was built from
         // close() while this ran: the handle could not be closed under the running write, so do it now.
         if (this.closed) this.closeHandle(true);
       }
@@ -734,6 +854,18 @@ export class Gcr {
   private assertWritableHandle(): void {
     this.assertOpen();
     if (this.handle.readOnly) throw writeForbiddenError();
+  }
+
+  /**
+   * The argument checks of a mutator run BEFORE the writer lock, inside an `async` method; whatever they throw (a hostile
+   * getter or Proxy in an options object throws a plain Error) must reach the caller as a GcrError like everything else.
+   */
+  private prepare<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (e) {
+      throw normalizeError(e);
+    }
   }
 
   private get db(): DatabaseSync {
@@ -798,30 +930,72 @@ export class Gcr {
   }
 
   /**
-   * The conversations the derived graph describes: its conversation nodes, resolved to their newest snapshot. The graph
-   * has no stored build scope, so the nodes it actually contains ARE the scope (a graph built for one provider does not
-   * drag the other provider's completeness into the envelope).
+   * Provenance of the derived graph. The graph tables record no build scope or time, but every edge's evidence rows name the
+   * exact snapshot (batch) each cited message came from. THAT is what the graph's facts were extracted from, so it is what
+   * the envelope cites: a graph built before a newer import must not be presented as if it came from the newer batch.
+   * `superseded` lists the conversations whose newest snapshot is no longer the one the graph was built from.
+   * Conversation nodes without any citation (nothing was extracted from them) fall back to their newest snapshot.
+   * The result is cached; the cache is dropped by every local mutator and whenever another connection committed a change.
    */
-  private graphContributions(): Contribution[] {
+  private graphProvenance(): GraphProvenance {
+    const version = Number(this.db.prepare('PRAGMA data_version').get()?.['data_version'] ?? -1);
+    if (this.graphCache !== null && this.graphCache.dataVersion === version) return this.graphCache.value;
+    const value = this.computeGraphProvenance();
+    this.graphCache = { dataVersion: version, value };
+    return value;
+  }
+
+  private computeGraphProvenance(): GraphProvenance {
     const nodeIds = new Set<string>();
     for (const r of this.db.prepare("SELECT node_id FROM graph_nodes WHERE kind = 'conversation'").iterate()) nodeIds.add(rowStr(r, 'node_id'));
-    if (nodeIds.size === 0) return [];
+    if (nodeIds.size === 0) return { contributions: [], superseded: [] };
+
+    const headOf = this.db.prepare('SELECT source_batch FROM conversation_heads WHERE provider = ? AND account_label = ? AND conversation_id = ?');
+    const completenessOf = this.db.prepare('SELECT completeness FROM conversations WHERE provider = ? AND account_label = ? AND conversation_id = ? AND source_batch = ?');
     const seen = new Set<string>();
-    const out: Contribution[] = [];
+    const contributions: Contribution[] = [];
+    const add = (batchId: string, completeness: Completeness): void => {
+      const key = `${batchId}\0${completeness}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      contributions.push({ batchId, completeness });
+    };
+    const cited = new Set<string>(); // conversation node ids with at least one citation
+    const superseded = new Set<string>();
+    for (const r of this.db.prepare('SELECT DISTINCT provider, account_label, conversation_id, source_batch FROM graph_edge_evidence').iterate()) {
+      const provider = rowStr(r, 'provider');
+      const accountLabel = rowStr(r, 'account_label');
+      const conversationId = rowStr(r, 'conversation_id');
+      const batchId = rowStr(r, 'source_batch');
+      cited.add(conversationNodeId(provider, accountLabel, conversationId));
+      const row = completenessOf.get(provider, accountLabel, conversationId, batchId);
+      add(batchId, row === undefined ? 'unknown' : normalizeCompleteness(rowStr(row, 'completeness')));
+      const head = headOf.get(provider, accountLabel, conversationId);
+      if (head === undefined || rowStr(head, 'source_batch') !== batchId) superseded.add(conversationId);
+    }
+    // Nodes nothing was extracted from: they describe the newest snapshot (all that is known about them).
     const heads = this.db.prepare(
       'SELECT c.provider AS provider, c.account_label AS account_label, c.conversation_id AS conversation_id, c.source_batch AS source_batch, c.completeness AS completeness ' +
         'FROM conversation_heads h JOIN conversations c ON c.provider = h.provider AND c.account_label = h.account_label ' +
         'AND c.conversation_id = h.conversation_id AND c.source_batch = h.source_batch',
     );
     for (const r of heads.iterate()) {
-      if (!nodeIds.has(conversationNodeId(rowStr(r, 'provider'), rowStr(r, 'account_label'), rowStr(r, 'conversation_id')))) continue;
-      const c: Contribution = { batchId: rowStr(r, 'source_batch'), completeness: normalizeCompleteness(rowStr(r, 'completeness')) };
-      const key = `${c.batchId}\0${c.completeness}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(c);
+      const nodeId = conversationNodeId(rowStr(r, 'provider'), rowStr(r, 'account_label'), rowStr(r, 'conversation_id'));
+      if (!nodeIds.has(nodeId) || cited.has(nodeId)) continue;
+      add(rowStr(r, 'source_batch'), normalizeCompleteness(rowStr(r, 'completeness')));
     }
-    return out;
+    return { contributions, superseded: [...superseded].sort() };
+  }
+
+  /** Conversation ids among the cited snapshots whose newest snapshot is a different one (a newer import superseded them). */
+  private supersededAmong(snapshots: ReadonlyArray<{ provider: string; accountLabel: string; conversationId: string; batchId: string }>): string[] {
+    const headOf = this.db.prepare('SELECT source_batch FROM conversation_heads WHERE provider = ? AND account_label = ? AND conversation_id = ?');
+    const out = new Set<string>();
+    for (const e of snapshots) {
+      const head = headOf.get(e.provider, e.accountLabel, e.conversationId);
+      if (head === undefined || rowStr(head, 'source_batch') !== e.batchId) out.add(e.conversationId);
+    }
+    return [...out].sort();
   }
 
   private formatProfilesFor(contributions: readonly Contribution[]): BatchFormatProfile[] {
@@ -841,11 +1015,16 @@ export class Gcr {
    * The envelope's completeness is the imported conversations' own (a Claude export is "rendered_active_view_only").
    */
   async importExport(opts: ImportOptions): Promise<ResultEnvelope<ImportReport>> {
-    this.assertWritableHandle();
-    const o = checkKeys('options', opts, IMPORT_KEYS);
-    assertImportSource(o['source']);
+    // The import runs with the VALIDATED copy of the options: reading `opts` a second time would let a getter answer
+    // differently for the check and for the use.
+    const o = this.prepare(() => {
+      this.assertWritableHandle();
+      const checked = checkKeys('options', opts, IMPORT_KEYS);
+      assertImportSource(checked['source']);
+      return checked;
+    });
     return this.exclusive(async () => {
-      const report = await runImport(this.repo, { ...opts, clock: opts.clock ?? this.clock });
+      const report = await runImport(this.repo, { ...o, clock: (o['clock'] as (() => string) | undefined) ?? this.clock } as unknown as ImportOptions);
       return this.importEnvelope(report);
     });
   }
@@ -855,9 +1034,11 @@ export class Gcr {
    * "partial_user_supplied" and says so (SOURCE_NOT_FULL_HISTORY), because only the copied messages exist.
    */
   async importManualCopy(text: string, opts: ManualCopyOptions = {}): Promise<ResultEnvelope<ImportReport>> {
-    this.assertWritableHandle();
-    if (typeof text !== 'string') throw invalidArgument('text', 'expected the manual-copy JSON document as a string');
-    const o = checkKeys('options', opts, MANUAL_COPY_KEYS);
+    const o = this.prepare(() => {
+      this.assertWritableHandle();
+      if (typeof text !== 'string') throw invalidArgument('text', 'expected the manual-copy JSON document as a string');
+      return checkKeys('options', opts, MANUAL_COPY_KEYS);
+    });
     return this.exclusive(async () => {
       const report = await runManualCopyImport(this.repo, {
         text,
@@ -973,7 +1154,9 @@ export class Gcr {
         // Only reachable with allBranches: say plainly why `thread` is null instead of leaving it to be guessed.
         extra.push({
           code: 'ACTIVE_BRANCH_UNKNOWN',
-          message: `The source did not identify the active branch; thread is null and all ${analysis.branches.length} branches are listed in threads. Nothing was guessed.`,
+          message: currentBranchNotEnumerated(summary, analysis)
+            ? `The source's current_node is known, but its branch is beyond the branch enumeration limit; thread is null and the ${analysis.branches.length} enumerated branches are listed in threads. Nothing was guessed.`
+            : `The source did not identify the active branch; thread is null and all ${analysis.branches.length} branches are listed in threads. Nothing was guessed.`,
           ids: [summary.conversationId],
         });
       }
@@ -1076,7 +1259,8 @@ export class Gcr {
       const o = checkKeys('options', opts, SEARCH_KEYS);
       const scope = optEnum<SearchScope>('scope', o['scope'], SEARCH_SCOPES) ?? 'messages';
       const mode = optEnum<SearchMode>('mode', o['mode'], SEARCH_MODES);
-      const conversationId = conversationFilter(o['conversationId']);
+      const idFilter = conversationFilter(o['conversationId']);
+      const conversationId = idFilter?.id;
       const includeHidden = optBool('includeHidden', o['includeHidden']);
       if (scope !== 'messages') {
         for (const k of MESSAGE_ONLY_FILTERS) {
@@ -1088,6 +1272,11 @@ export class Gcr {
         ...pickDefined(o, ['query', 'provider', 'accountLabel', 'allBatches']),
         ...(mode === undefined ? {} : { mode }),
       };
+      if (idFilter?.viaUrl === true) {
+        // A chatgpt.com link names a ChatGPT conversation: pin the provider (a contradicting provider filter is a caller bug).
+        if (o['provider'] !== undefined && o['provider'] !== 'chatgpt') throw invalidArgument('provider', 'conflicts with a chatgpt.com link used as conversationId', { link: true });
+        base['provider'] = 'chatgpt';
+      }
 
       let page: Page<SearchItem>;
       let contributions: Contribution[];
@@ -1183,12 +1372,15 @@ export class Gcr {
   /** Message statistics by role, model, channel, day, conversation, provider or content type (src/analysis/stats.ts). */
   stats(opts: StatsOptions): ResultEnvelope<StatsReport> {
     return this.read(() => {
-      const result = computeStats(this.db, opts);
-      const contributions = this.scopeContributions({ provider: opts.provider, accountLabel: opts.accountLabel, allBatches: opts.allBatches });
-      // Grouping by day or provider yields only dates/provider ids; every other grouping returns imported strings (roles, models, titles).
-      const untrusted = (result.groupBy !== 'day' && result.groupBy !== 'provider') || warningsCarryIds(result.warnings);
+      const o = checkKeys('options', opts, STATS_KEYS) as unknown as StatsOptions;
+      const result = computeStats(this.db, o);
+      const contributions = this.scopeContributions({ provider: o.provider, accountLabel: o.accountLabel, allBatches: o.allBatches });
+      const formatProfiles = this.formatProfilesFor(contributions);
+      // Grouping by day or provider yields only dates/provider ids; every other grouping returns imported strings (roles, models,
+      // titles). The attached FormatProfiles are imported text too (their roleCounts keys are the export's own role names).
+      const untrusted = (result.groupBy !== 'day' && result.groupBy !== 'provider') || formatProfiles.length > 0 || warningsCarryIds(result.warnings);
       return this.envelope({
-        data: { ...result, formatProfiles: this.formatProfilesFor(contributions) },
+        data: { ...result, formatProfiles },
         contributions,
         warnings: result.warnings,
         untrustedContent: untrusted,
@@ -1199,8 +1391,9 @@ export class Gcr {
   /** Data-quality and provenance audit (src/analysis/audit.ts): counts and ids only, never message text. */
   audit(opts: AuditOptions = {}): ResultEnvelope<AuditReport> {
     return this.read(() => {
-      const result = runAudit(this.db, opts);
-      const contributions = this.scopeContributions({ provider: opts.provider, accountLabel: opts.accountLabel, allBatches: opts.allBatches });
+      const o = checkKeys('options', opts, AUDIT_KEYS) as unknown as AuditOptions;
+      const result = runAudit(this.db, o);
+      const contributions = this.scopeContributions({ provider: o.provider, accountLabel: o.accountLabel, allBatches: o.allBatches });
       return this.envelope({
         data: { ...result, formatProfiles: this.formatProfilesFor(contributions) },
         contributions,
@@ -1219,18 +1412,29 @@ export class Gcr {
 
   /** Rebuild the derived graph tables (a write to derived tables only; imported data is never touched). */
   async buildGraph(opts: BuildGraphOptions = {}): Promise<ResultEnvelope<BuildGraphResult>> {
-    this.assertWritableHandle();
+    const o = this.prepare(() => {
+      this.assertWritableHandle();
+      return checkKeys('options', opts, BUILD_GRAPH_KEYS) as unknown as BuildGraphOptions;
+    });
     return this.exclusive(() => {
-      const result = buildGraphImpl(this.db, opts);
-      return this.envelope({ data: result, contributions: this.graphContributions(), warnings: result.warnings, untrustedContent: warningsCarryIds(result.warnings) });
+      const result = buildGraphImpl(this.db, o);
+      this.graphCache = null; // the derived tables just changed under any cached provenance
+      const prov = this.graphProvenance();
+      return this.envelope({
+        data: result,
+        contributions: prov.contributions,
+        warnings: [...result.warnings, ...supersededWarnings(prov.superseded)],
+        untrustedContent: warningsCarryIds(result.warnings),
+      });
     });
   }
 
   private graphEnvelope<T>(data: T, nodes: readonly GraphNodeDto[], warnings: readonly Warning[]): ResultEnvelope<T> {
+    const prov = this.graphProvenance();
     return this.envelope({
       data,
-      contributions: this.graphContributions(),
-      warnings,
+      contributions: prov.contributions,
+      warnings: [...warnings, ...supersededWarnings(prov.superseded)],
       ids: { conversationIds: nodes.flatMap((n) => (n.conversation === null ? [] : [n.conversation.conversationId])) },
     });
   }
@@ -1238,7 +1442,7 @@ export class Gcr {
   /** Breadth-first neighbourhood of every graph node matching `term`. */
   graphQuery(q: GraphQueryInput): ResultEnvelope<GraphQueryResult> {
     return this.read(() => {
-      const r = graphQueryImpl(this.db, q);
+      const r = graphQueryImpl(this.db, checkKeys('query', q, GRAPH_QUERY_KEYS) as unknown as GraphQueryInput);
       return this.graphEnvelope(r, r.nodes, r.warnings);
     });
   }
@@ -1246,7 +1450,7 @@ export class Gcr {
   /** Fewest-hop path between two node ids. Unknown ids are NOT_IN_LOCAL_EXPORT (graph nodes, not conversations). */
   graphPath(from: string, to: string, opts: ShortestPathOptions = {}): ResultEnvelope<PathResult> {
     return this.read(() => {
-      const r = shortestPath(this.db, from, to, opts);
+      const r = shortestPath(this.db, from, to, checkKeys('options', opts, SHORTEST_PATH_KEYS) as ShortestPathOptions);
       const warnings: Warning[] =
         !r.found && r.truncated ? [{ code: 'PATH_SEARCH_TRUNCATED', message: 'The search budget was exhausted: "not found" means not found within the budget, not that no path exists.' }] : [];
       return this.graphEnvelope(r, r.path, warnings);
@@ -1255,7 +1459,7 @@ export class Gcr {
 
   graphNeighbors(nodeId: string, opts: NeighborsOptions = {}): ResultEnvelope<NeighborsResult> {
     return this.read(() => {
-      const r = neighborsImpl(this.db, nodeId, opts);
+      const r = neighborsImpl(this.db, nodeId, checkKeys('options', opts, NEIGHBORS_KEYS) as NeighborsOptions);
       const warnings: Warning[] = r.truncated ? [{ code: 'NEIGHBORS_TRUNCATED', message: `Only ${r.neighbors.length} of ${r.total} neighbours are listed.` }] : [];
       return this.graphEnvelope(r, [r.node, ...r.neighbors.map((n) => n.node)], warnings);
     });
@@ -1264,7 +1468,7 @@ export class Gcr {
   /** Most connected nodes (weighted degree). */
   graphGodNodes(opts: GodNodesOptions = {}): ResultEnvelope<GodNode[]> {
     return this.read(() => {
-      const r = godNodes(this.db, opts);
+      const r = godNodes(this.db, checkKeys('options', opts, GOD_NODES_KEYS) as GodNodesOptions);
       return this.graphEnvelope(
         r,
         r.map((g) => g.node),
@@ -1279,7 +1483,7 @@ export class Gcr {
    */
   graphExplain(ref: EdgeRef, opts: ExplainEdgeOptions = {}): ResultEnvelope<ExplainEdgeResult> {
     return this.read(() => {
-      const r = explainEdge(this.db, ref, opts);
+      const r = explainEdge(this.db, checkKeys('edge', ref, EDGE_REF_KEYS) as unknown as EdgeRef, checkKeys('options', opts, EXPLAIN_KEYS) as ExplainEdgeOptions);
       const cache = new Map<string, Completeness>();
       const contributions = r.evidence.map((e) => {
         const key = `${e.provider}\0${e.accountLabel}\0${e.conversationId}\0${e.batchId}`;
@@ -1290,10 +1494,15 @@ export class Gcr {
         }
         return { batchId: e.batchId, completeness };
       });
+      const warnings: Warning[] = [...r.warnings];
+      if (r.evidenceTotal > r.evidence.length) {
+        warnings.push({ code: 'EVIDENCE_TRUNCATED', message: `Only ${r.evidence.length} of ${r.evidenceTotal} citations of this edge are listed; the facts of the others are not shown here.` });
+      }
+      warnings.push(...supersededWarnings(this.supersededAmong(r.evidence)));
       return this.envelope({
         data: r,
         contributions,
-        warnings: r.warnings,
+        warnings,
         ids: {
           conversationIds: r.evidence.map((e) => e.conversationId),
           messageIds: r.evidence.flatMap((e) => (e.messageId === null ? [] : [e.messageId])),
@@ -1326,7 +1535,8 @@ export class Gcr {
         if (nodes.length === 0) warnings.push({ code: 'GRAPH_EMPTY', message: 'The graph has no nodes. Import an export and build the graph first.' });
       }
       const html = exportGraphHtml({ nodes, edges }, pickDefined(o, ['title', 'layoutSeed', 'maxOverviewNodes']) as ExportHtmlOptions);
-      const provenance = buildProvenance(this.lookupBatch, { contributions: this.graphContributions(), warnings, untrustedContent: true });
+      const prov = this.graphProvenance();
+      const provenance = buildProvenance(this.lookupBatch, { contributions: prov.contributions, warnings: [...warnings, ...supersededWarnings(prov.superseded)], untrustedContent: true });
       return { html, nodes: nodes.length, edges: edges.length, ...provenance };
     });
   }
@@ -1389,8 +1599,10 @@ export class Gcr {
    * message is sent anywhere and GCR has no way to send one. Audited with this handle's actor.
    */
   async createDraft(input: CreateLocalDraftInput): Promise<ResultEnvelope<LocalDraftData>> {
-    this.assertWritableHandle();
-    const o = checkKeys('input', input, DRAFT_INPUT_KEYS);
+    const o = this.prepare(() => {
+      this.assertWritableHandle();
+      return checkKeys('input', input, DRAFT_INPUT_KEYS);
+    });
     return this.exclusive(() => {
       const { ref } = this.anchorRef('conversationRef', o['conversationRef']);
       const draft = this.store.createDraft({ ...(o as unknown as CreateDraftInput), conversationRef: ref });
@@ -1421,7 +1633,7 @@ export class Gcr {
 
   /** Archive a draft (idempotent). There is deliberately no "sent" state. */
   async archiveDraft(id: string): Promise<ResultEnvelope<LocalDraftData>> {
-    this.assertWritableHandle();
+    this.prepare(() => this.assertWritableHandle());
     return this.exclusive(() => {
       const draft = this.store.archiveDraft(id);
       return this.draftEnvelope<LocalDraftData>({ localOnly: true, draft }, [draft], { draftIds: [draft.draftId] });
@@ -1438,8 +1650,10 @@ export class Gcr {
   }
 
   async createAnnotation(input: CreateLocalAnnotationInput): Promise<ResultEnvelope<LocalAnnotationData>> {
-    this.assertWritableHandle();
-    const o = checkKeys('input', input, ANNOTATION_INPUT_KEYS);
+    const o = this.prepare(() => {
+      this.assertWritableHandle();
+      return checkKeys('input', input, ANNOTATION_INPUT_KEYS);
+    });
     return this.exclusive(() => {
       const { ref } = this.anchorRef('conversationRef', o['conversationRef']);
       const annotation = this.store.createAnnotation({ ...(o as unknown as CreateAnnotationInput), conversationRef: ref });
@@ -1452,7 +1666,7 @@ export class Gcr {
 
   /** Optimistic concurrency: `patch.expectedVersion` must equal the stored version, else ANNOTATION_CONFLICT. */
   async updateAnnotation(id: string, patch: AnnotationPatch): Promise<ResultEnvelope<LocalAnnotationData>> {
-    this.assertWritableHandle();
+    this.prepare(() => this.assertWritableHandle());
     return this.exclusive(() => {
       const annotation = this.store.updateAnnotation(id, patch);
       return this.draftEnvelope<LocalAnnotationData>({ localOnly: true, annotation }, [annotation], {

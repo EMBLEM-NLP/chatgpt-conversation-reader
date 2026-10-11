@@ -248,16 +248,13 @@ function collectStrings(value: unknown, into: Set<string>): void {
 
 const IDS_KEYS = ['conversationIds', 'messageIds', 'branchIds', 'draftIds', 'annotationIds'] as const;
 
-/** Remove from `ids` exactly the ids that only lived in dropped content: `ids` must not cite what the result no longer shows. */
-function pruneIds(ids: McpEnvelope['ids'], dropped: ReadonlySet<string>, data: Record<string, unknown>): McpEnvelope['ids'] {
-  if (dropped.size === 0) return ids;
-  const kept = new Set<string>();
-  collectStrings(data, kept);
+/** A copy of `ids` that keeps only the ids `keep` accepts (empty lists disappear). */
+function filterIds(ids: McpEnvelope['ids'], keep: (id: string) => boolean): McpEnvelope['ids'] {
   const out: McpEnvelope['ids'] = {};
   for (const key of IDS_KEYS) {
     const list = ids[key];
     if (list === undefined) continue;
-    const remaining = list.filter((id) => !dropped.has(id) || kept.has(id));
+    const remaining = list.filter(keep);
     if (remaining.length > 0) out[key] = remaining;
   }
   return out;
@@ -270,10 +267,6 @@ function truncationWarning(notes: readonly string[], maxBytes: number): Warning 
   };
 }
 
-function withTruncation(base: McpEnvelope, data: Record<string, unknown>, notes: readonly string[], maxBytes: number): McpEnvelope {
-  return { ...base, data, truncated: true, warnings: [...base.warnings, truncationWarning(notes, maxBytes)] };
-}
-
 export function resultTooLargeError(maxBytes: number): GcrError {
   return new GcrError('INTERNAL_ERROR', 'The result is larger than the configured size limit and could not be reduced.', {
     remedy: `Narrow the request (smaller limit, tighter filters). The limit is ${maxBytes} bytes (GCR_MCP_MAX_RESULT_BYTES); the gcr CLI has no such limit.`,
@@ -284,6 +277,10 @@ export function resultTooLargeError(maxBytes: number): GcrError {
 /**
  * Make `env` fit `maxBytes` following `plan` (see the file header). Returns `env` itself when it already fits. Deterministic.
  * Errors are only stripped of their details when they do not fit (they are small by construction).
+ *
+ * `ids` is pruned INSIDE every probe, not afterwards: a thread of thousands of messages cites thousands of message ids, and
+ * measuring a candidate with the full id list would wrongly conclude that not even an empty list fits. An id is dropped
+ * exactly when it occurs only in items that were cut (it is not elsewhere in the data and not in a kept item).
  */
 export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxBytes: number): McpEnvelope {
   if (sizeOf(env) <= maxBytes) return env;
@@ -294,13 +291,15 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
   }
 
   let data: Record<string, unknown> = env.data;
+  let ids = env.ids;
   const notes: string[] = [];
-  const dropped = new Set<string>();
-
-  const finish = (d: Record<string, unknown>, ns: readonly string[]): McpEnvelope => {
-    const bounded = withTruncation(env, d, ns, maxBytes);
-    return { ...bounded, ids: pruneIds(env.ids, dropped, d) };
-  };
+  const assemble = (d: Record<string, unknown>, ns: readonly string[], i: McpEnvelope['ids']): McpEnvelope => ({
+    ...env,
+    data: d,
+    ids: i,
+    truncated: true,
+    warnings: [...env.warnings, truncationWarning(ns, maxBytes)],
+  });
 
   for (const step of plan) {
     const label = `data.${step.path.join('.')}`;
@@ -308,12 +307,11 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
 
     if (step.kind === 'elide') {
       if (typeof target !== 'string' || target === '') continue;
-      const next = updateAt(data, step.path, (container, key) => {
+      data = updateAt(data, step.path, (container, key) => {
         container[key] = '';
       });
       notes.push(`${label} omitted from this response (${Buffer.byteLength(target, 'utf8')} bytes; the stored original is unchanged)`);
-      data = next;
-      const candidate = finish(data, notes);
+      const candidate = assemble(data, notes, ids);
       if (sizeOf(candidate) <= maxBytes) return candidate;
       continue;
     }
@@ -327,18 +325,40 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
         step.fix?.(container, n, total);
       });
     const noteFor = (n: number): string => `${label}: kept ${n} of ${total} items`;
-    const probe = (n: number): number => sizeOf(withTruncation(env, cut(n), [...notes, noteFor(n)], maxBytes));
+
+    // Which ids survive a cut to n items: those found elsewhere in the data, those in no item of this list, and those whose
+    // first occurrence in the list is among the kept items.
+    const emptied = cut(0);
+    const elsewhere = new Set<string>();
+    collectStrings(emptied, elsewhere);
+    const universe = new Set<string>();
+    for (const key of IDS_KEYS) for (const id of ids[key] ?? []) universe.add(id);
+    const firstIndex = new Map<string, number>();
+    if (universe.size > 0) {
+      for (let i = 0; i < total; i++) {
+        const found = new Set<string>();
+        collectStrings(items[i], found);
+        for (const s of found) if (universe.has(s) && !firstIndex.has(s)) firstIndex.set(s, i);
+      }
+    }
+    const idsFor = (n: number): McpEnvelope['ids'] =>
+      filterIds(ids, (id) => {
+        if (elsewhere.has(id)) return true;
+        const first = firstIndex.get(id);
+        return first === undefined || first < n;
+      });
+    const probe = (n: number): number => sizeOf(assemble(n === 0 ? emptied : cut(n), [...notes, noteFor(n)], idsFor(n)));
 
     const emptySize = probe(0);
     if (emptySize > maxBytes) {
       // Even with this list emptied the result does not fit: empty it and let the next step work on the rest.
-      for (const item of items) collectStrings(item, dropped);
       notes.push(noteFor(0));
-      data = cut(0);
+      data = emptied;
+      ids = idsFor(0);
       continue;
     }
 
-    // Upper bound from per-item sizes (the real size is never smaller than this estimate, apart from digit growth), then an
+    // Upper bound from per-item sizes (the real size is never smaller than this estimate, give or take digit growth), then an
     // exact binary search below it: probes are full serializations, so the answer does not depend on the estimate's accuracy.
     let estimate = emptySize;
     let upper = 0;
@@ -354,12 +374,10 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
       if (probe(mid) <= maxBytes) lo = mid;
       else hi = mid - 1;
     }
-    for (const item of items.slice(lo)) collectStrings(item, dropped);
     notes.push(noteFor(lo));
-    data = cut(lo);
-    const candidate = finish(data, notes);
-    // Pruning ids only removes bytes, so the candidate fits whenever the probe did; the check is a seat belt, not a code path.
-    if (sizeOf(candidate) <= maxBytes) return candidate;
+    const finalIds = idsFor(lo);
+    data = lo === 0 ? emptied : cut(lo);
+    return assemble(data, notes, finalIds);
   }
   return errorEnvelope(resultTooLargeError(maxBytes));
 }

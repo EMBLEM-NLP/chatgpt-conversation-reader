@@ -26,7 +26,7 @@ export const GLOBAL_OPTIONS: Readonly<Record<GlobalName, OptionSpec>> = {
     kind: 'choice',
     valueName: 'format',
     choices: OUTPUT_FORMATS,
-    description: 'Output format: json, markdown, compact (token-light text) or jsonl (one JSON value per line).',
+    description: 'Output format. compact is token-light plain text; jsonl is one JSON value per line.',
     defaultText: 'markdown',
   },
   tz: {

@@ -14,7 +14,7 @@
  *  - U+2028 / U+2029 are legal inside JSON strings and `JSON.stringify` emits them raw, but several line readers (including
  *    Node's `readline`) treat them as line terminators. An imported message containing one would then be cut in the middle
  *    of a frame by such a client (a way to smuggle a "fake frame" out of conversation text). `rpcOut` rewrites them to the
- *    escapes ` ` / ` `: still valid JSON, identical after parsing, never a line break.
+ *    escapes `U+2028` / `U+2029`: still valid JSON, identical after parsing, never a line break.
  *  - A client that vanishes while we write raises EPIPE on BOTH the real stdout and our wrapper; an unhandled 'error' event
  *    on either would kill the process with exit code 1. Both get a handler that treats EPIPE as a normal shutdown request.
  *
@@ -34,10 +34,19 @@ export interface StdoutGuard {
 
 let installed: StdoutGuard | undefined;
 
+/**
+ * LINE SEPARATOR and PARAGRAPH SEPARATOR, built from their code points. They are never written as escapes in this source: a
+ * regex literal containing them is re-printed by TypeScript 7 with the raw character, which ends the line inside the literal
+ * and makes the emitted file a syntax error, and some tools rewrite such escapes in source text.
+ */
+const LS = String.fromCharCode(0x2028);
+const PS = String.fromCharCode(0x2029);
+const BACKSLASH = String.fromCharCode(0x5c);
+
 /** Rewrite the two Unicode line separators that `JSON.stringify` leaves raw (see the file header). Other text is untouched. */
 export function escapeLineSeparators(frame: string): string {
-  if (!frame.includes(' ') && !frame.includes(' ')) return frame;
-  return frame.replace(/[  ]/g, (c) => (c === ' ' ? '\\u2028' : '\\u2029'));
+  if (!frame.includes(LS) && !frame.includes(PS)) return frame;
+  return frame.replaceAll(LS, `${BACKSLASH}u2028`).replaceAll(PS, `${BACKSLASH}u2029`);
 }
 
 export function installStdoutGuard(): StdoutGuard {

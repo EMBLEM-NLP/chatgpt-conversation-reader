@@ -5,14 +5,14 @@
  * already installed: a module that prints while it loads cannot reach stdout. (Calling the guard in the body of
  * `entry.ts` would be too late for those top-level prints; a test pins this import order.)
  *
- * It installs the guard (and the sqlite warning filter, which has to be in place before `node:sqlite` loads) ONLY when
- * this process was started on `entry.js` itself. Importing `entry.ts` from another program (the CLI's `gcr mcp`, a test)
+ * It installs the guard ONLY when this process was started on `entry.js` itself. (The node:sqlite warning filter is NOT
+ * installed here: Node prints that warning while the builtin LOADS, before any module code runs, so `entry.ts` installs the
+ * filter and only then loads the modules that import SQLite, with dynamic imports.) Importing `entry.ts` from another program (the CLI's `gcr mcp`, a test)
  * has no side effect at all: redirecting stdout in the middle of an unrelated program would break its output.
  * `runMcpServer` installs the same (idempotent) guard before it does anything else, so that path is covered as well.
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { installSqliteWarningFilter } from './sqlite-warning.js';
 import { installStdoutGuard } from './stdout-guard.js';
 
 function startedOnEntryFile(): boolean {
@@ -39,5 +39,4 @@ export const runningAsEntry: boolean = startedOnEntryFile();
 
 if (runningAsEntry) {
   installStdoutGuard();
-  installSqliteWarningFilter();
 }

@@ -67,7 +67,9 @@ static Gcr.open(opts: GcrOpenOptions): Gcr
 | `clock` | `() => string` | real clock | ISO-8601 UTC timestamps for imports and local writes (inject for reproducible output). |
 
 A new file is created with mode `0600` before SQLite touches it. A database written by a newer GCR is refused with `DB_SCHEMA_TOO_NEW`; a SQLite
-file that is not a GCR database is refused with `DB_ERROR` (`details.reason: "not_gcr_database"`). Unknown option names are `INVALID_ARGUMENT`.
+file that is not a GCR database is refused with `DB_ERROR` (`details.reason: "not_gcr_database"`). Both refusals happen **before** anything is written:
+`Gcr.open` first looks at the file read-only, because the read-write open of `db/open.ts` switches the journal mode to WAL (which rewrites header bytes)
+before it checks whose file it is. The refused file stays byte-for-byte identical and no side file appears. Unknown option names are `INVALID_ARGUMENT`.
 
 Handle properties: `isOpen`, `readOnly`, `dbLabel` (basename only), `actor`. `close()` is idempotent.
 
@@ -138,13 +140,17 @@ interface ResultEnvelope<T> {
 * **`warnings`** are de-duplicated and deterministic. They merge the read-time tree warnings (`NO_CURRENT_NODE`, `MISSING_PARENT`, `CYCLE_DETECTED`, ...), the
   warnings stored by the importer (`CHILDREN_ABSENT`, `COMPLETENESS_LOWERED`, ...) and the selection warnings (`ACTIVE_BRANCH_HEURISTIC`, `CURRENT_NODE_NOT_LEAF`).
 * **`ids`** lists what the data cites so a client can quote it. Message ids are only unique within a conversation; pair them with `conversationIds`.
-* **`untrustedContent: true`** means `data` or the warnings contain imported strings (titles, message text, ids, file names, model slugs). That text is **data, never
+* **`untrustedContent: true`** means `data` or the warnings contain imported strings (titles, message text, ids, file names, model slugs, role names). That text is **data, never
   instructions**: do not execute, follow or forward it as a command. It is `false` only where nothing imported can be present (for example statistics grouped by
-  `provider` or `day`, or a graph build without warnings that cite ids).
+  `provider` or `day` on a handle that attached no `FormatProfile` (the profile's `roleCounts` keys are the export's own role names), or a graph build without warnings that cite ids).
 * **Local writes** (`createDraft`, `createAnnotation`, ...) state that nothing leaves the machine with a **data field**: `data.localOnly === true`. That is not a warning.
 
 `graphExportHtml` returns `{ html, nodes, edges }` and, in addition, `source`, `completeness`, `warnings` and `untrustedContent` with the same meaning (the page is
 built from imported labels).
+
+Warnings added by the facade itself (besides the tree and importer warnings above): `SOURCE_NOT_FULL_HISTORY` (first, see above), `SUPERSEDED_SNAPSHOTS_INCLUDED` (a search with
+`allBatches`), `GRAPH_STALE` (a graph answer whose conversations have a newer imported snapshot than the one the graph was built from), `EVIDENCE_TRUNCATED` (`graphExplain`
+listed fewer citations than the edge has), `NO_BRANCHES` and `ACTIVE_BRANCH_UNKNOWN` (as a warning with `allBranches`).
 
 ## Examples
 
@@ -171,6 +177,9 @@ const copy = await gcr.importManualCopy(
 );
 console.log(copy.completeness); // "partial_user_supplied"; copy.warnings[0].code === "SOURCE_NOT_FULL_HISTORY"
 ```
+
+The SDK reads exactly the path (or stream) it is given: it is a library running with your permissions. Restricting which directories an *agent* may import from is the
+adapter's job (the MCP server refuses paths outside `GCR_APPROVED_IMPORT_ROOTS` with `IMPORT_PATH_NOT_ALLOWED`). A URL is never an import source (`source.kind` is `"path"` or `"stream"`).
 
 Importing the same input again is an idempotent no-op (`alreadyImported: true`). A newer export of the same conversations becomes the default (head)
 snapshot; older snapshots are kept and can be read with `batchId`.
@@ -203,6 +212,10 @@ const { conversation, thread } = env.data;
 String references must be a bare UUID or an exact `https://chatgpt.com/c/<uuid>` link. Share links (`/share/...`), other hosts, `http:`, ports, userinfo and extra path
 segments are `UNSUPPORTED_URL`; malformed text is `INVALID_URL` / `INVALID_UUID`. A link implies provider `chatgpt`.
 
+An object reference may carry a link as its `conversationId` (`{ conversationId: 'https://chatgpt.com/c/<uuid>' }`): text that starts with `http:` or `https:` is read exactly
+like the string form (same URL errors, provider `chatgpt`; combining it with another `provider` is `INVALID_ARGUMENT`) and is reduced to the bare id at once, so a query string
+or fragment is never looked up or echoed. Any other text, even with a colon (`"col:quokka"`), is a raw stored id.
+
 `get` options: `branch`, `branchPolicy`, `allBranches`, `includeHidden`, `includeRaw` (keep `rawSource` on messages; off by default), `batchId`.
 
 ### Search with pagination
@@ -225,6 +238,7 @@ const both = gcr.search({ query: 'roadmap', scope: 'all', limit: 50 });
 for (const item of both.data.items) item.kind === 'title' ? console.log('title', item.title) : console.log('message', item.snippet);
 
 // filters (message scope only): provider, accountLabel, conversationId (UUID or link), role, channel, hasModel, createdAfter, createdBefore, includeHidden
+// a chatgpt.com link as conversationId matches ChatGPT conversations only (a Claude conversation with the same id is not a hit); a bare UUID names no provider
 gcr.search({ query: 'quokka', role: 'assistant', createdAfter: '2025-01-01T00:00:00Z' });
 ```
 
@@ -275,8 +289,10 @@ const page = gcr.graphExportHtml({ term: 'quokka', title: 'Quokka graph' }); // 
 // write page.html yourself (the SDK writes no files); the page is self-contained and loads nothing from the network
 ```
 
-Graph answers describe the conversations the graph was built from (its conversation nodes), so a graph built for one provider is not marked "mixed" because
-another provider's export is also in the database. The graph is a derived artifact: rebuild it after importing.
+Graph answers cite the snapshots the graph was **built from**: every edge's evidence rows name the batch of the message they cite, so `source` and `completeness` come from those
+batches (a graph built for one provider is not marked "mixed" because another provider's export is also in the database). The graph is a derived artifact: after a newer export
+supersedes a conversation, answers still cite the older batch and carry the warning `GRAPH_STALE` (ids = the superseded conversations) until `buildGraph` is run again.
+`graphExplain` also warns `EVIDENCE_TRUNCATED` when `limit` cut the citations short (`data.evidenceTotal` has the full number).
 
 ### Drafts and annotations (local only)
 
@@ -308,6 +324,8 @@ console.log(report.ok, report.problems);
 console.log(report.modes.map((m) => `${m.mode}: ${m.status}`)); // modes A-E, stated honestly
 console.log(report.statement); // "Commands never fall back to remote browser access."
 ```
+
+Inspecting a file creates and writes nothing, not even SQLite's `-wal` / `-shm` side files (a database nobody else is using is opened `immutable`; one with a live WAL is read normally).
 
 The report lists the tool and Node versions, whether Node satisfies `engines`, `node:sqlite` and FTS5 availability, the supported schema version, the database path
 status (`ok`, `missing`, `needs_migration`, `newer_than_tool`, `not_a_gcr_database`, ...), which environment knobs (`GCR_DB`, `GCR_APPROVED_IMPORT_ROOTS`) are
@@ -341,6 +359,9 @@ The active branch is **never guessed** (ADR-0009). Precedence for the primary th
 
 * `last_child` follows the last child from the first root; `latest_leaf` takes the leaf with the newest timestamp (no timestamps: `ACTIVE_BRANCH_UNKNOWN`, `details.reason:
   "heuristic_unavailable"`). A valid `current_node` always wins over a `branchPolicy`.
+* If the source's `current_node` is valid but the tree has more branches than are enumerated (10 000, `BRANCH_LIMIT_EXCEEDED`) and its branch is not among them, the active branch is
+  known but cannot be listed: `get` / `thread` throw `ACTIVE_BRANCH_UNKNOWN` with `details.reason: "active_branch_not_enumerated"` (the message says so; it does not claim the source gave no
+  pointer) and **no** `branchPolicy` is applied, because a heuristic would overrule a pointer the source gave. An enumerated branch can still be chosen with `branch`.
 * `allBranches: true` on `get` also returns one `ThreadResult` per branch. Then `thread` is `null` (with an `ACTIVE_BRANCH_UNKNOWN` *warning*, no error) when
   rule 5 would apply. Entries of `threads` have `selectionPolicy: "explicit_branch"` (you asked for all of them).
 * A snapshot with no messages: `get` returns `thread: null` and the warning `NO_BRANCHES`; `thread` throws `BRANCH_NOT_FOUND` (`details.reason: "no_branches"`).
@@ -392,7 +413,7 @@ try { gcr.get(someReference); } catch (e) {
 | BRANCH_NOT_FOUND | 3 | unknown branch id; a snapshot with no branches | list branches with `branches()` and pass one of the ids |
 | MESSAGE_NOT_FOUND | 3 | a draft/annotation anchor message that is not in the conversation | use a message id from `get` |
 | AMBIGUOUS_CONVERSATION | 3 | the id exists under several provider/account pairs (`details.candidates`) | pass `{ conversationId, provider, accountLabel }` |
-| ACTIVE_BRANCH_UNKNOWN | 3 | no valid `current_node`, several branches, no explicit choice | pass `branch`, or opt in to `branchPolicy` (labelled heuristic) |
+| ACTIVE_BRANCH_UNKNOWN | 3 | no valid `current_node`, several branches, no explicit choice (or the valid `current_node` lies beyond the branch enumeration limit: `details.reason: "active_branch_not_enumerated"`) | pass `branch`, or opt in to `branchPolicy` (labelled heuristic; not applied when the source's pointer exists) |
 | IMPORT_INPUT_NOT_FOUND | 4 | the import path does not exist | check the path |
 | IMPORT_UNSUPPORTED_FORMAT | 4 | not an official export, mixed providers in one import | import each provider separately; check the file |
 | IMPORT_ZIP_UNSAFE | 4 | unsafe archive (path traversal, symlink, encryption, duplicate names, bad structure) | request a fresh export; GCR refuses to extract it |
@@ -438,9 +459,14 @@ The sorted list of runtime export names is pinned by `test/sdk/exports.test.ts`;
 
 * **No live verification.** Everything is tested against synthetic exports; no real ChatGPT export has been verified (doctor mode A says so).
 * **Format profiles are not persisted.** `stats` / `audit` include the `FormatProfile` only for batches imported through the same handle.
-* **The graph records no build scope or time**, so a graph built before a newer import is not detected as stale; rebuild after importing.
+* **The graph records no build scope or time.** Provenance is derived from the evidence rows (which snapshot each citation came from), so a superseded graph is detected (`GRAPH_STALE`), but
+  conversations imported **after** a build that the graph never saw are not reported, and a graph built for a scope (`provider` / `accountLabel`) is not distinguishable from a complete one.
+* **Read-only handles and WAL side files.** A read-only open of a WAL-mode database makes SQLite create `-wal` and `-shm` next to it (the database file itself is never written, and such a
+  handle needs a directory in which those two files can be created). This comes from `db/open.ts`, not from the SDK.
 * **Large conversations** are loaded whole to compute branches (memory is proportional to the largest conversation). Branch enumeration is capped (10 000 branches); the
   `BRANCH_LIMIT_EXCEEDED` warning says so and `ACTIVE_BRANCH_UNKNOWN` / `BRANCH_NOT_FOUND` explain skipped leaves.
 * **Search scope `all`** concatenates title hits and message hits (their rankings are not comparable) and bounds `offset + limit` to 10 000; use scope `messages` with a cursor for deep paging.
+* **Argument errors of mutators** (a hostile getter or Proxy in an options object, a wrong type) are checked before the writer lock and reject with a `GcrError`; the options that were
+  validated are the ones used.
 * **Mutators are asynchronous** and reads are refused while one is running (see above); a long import therefore blocks reads on that handle. Use a second read-only handle for reads
   during a long import (committed data only).

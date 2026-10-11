@@ -11,7 +11,7 @@
  *  - The variable is a path list separated by the platform delimiter (`:` on POSIX, `;` on Windows).
  *  - Roots are resolved ONCE at startup with `realpath` and the canonical value is what is compared later. A directory
  *    that is swapped for a symlink after startup therefore cannot widen the approval. Roots must be absolute, existing
- *    directories; the filesystem root is refused (approving "/" would approve everything). Rejected entries are only
+ *    directories (a file is not a root); the filesystem root is refused (approving "/" would approve everything). Rejected entries are only
  *    counted, never echoed.
  *  - A candidate is allowed only if its `realpath` equals a root or lies below one. The test uses `path.relative` and
  *    refuses a result that is `..`, starts with `..` + separator or is absolute (another drive). A string-prefix
@@ -26,7 +26,7 @@
  * canonical path it just verified and verifies again immediately before use, which narrows the window but cannot close it,
  * because the importer opens the path itself. Approved roots must be directories that only the operator can write to.
  */
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { delimiter as PLATFORM_DELIMITER, dirname, isAbsolute, relative, sep } from 'node:path';
 import { GcrError } from '../errors.js';
@@ -60,6 +60,7 @@ export function parseApprovedRoots(value: string | undefined, delimiter: string 
     let real: string;
     try {
       real = realpathSync(raw);
+      if (!statSync(real).isDirectory()) throw new Error('not a directory');
     } catch {
       ignored++;
       continue;

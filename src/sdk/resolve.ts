@@ -16,7 +16,7 @@
  * UUIDs or are bounded identifiers), never a URL, so query strings and fragments can not travel into logs or envelopes.
  */
 import type { Repository } from '../db/repo.js';
-import { isUuid, parseConversationRef } from '../domain/ids.js';
+import { MAX_URL_LENGTH, isUuid, parseChatGptUrl, parseConversationRef } from '../domain/ids.js';
 import type { ConversationSummary } from '../domain/results.js';
 import type { ConversationRef, Provider } from '../domain/types.js';
 import { GcrError } from '../errors.js';
@@ -28,6 +28,13 @@ export const NOT_IN_LOCAL_EXPORT_REMEDY =
 const PROVIDERS: readonly Provider[] = ['chatgpt', 'claude', 'openai_api'];
 const MAX_REF_CHARS = 512;
 const REF_KEYS = ['conversationId', 'provider', 'accountLabel', 'batchId'] as const;
+/** Text that starts like a web link. Only these are read as links; any other text (even "col:quokka") is a RAW stored id. */
+const HTTP_LINK_RE = /^[\t\n\f\r ]*https?:/i;
+
+/** true when `text` has to be read as a chatgpt.com link (and therefore pass the domain layer's URL checks), not as a raw id. */
+export function looksLikeHttpLink(text: string): boolean {
+  return HTTP_LINK_RE.test(text);
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Argument validation helpers (shared by gcr.ts)
@@ -100,10 +107,21 @@ export function normalizeRef(field: string, input: unknown): ConversationRef {
     return parsed.viaUrl ? { conversationId: parsed.conversationId, provider: 'chatgpt' } : { conversationId: parsed.conversationId };
   }
   const o = checkKeys(field, input, REF_KEYS);
-  const conversationId = optString(`${field}.conversationId`, o['conversationId']);
+  const rawId = o['conversationId'];
+  // A link may be longer than a stored id can be (query strings); the domain layer bounds it at MAX_URL_LENGTH and cuts the query off.
+  const conversationId = optString(`${field}.conversationId`, rawId, typeof rawId === 'string' && looksLikeHttpLink(rawId) ? MAX_URL_LENGTH : MAX_REF_CHARS);
   if (conversationId === undefined) throw invalidArgument(`${field}.conversationId`, 'is required');
-  const ref: ConversationRef = { conversationId: isUuid(conversationId) ? conversationId.toLowerCase() : conversationId };
-  const provider = optEnum<Provider>(`${field}.provider`, o['provider'], PROVIDERS);
+  let provider = optEnum<Provider>(`${field}.provider`, o['provider'], PROVIDERS);
+  let id = isUuid(conversationId) ? conversationId.toLowerCase() : conversationId;
+  if (looksLikeHttpLink(conversationId)) {
+    // A link handed over in an object is the same thing as the string form: a key for a ChatGPT conversation. It must pass
+    // the strict URL checks (share links, other hosts: UNSUPPORTED_URL) and is reduced to the bare id at once, so neither a
+    // query string nor a fragment can travel into an error, a log or a lookup.
+    if (provider !== undefined && provider !== 'chatgpt') throw invalidArgument(`${field}.provider`, 'conflicts with a chatgpt.com link used as conversationId');
+    id = parseChatGptUrl(conversationId).conversationId;
+    provider = 'chatgpt';
+  }
+  const ref: ConversationRef = { conversationId: id };
   if (provider !== undefined) ref.provider = provider;
   const accountLabel = optString(`${field}.accountLabel`, o['accountLabel']);
   if (accountLabel !== undefined) ref.accountLabel = accountLabel;
