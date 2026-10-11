@@ -499,3 +499,23 @@ describe('exported vocabularies cannot be mutated at run time (they drive allow-
     assert.equal(finding(runAudit(db, {}), 'unknown_roles').count, 1);
   });
 });
+
+describe('finding 5: damaged CONVERSATION timestamps are flagged like damaged message timestamps', () => {
+  it('an unparseable conversation created_at / updated_at is reported (warn), not silently treated as fine', async () => {
+    const { db, repo } = fresh();
+    await importAll(repo, [chat('cv1', [{ role: 'user', text: 'a' }]), chat('cv2', [{ role: 'user', text: 'b' }]), chat('cv3', [{ role: 'user', text: 'c' }])]);
+    // The importer never produces these states; a hand-edited database could (the immutability trigger is dropped ON PURPOSE).
+    db.exec('DROP TRIGGER conversations_no_update');
+    db.prepare('UPDATE conversations SET created_at = ? WHERE conversation_id = ?').run('last tuesday', 'cv1');
+    db.prepare('UPDATE conversations SET updated_at = ? WHERE conversation_id = ?').run('2025-13-45T00:00:00Z', 'cv2');
+    const r = runAudit(db, { checks: ['timestamps'] });
+    const f = finding(r, 'timestamps');
+    assert.deepEqual(f.byCode, { CONVERSATION_CREATED_AT_INVALID: 1, CONVERSATION_UPDATED_AT_INVALID: 1 });
+    assert.equal(f.count, 2);
+    assert.equal(f.severity, 'warn');
+    assert.deepEqual(f.sampleConversationIds, ['cv1', 'cv2']);
+    assert.deepEqual(f.sampleMessageIds, []);
+    // Healthy neighbours are untouched.
+    assert.ok(!f.sampleConversationIds.includes('cv3'));
+  });
+});

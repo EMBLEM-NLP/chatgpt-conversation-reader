@@ -21,10 +21,17 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build:test",
     "build:test": "tsc -p tsconfig.json",
-    "test": "node --test --test-reporter=spec \"dist-test/test/**/*.test.js\"",
-    "smoke": "node scripts/ci-smoke.mjs"
+    "pretest": "npm run build:test",
+    "test": "node --test --test-concurrency=2 \"dist-test/test/**/*.test.js\"",
+    "smoke": "npm run build && node scripts/ci-smoke.mjs",
+    "privacy-scan": "npm run build && node scripts/privacy-scan.mjs",
+    "privacy-scan:history": "npm run build && node scripts/privacy-scan.mjs --history",
+    "licenses": "npm run build && node scripts/licenses.mjs",
+    "test:browser": "node scripts/test-browser-gated.mjs",
+    "capture:cli-help": "npm run build && node scripts/capture-cli-help.mjs",
+    "dump:mcp-schemas": "npm run build && node scripts/dump-mcp-schemas.mjs",
+    "perf": "npm run build && node scripts/perf-baseline.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
@@ -34,5 +41,12 @@
     "@types/node": "22.20.5",
     "fast-check": "4.10.2",
     "typescript": "7.0.2"
-  }
+  },
+  "license": "UNLICENSED",
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "CHANGELOG.md"
+  ]
 }

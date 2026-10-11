@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
+import { GcrError } from '../../src/errors.js';
 import { discoverInput } from '../../src/ingest/layout.js';
 import { DEFAULT_IMPORT_LIMITS } from '../../src/ingest/limits.js';
 import { withTempDir } from '../helpers/tmp.js';
@@ -134,6 +135,34 @@ describe('name collisions after prefixing', () => {
       } finally {
         await d.close();
       }
+    });
+  });
+});
+
+describe('an extracted ZIP-in-ZIP export (folder of part archives)', () => {
+  // Folders never open archives, so the plain "no conversation file" advice ("or inside ONE nested Conversations*.zip") sent the
+  // operator in circles: the nested archive IS in the folder. The diagnosis must say what to do.
+  it('says to import a part ZIP itself, and counts (never opens) the part archives', async () => {
+    await withTempDir(async (dir) => {
+      await writeFileIn(dir, 'Conversations__part-001.zip', 'not even a zip: never opened');
+      await writeFileIn(dir, 'sub/CONVERSATIONS-part-2.ZIP', 'x');
+      await writeFileIn(dir, 'Files__part-001.zip', 'x');
+      await assert.rejects(discoverInput({ kind: 'path', path: dir }, DEFAULT_IMPORT_LIMITS), (e: unknown) => {
+        assert.ok(e instanceof GcrError);
+        assert.equal(e.code, 'IMPORT_UNSUPPORTED_FORMAT');
+        assert.equal(e.details?.['reason'], 'NO_CONVERSATION_FILE');
+        assert.equal(e.details?.['nestedArchivesInFolder'], 2);
+        assert.match(e.remedy ?? '', /import one part ZIP itself/);
+        assert.ok(!JSON.stringify(e.toEnvelope()).includes(dir));
+        return true;
+      });
+    });
+  });
+
+  it('a folder with neither conversation files nor part archives keeps the general advice', async () => {
+    await withTempDir(async (dir) => {
+      await writeFileIn(dir, 'readme.txt', 'x');
+      await assert.rejects(discoverInput({ kind: 'path', path: dir }, DEFAULT_IMPORT_LIMITS), (e: unknown) => e instanceof GcrError && /conversations\.json/.test(e.remedy ?? '') && e.details?.['nestedArchivesInFolder'] === 0);
     });
   });
 });

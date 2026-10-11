@@ -709,9 +709,21 @@ describe('finding 4: invalid stored timestamps never reach firstAt/lastAt or a d
     assert.equal(bounded, dated);
   });
 
-  it('differential: the SQL notion of a usable timestamp equals validate.ts\' strict parser on 600 mutated candidates', async () => {
+  it('differential: the SQL notion of a usable timestamp equals validate.ts\' strict parser (systematic grid + 600 mutations)', async () => {
     const { parseIsoUtcToEpochMs } = await import('../../src/domain/validate.js');
+    const two = (n: number): string => String(n).padStart(2, '0');
+    const candidates = new Set<string>();
+    // Systematic grid: every month/day combination (including impossible ones) in leap, non-leap and century years.
+    for (const year of ['0000', '0004', '0100', '0400', '1900', '2000', '2024', '2025', '9999']) {
+      for (let month = 0; month <= 13; month++) for (let day = 0; day <= 32; day++) candidates.add(`${year}-${two(month)}-${two(day)}T12:34:56Z`);
+    }
+    // Field boundaries of the time part, with and without milliseconds.
+    for (const hour of [0, 23, 24, 25, 99]) for (const minute of [0, 59, 60, 99]) for (const second of [0, 59, 60, 61, 99]) {
+      candidates.add(`2025-06-15T${two(hour)}:${two(minute)}:${two(second)}Z`);
+      candidates.add(`2025-06-15T${two(hour)}:${two(minute)}:${two(second)}.999Z`);
+    }
     const seeds = ['2025-01-01T00:00:00Z', '2025-01-01T00:00:00.123Z', '2024-02-29T23:59:59.999Z', '0000-02-29T00:00:00Z', '9999-12-31T23:59:59Z'];
+    for (const x of ['2025-1-1T0:0:0Z', '2025-01-01t00:00:00z', '2025-01-01 00:00:00Z', '2025-01-01T00:00:00.1Z', '2025-01-01T00:00:00.12345Z', '２０２５-01-01T00:00:00Z', '', ' ', '2025-01-01T00:00:00Z ', '2025-01-01T00:00:00+00:00', 'last tuesday']) candidates.add(x);
     const alphabet = '0123456789-:TZ.+ x';
     let seed = 99;
     const rnd = (n: number): number => {
@@ -721,13 +733,8 @@ describe('finding 4: invalid stored timestamps never reach firstAt/lastAt or a d
       t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
       return ((t ^ (t >>> 14)) >>> 0) % n;
     };
-    const candidates = new Set<string>([
-      ...seeds,
-      '2025-02-29T00:00:00Z', '0100-02-29T00:00:00Z', '2025-04-31T00:00:00Z', '2025-01-01T24:00:00Z', '2025-01-01T23:60:00Z', '2025-01-01T23:59:60Z',
-      '2025-00-10T00:00:00Z', '2025-01-00T00:00:00Z', '2025-1-1T0:0:0Z', '2025-01-01t00:00:00z', '2025-01-01 00:00:00Z', '2025-01-01T00:00:00.1Z',
-      '2025-01-01T00:00:00.12345Z', '２０２５-01-01T00:00:00Z', '', ' ', '2025-01-01T00:00:00Z ',
-    ]);
-    while (candidates.size < 600) {
+    const target = candidates.size + 600;
+    while (candidates.size < target) {
       let s = seeds[rnd(seeds.length)] as string;
       for (let k = 1 + rnd(2); k > 0; k--) {
         const at = rnd(s.length);
@@ -737,9 +744,11 @@ describe('finding 4: invalid stored timestamps never reach firstAt/lastAt or a d
     }
     const list = [...candidates];
     const f = fresh();
-    await importAll(f.repo, list.map((_, i) => chat(`d${i}`, [{ role: `r${String(i).padStart(4, '0')}`, text: 'x', at: iso(1) }])));
+    // One conversation, one message per candidate, each in its own role group so firstAt is that message's own time.
+    await importAll(f.repo, [chat('d', list.map((_, i) => ({ role: `r${String(i).padStart(5, '0')}`, text: 'x', at: iso(1) })))]);
     f.db.exec('DROP TRIGGER messages_no_update');
-    list.forEach((v, i) => f.db.prepare('UPDATE messages SET created_at = ? WHERE conversation_id = ?').run(v, `d${i}`));
+    const upd = f.db.prepare('UPDATE messages SET created_at = ? WHERE message_id = ?');
+    list.forEach((v, i) => upd.run(v, `d-m${i}`));
     const rows = new Map<string, string | null>();
     for (let offset = 0; ; ) {
       const page = computeStats(f.db, { groupBy: 'role', limit: 1000, offset });
@@ -747,11 +756,17 @@ describe('finding 4: invalid stored timestamps never reach firstAt/lastAt or a d
       if (page.nextOffset === null) break;
       offset = page.nextOffset;
     }
+    assert.equal(rows.size, list.length);
+    let usable = 0;
     list.forEach((v, i) => {
       const ms = parseIsoUtcToEpochMs(v);
-      const got = rows.get(`r${String(i).padStart(4, '0')}`);
+      const got = rows.get(`r${String(i).padStart(5, '0')}`);
       if (ms === null) assert.equal(got, null, `"${v}" must not be usable`);
-      else assert.equal(got, new Date(ms).toISOString().replace(/^(\d{4})/, '$1'), `"${v}" must be usable`);
+      else {
+        usable++;
+        assert.equal(got, new Date(ms).toISOString(), `"${v}" must be usable`);
+      }
     });
+    assert.ok(usable > 1000 && usable < list.length - 1000, `the grid really mixes valid and invalid values (${usable} of ${list.length})`);
   });
 });

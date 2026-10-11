@@ -16,6 +16,9 @@
  *    (SQLite `length()` on TEXT), not UTF-16 units and not bytes.
  *  - For the "conversation" grouping the label is the title of the conversation's HEAD snapshot (id when untitled), also with
  *    `allBatches`: a superseded snapshot never renames the conversation.
+ *  - A stored `created_at` that is not a strict ISO-8601 UTC instant (a file damaged outside GCR) counts as "no timestamp" in
+ *    EVERY grouping: it is ignored by firstAt/lastAt, never matches a date bound (and is reported as excluded), and lands in
+ *    the "unknown" day bucket. Nothing is guessed.
  *  - `firstAt` / `lastAt` are the earliest / latest message `created_at` of the group, always spelled with millisecond
  *    precision (`...:SS.mmmZ`) so that the two stored spellings (`Z` and `.000Z`) compare as instants.
  *

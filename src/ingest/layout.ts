@@ -182,9 +182,14 @@ function fsFailure(e: unknown, name: string): GcrError {
   });
 }
 
+const REMEDY_PARTS_IN_FOLDER =
+  'The folder holds "Conversations*.zip" part archive(s) (an extracted ZIP-in-ZIP export). GCR does not open archives found inside a folder: ' +
+  'import one part ZIP itself (pass the path of the .zip file), or extract it and import the extracted folder.';
+
 function noConversationFiles(entriesSeen: number, extra: Record<string, unknown> = {}): GcrError {
+  const partsInFolder = typeof extra['nestedArchivesInFolder'] === 'number' && extra['nestedArchivesInFolder'] > 0;
   return new GcrError('IMPORT_UNSUPPORTED_FORMAT', 'No conversation file (conversations.json or conversations-<N>.json) was found in the input.', {
-    remedy: REMEDY_FILES,
+    remedy: partsInFolder ? REMEDY_PARTS_IN_FOLDER : REMEDY_FILES,
     details: { reason: 'NO_CONVERSATION_FILE', entriesSeen, ...extra },
   });
 }
@@ -652,6 +657,7 @@ async function discoverDirectory(root: string, label: string, limits: ImportLimi
   const c = newCollected();
   let entriesSeen = 0;
   let symlinksSkipped = 0;
+  let nestedArchivesInFolder = 0;
   let depthLimitHit = false;
   const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: root, rel: '', depth: 0 }];
   for (let q = 0; q < queue.length; q++) {
@@ -699,6 +705,7 @@ async function discoverDirectory(root: string, label: string, limits: ImportLimi
       }
       if (!st.isFile()) continue; // FIFO, socket, device: never opened
       c.fileCount++;
+      if (isNestedConversationZip(name)) nestedArchivesInFolder++; // only counted (for the diagnosis); archives in a folder are not opened
       classifyFile(c, rel, st.size, () => readRegularFile(abs, rel), () => readSmallFile(abs, rel, MANIFEST_MAX_BYTES));
     }
   }
@@ -714,7 +721,7 @@ async function discoverDirectory(root: string, label: string, limits: ImportLimi
     sourceLabel: label,
     close: async () => undefined,
     entriesSeen,
-    noFilesExtra: { depthLimitReached: depthLimitHit, symlinksSkipped },
+    noFilesExtra: { depthLimitReached: depthLimitHit, symlinksSkipped, nestedArchivesInFolder },
     passes,
     forceLayout: 'directory',
   });

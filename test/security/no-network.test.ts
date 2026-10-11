@@ -32,6 +32,10 @@
  *    (`const F = (() => {}).constructor`), `class X extends Function`, a marker or specifier assembled by
  *    `.concat()`, `.join()`, template substitutions of constants or any other computed piece, and a computed key
  *    in a destructuring of process (`const { [k]: f } = process`).
+ *  - Regex versus division is decided by the previous token (see Lexer.regexAllowed), which agrees with the TypeScript 6
+ *    and acorn token streams on ~25,000 real files. One construct is guessed wrongly: a `/` straight after the `}` of a
+ *    function or class EXPRESSION (`x = function () {} / 1`) starts a "regex" that can hide code up to the next slash on the
+ *    line. That is a type error in TypeScript (arithmetic on a function), so it needs a suppression comment to build.
  *  - Fixing a finding by renaming is intended: the rules flag declarations as well as uses where the two cannot
  *    be told apart without a parser (a method or property named fetch, a method named import, a binding named global).
  *

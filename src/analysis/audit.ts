@@ -574,16 +574,26 @@ function treePass(db: DatabaseSync, f: Filters): PassOutcome {
     for (const m of msgs) ms.set(m.id, parseIsoUtcToEpochMs(m.createdAt));
     let convFlagged = false;
     ts.examined++; // the conversation itself
-    if (strOrNull(snap, 'created_at') === null) {
+    const convCreated = strOrNull(snap, 'created_at');
+    const convUpdated = strOrNull(snap, 'updated_at');
+    const created = parseIsoUtcToEpochMs(convCreated);
+    const updated = parseIsoUtcToEpochMs(convUpdated);
+    // A value that is present but not a strict ISO-8601 UTC instant (a file damaged outside GCR) is reported as such, exactly
+    // like MESSAGE_CREATED_AT_INVALID: "no finding" must never mean "could not be read".
+    if (convCreated === null) {
       bump(ts.byCode, 'CONVERSATION_CREATED_AT_NULL');
       convFlagged = true;
-    } else {
-      const created = parseIsoUtcToEpochMs(strOrNull(snap, 'created_at'));
-      const updated = parseIsoUtcToEpochMs(strOrNull(snap, 'updated_at'));
-      if (created !== null && updated !== null && updated < created) {
-        bump(ts.byCode, 'CONVERSATION_UPDATED_BEFORE_CREATED');
-        convFlagged = true;
-      }
+    } else if (created === null) {
+      bump(ts.byCode, 'CONVERSATION_CREATED_AT_INVALID');
+      convFlagged = true;
+    }
+    if (convUpdated !== null && updated === null) {
+      bump(ts.byCode, 'CONVERSATION_UPDATED_AT_INVALID');
+      convFlagged = true;
+    }
+    if (created !== null && updated !== null && updated < created) {
+      bump(ts.byCode, 'CONVERSATION_UPDATED_BEFORE_CREATED');
+      convFlagged = true;
     }
     let msgFlagged = false;
     for (const m of msgs) {
@@ -669,7 +679,13 @@ function integritySeverity(byCode: Record<string, number>): 'warn' | 'error' {
 
 function timestampSeverity(byCode: Record<string, number>): 'info' | 'warn' {
   // Null timestamps are common and merely informative; invalid values or time running backwards are real anomalies.
-  return 'MESSAGE_BEFORE_PARENT' in byCode || 'CONVERSATION_UPDATED_BEFORE_CREATED' in byCode || 'MESSAGE_CREATED_AT_INVALID' in byCode ? 'warn' : 'info';
+  return 'MESSAGE_BEFORE_PARENT' in byCode ||
+    'CONVERSATION_UPDATED_BEFORE_CREATED' in byCode ||
+    'MESSAGE_CREATED_AT_INVALID' in byCode ||
+    'CONVERSATION_CREATED_AT_INVALID' in byCode ||
+    'CONVERSATION_UPDATED_AT_INVALID' in byCode
+    ? 'warn'
+    : 'info';
 }
 
 /**

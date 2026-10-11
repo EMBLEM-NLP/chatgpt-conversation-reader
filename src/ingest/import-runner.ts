@@ -607,7 +607,7 @@ export function summariesFromStored(ws: readonly Warning[]): ImportWarningSummar
 // ---------------------------------------------------------------------------------------------------------------
 
 interface Cand {
-  key: string | null;
+  key: string;
   idx: number;
   updateMs: number | null;
   bytes: number;
@@ -680,7 +680,10 @@ async function scanAttempt(
     try {
       for await (const item of iterateElements(hashed, framing, limits.maxElementBytes, null, wrappers)) {
         const peek = item.peek ?? peekElement(item.text);
-        cands.push({ key: conversationKeyOf(peek), idx: item.index, updateMs: peek.updateMs, bytes: item.bytes });
+        // Elements without a usable conversation key can never be duplicates, so nothing is kept for them: a file of millions
+        // of {} / null / scalar entries costs a counter, not an array entry each.
+        const key = conversationKeyOf(peek);
+        if (key !== null) cands.push({ key, idx: item.index, updateMs: peek.updateMs, bytes: item.bytes });
         expanded++;
         if (item.invalidUtf8) {
           invalidUtf8++;
@@ -688,8 +691,10 @@ async function scanAttempt(
         }
         if (peek.kind === 'object') {
           objectElements++;
-          // Registry sniffing costs one JSON.parse; it stops at the first recognizable element of the file.
-          if (provider === null && detectAttempts < MAX_DETECT_ATTEMPTS) {
+          // Registry sniffing costs one JSON.parse; it stops at the first recognizable element of the file. Only elements that
+          // carry a provider marker key (`mapping` / a `chat_messages` array) can be recognized, so only those are sniffed (and
+          // counted): any number of stray objects in front of the first conversation no longer exhausts the attempts.
+          if (provider === null && detectAttempts < MAX_DETECT_ATTEMPTS && (peek.hasMapping || peek.chatMessagesIsArray)) {
             detectAttempts++;
             provider = detectAdapterFromElementText(item.text).adapter;
           }
@@ -847,7 +852,6 @@ async function runWithDiscovery(repo: Repository, opts: ImportOptions, discovery
     totalObjects += scan.objectElements;
     wrapperCount += scan.wrappers.size;
     for (const c of cands) {
-      if (c.key === null) continue; // no usable id: can never be a duplicate
       const cur: Winner = { fileIdx, idx: c.idx, updateMs: c.updateMs, bytes: c.bytes };
       const prev = winners.get(c.key);
       if (prev === undefined) {
