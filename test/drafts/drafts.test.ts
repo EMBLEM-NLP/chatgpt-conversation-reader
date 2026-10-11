@@ -27,8 +27,8 @@ import { GcrError } from '../../src/errors.js';
 import { branchedConversation, iso, linearConversation } from '../helpers/records.js';
 import { withTempDir } from '../helpers/tmp.js';
 
-const CONV = 'f00dfeed-0000-4000-8000-000000000001';
-const CONV2 = 'f00dfeed-0000-4000-8000-000000000002';
+const CONV = '00000000-0000-4000-8000-000000000001';
+const CONV2 = '00000000-0000-4000-8000-000000000002';
 
 const META: ImportBatchMeta = {
   provider: 'chatgpt',
@@ -215,7 +215,7 @@ describe('drafts: create / get / list / archive', () => {
     assert.deepEqual(ids({ conversationRef: { conversationId: CONV, provider: 'chatgpt', accountLabel: 'default' } }), [dDefault.draftId]);
     assert.deepEqual(ids({ conversationRef: { conversationId: CONV2 } }), [d2.draftId]);
     assert.deepEqual(ids({ conversationRef: { conversationId: CONV, provider: 'claude' } }), []);
-    assert.deepEqual(ids({ conversationRef: { conversationId: 'f00dfeed-0000-4000-8000-0000000000ff' } }), []);
+    assert.deepEqual(ids({ conversationRef: { conversationId: '00000000-0000-4000-8000-0000000000ff' } }), []);
     assert.equal(ids({}).length, 3);
   });
 
@@ -242,7 +242,7 @@ describe('drafts: create / get / list / archive', () => {
   it('returns manualContinuation text only for ChatGPT conversations with a UUID id', async () => {
     const claude: ConversationRecord = { ...linearConversation(CONV2, 1), provider: 'claude', provenance: 'official_claude_export' };
     const plain = linearConversation('not-a-uuid', 1);
-    const upper = linearConversation('F00DFEED-0000-4000-8000-0000000000AA', 1);
+    const upper = linearConversation('00000000-0000-4000-8000-0000000000AA', 1);
     const { store, repo } = await memEnv([plain, upper]);
     await repo.importBatch({ batch: meta({ provider: 'claude', provenance: 'official_claude_export', contentDigest: 'cl' }), conversations: [claude] });
     const forClaude = store.createDraft({ conversationRef: { conversationId: CONV2 }, body: 'x' });
@@ -250,9 +250,9 @@ describe('drafts: create / get / list / archive', () => {
     assert.equal(forClaude.manualContinuation.url, null, 'no invented link for other providers');
     assert.match(forClaude.manualContinuation.note, /^GCR never sends messages/);
     assert.equal(store.createDraft({ conversationRef: { conversationId: 'not-a-uuid' }, body: 'x' }).manualContinuation.url, null);
-    const up = store.createDraft({ conversationRef: { conversationId: 'F00DFEED-0000-4000-8000-0000000000AA' }, body: 'x' });
-    assert.equal(up.conversationId, 'F00DFEED-0000-4000-8000-0000000000AA', 'the stored id is not rewritten');
-    assert.equal(up.manualContinuation.url, 'https://chatgpt.com/c/f00dfeed-0000-4000-8000-0000000000aa', 'the link uses the canonical lower-case form');
+    const up = store.createDraft({ conversationRef: { conversationId: '00000000-0000-4000-8000-0000000000AA' }, body: 'x' });
+    assert.equal(up.conversationId, '00000000-0000-4000-8000-0000000000AA', 'the stored id is not rewritten');
+    assert.equal(up.manualContinuation.url, 'https://chatgpt.com/c/00000000-0000-4000-8000-0000000000aa', 'the link uses the canonical lower-case form');
   });
 });
 
@@ -314,6 +314,20 @@ describe('drafts: validation (exact error codes, nothing stored on failure)', ()
     assert.equal(count(db, 'local_drafts'), 7);
   });
 
+  it('title: the 200-character limit is applied AFTER NUL stripping, so a valid title padded with NULs is accepted', async () => {
+    const { store, db } = await memEnv();
+    const emoji200 = '\u{1F600}'.repeat(200);
+    // 200 astral characters = 400 UTF-16 units; interleaving NULs makes the raw string far longer than any tight pre-bound.
+    const padded = Array.from(emoji200, (c) => `${c}\0\0`).join('');
+    assert.ok(padded.length > 600);
+    assert.equal(store.createDraft(draftInput({ title: padded })).title, emoji200);
+    // ... and 201 characters stay refused no matter how the NULs are spread.
+    assert.throws(() => store.createDraft(draftInput({ title: Array.from(emoji200 + 'x', (c) => `${c}\0`).join('') })), code('INVALID_ARGUMENT'));
+    // an absurd title is refused without being processed
+    assert.throws(() => store.createDraft(draftInput({ title: 't'.repeat(10_000_000) })), code('INVALID_ARGUMENT'));
+    assert.equal(count(db, 'local_drafts'), 1);
+  });
+
   it('namespace: /^[a-z0-9][a-z0-9_.-]{0,63}$/, default "default"', async () => {
     const { store } = await memEnv();
     assert.equal(store.createDraft(draftInput()).namespace, DEFAULT_NAMESPACE);
@@ -339,7 +353,7 @@ describe('drafts: validation (exact error codes, nothing stored on failure)', ()
       { ...draftInput(), batchId: 'b' },
       { body: 'no ref' },
       { conversationRef: null, body: 'x' },
-      { conversationRef: 'f00d', body: 'x' },
+      { conversationRef: 'not-an-object', body: 'x' },
       { conversationRef: {}, body: 'x' },
       { conversationRef: { conversationId: '' }, body: 'x' },
       { conversationRef: { conversationId: 42 }, body: 'x' },
@@ -393,11 +407,11 @@ describe('drafts: validation (exact error codes, nothing stored on failure)', ()
 describe('drafts: conversation resolution', () => {
   it('a conversation that was never imported is NOT_IN_LOCAL_EXPORT with a remedy that says to import the export', async () => {
     const { store, db } = await memEnv();
-    const e = caught(() => store.createDraft({ conversationRef: { conversationId: 'f00dfeed-0000-4000-8000-0000000000ee' }, body: 'x' }));
+    const e = caught(() => store.createDraft({ conversationRef: { conversationId: '00000000-0000-4000-8000-0000000000ee' }, body: 'x' }));
     assert.equal(e.code, 'NOT_IN_LOCAL_EXPORT');
     assert.match(e.remedy ?? '', /import/i);
     assert.match(e.remedy ?? '', /export/i);
-    assert.equal(e.details?.['conversationId'], 'f00dfeed-0000-4000-8000-0000000000ee');
+    assert.equal(e.details?.['conversationId'], '00000000-0000-4000-8000-0000000000ee');
     assert.equal(count(db, 'local_drafts'), 0);
     assert.equal(count(db, 'local_audit_log'), 0);
     assert.throws(() => store.createAnnotation({ conversationRef: { conversationId: 'nope' }, body: 'x' }), code('NOT_IN_LOCAL_EXPORT'));
@@ -661,6 +675,9 @@ describe('annotations', () => {
     assert.deepEqual(ids({ limit: 2, offset: 1 }), [m2.annotationId, m1.annotationId]);
     assert.equal(store.listAnnotations({ limit: 2 }).nextOffset, 2);
     assert.throws(() => store.listAnnotations({ messageId: `${CONV}-u0` }), code('INVALID_ARGUMENT'), 'a message id needs its conversation');
+    // "conversation-level only" is meaningful across every conversation, so null needs no conversationRef
+    assert.deepEqual(ids({ messageId: null }), [o1.annotationId, c1.annotationId], 'conversation-level annotations of ALL conversations, newest first');
+    assert.equal(store.listAnnotations({ messageId: null, kind: 'todo' }).total, 0, 'filters still combine');
     assert.throws(() => store.listAnnotations({ kind: 'Bad' }), code('INVALID_ARGUMENT'));
     assert.throws(() => store.listAnnotations({ limit: 0 }), code('INVALID_ARGUMENT'));
     assert.throws(() => store.listAnnotations(wrong<AnnotationFilter>({ author: 'x' })), code('INVALID_ARGUMENT'));
@@ -932,5 +949,51 @@ describe('options, determinism and transactions', () => {
     }
     assert.equal(count(db, 'local_drafts'), 0);
     assert.equal(store.createDraft(draftInput()).draftId, 'id-1');
+  });
+});
+
+// ===================================================================================================================
+describe('scale: a large conversation and a thousand local records', () => {
+  it('anchoring never loads the conversation, listings page without gaps or repeats, and the audit log stays gap-free', async () => {
+    // 10,000 user/assistant pairs = 20,001 stored nodes (a structural root plus 20,000 messages), imported through the real path.
+    const big = linearConversation(CONV, 10_000);
+    const { store, db } = await memEnv([big]);
+    const started = process.hrtime.bigint();
+
+    const draftIds: string[] = [];
+    const annotationIds: string[] = [];
+    for (let i = 0; i < 1000; i++) {
+      // Spread the anchors over the whole conversation, including the very last message.
+      const anchor = i === 999 ? `${CONV}-a9999` : `${CONV}-${i % 2 === 0 ? 'u' : 'a'}${(i * 9) % 10_000}`;
+      draftIds.push(store.createDraft(draftInput({ anchorMessageId: anchor, body: `draft ${i}` })).draftId);
+      annotationIds.push(store.createAnnotation(annInput({ messageId: anchor, body: `note ${i}` })).annotationId);
+    }
+    assert.throws(() => store.createDraft(draftInput({ anchorMessageId: `${CONV}-u10000` })), code('MESSAGE_NOT_FOUND'), 'one past the end does not exist');
+
+    const seen = new Set<string>();
+    let offset = 0;
+    let pages = 0;
+    for (;;) {
+      const page = store.listDrafts({ limit: 200, offset });
+      pages++;
+      assert.equal(page.total, 1000);
+      for (const d of page.items) {
+        assert.ok(!seen.has(d.draftId), 'no repeat across pages');
+        seen.add(d.draftId);
+      }
+      if (page.nextOffset === null) break;
+      offset = page.nextOffset;
+    }
+    assert.equal(pages, 5);
+    assert.deepEqual([...seen].sort(), [...draftIds].sort(), 'every draft listed exactly once');
+    assert.equal(store.listAnnotations({ conversationRef: { conversationId: CONV }, messageId: `${CONV}-a9999` }).total, 1);
+    assert.equal(store.listAnnotations({ limit: 200 }).items.length, 200);
+    assert.equal(annotationIds.length, 1000);
+    assert.deepEqual(verifyAuditLog(db), { rows: 2000, ok: true });
+
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    // A very generous ceiling (typically well under a second): it only catches an accidental O(conversation size) step per call,
+    // which would turn 2,000 calls over 20,000 nodes into minutes.
+    assert.ok(elapsedMs < 30_000, `2,000 writes + paging took ${elapsedMs.toFixed(0)} ms`);
   });
 });

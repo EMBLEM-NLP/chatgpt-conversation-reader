@@ -640,7 +640,11 @@ describe('selectBranchByPolicy (explicit heuristics)', () => {
     const a = analyzeTree(C, msgs, null, { maxBranches: 1 }); // enumerated: a (first declared)
     assert.deepEqual(ids(a), ['a']);
     assert.equal(selectBranchByPolicy(a, msgs, 'last_child'), null); // wants b
-    assert.equal(selectBranchByPolicy(a, msgs, 'latest_leaf')?.branch.branchId, 'a'); // only enumerated branches are candidates
+    // Also wants b: the newest leaf of the WHOLE tree (leafIds is complete even when truncated). The previous expectation
+    // ('a', "only enumerated branches are candidates") presented the newest ENUMERATED leaf as the latest one, which is a
+    // wrong answer to the question the heuristic claims to answer; see branches.truncation.adversarial.test.ts.
+    assert.deepEqual(a.leafIds, ['a', 'b']);
+    assert.equal(selectBranchByPolicy(a, msgs, 'latest_leaf'), null);
   });
 
   it('never attaches a heuristic result implicitly: analyzeTree alone never picks one', () => {

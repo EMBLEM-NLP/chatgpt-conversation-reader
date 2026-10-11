@@ -73,7 +73,7 @@ const piece = fc.oneof(
   fc.constantFrom('http://', 'https://', 'HTTPS://', 'javascript:', 'data:', '://', 'www.', '.com', '/', '?', '#', '@', ':', '.', '-', ' ', '\n', '(', ')', '```', '~~~', '日本', '语', 'ß', '’'),
   fc.stringMatching(/^[a-z]{1,8}$/),
   fc.stringMatching(/^[0-9]{1,8}$/),
-  fc.constantFrom('123e4567-e89b-12d3-a456-426614174000', '2025-01-15', '2025-01-15T10:30:00Z', '2025-02-30', 'example.com/path', 'user:pw@host.example', 'a@b.cc'),
+  fc.constantFrom('00000000-0000-4000-8000-0000000000ab', '2025-01-15', '2025-01-15T10:30:00Z', '2025-02-30', 'example.com/path', 'user:pw@host.example', 'a@b.cc'),
 );
 const soup = fc.array(piece, { maxLength: 40 }).map((p) => p.join(''));
 
@@ -115,7 +115,7 @@ describe('extractEntities properties', () => {
     const secret = fc.string({ unit: fc.constantFrom(...'0123456789abcdef'.split('')), minLength: 8, maxLength: 16 }).map((h) => `zqx${h}`);
     fc.assert(
       fc.property(secret, secret, secret, soup, soup, (user, query, frag, before, after) => {
-        const text = `${before} https://${user}:${user}@host.example/path?k=${query}&uuid=123e4567-e89b-12d3-a456-426614174000#${frag} ${after}`;
+        const text = `${before} https://${user}:${user}@host.example/path?k=${query}&uuid=00000000-0000-4000-8000-0000000000ab#${frag} ${after}`;
         const dump = JSON.stringify(extractEntities({ text })).toLowerCase();
         for (const s of [user, query, frag]) assert.ok(!dump.includes(s.toLowerCase()), `leaked ${s}`);
       }),

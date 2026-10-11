@@ -11,10 +11,12 @@
  *
  * Determinism: neighbours are always visited in (weight desc, edge id asc) order, seeds in (exact match first, weight
  * desc, node id asc) order, so BFS results, truncation points and shortest-path ties are reproducible.
- * Bounds: depth 1..4, maxNodes 1..500, subgraph edges <= 5000, per-node neighbour fan-out limited, explored-node budget for
- * shortest paths; hitting a bound is reported (`truncated`), never silent.
+ * Bounds: depth 1..4, maxNodes 1..500, subgraph edges <= 5000, explored-node budget for shortest paths; hitting a bound is
+ * reported (`truncated`), never silent. The neighbours of a node are STREAMED in the deterministic order and the search stops
+ * at its bound, so a giant hub can neither hide an allowed neighbour behind heavier filtered-out ones nor make a path
+ * search skip its light edges (the first versions fetched only the heaviest N edges of a node).
  */
-import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
+import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from 'node:sqlite';
 import { toDbError } from '../db/open.js';
 import { analyzeTree } from '../domain/branches.js';
 import type { MessageRecord } from '../domain/types.js';
@@ -140,7 +142,6 @@ const DEFAULT_QUERY_NODES = 100;
 const DEFAULT_QUERY_DEPTH = 2;
 const MAX_SUBGRAPH_EDGES = 5000;
 const MAX_TERM_CHARS = 512;
-const SHORTEST_PATH_FANOUT = 10_000;
 const DEFAULT_PATH_EXPLORE_BUDGET = 100_000;
 const MAX_EVIDENCE_LIMIT = 1000;
 const DEFAULT_EVIDENCE_LIMIT = 100;
@@ -291,12 +292,18 @@ function nodeAllowed(node: GraphNodeDto, kinds: ReadonlySet<string> | null): boo
 // Neighbour access
 // ---------------------------------------------------------------------------------------------------------------
 
+/** Every edge incident to a node, in the deterministic neighbour order (heaviest first, then edge id). */
 const NEIGHBOR_SQL =
   'SELECT edge_id, src, dst, kind, weight FROM graph_edges WHERE src = ? UNION ALL ' +
-  'SELECT edge_id, src, dst, kind, weight FROM graph_edges WHERE dst = ? ORDER BY weight DESC, edge_id ASC LIMIT ?';
+  'SELECT edge_id, src, dst, kind, weight FROM graph_edges WHERE dst = ? ORDER BY weight DESC, edge_id ASC';
 
-function neighborEdges(db: DatabaseSync, id: string, limit: number): GraphEdgeDto[] {
-  return db.prepare(NEIGHBOR_SQL).all(id, id, limit).map(edgeFromRow);
+/**
+ * Prepared once per search. Callers iterate `stmt.iterate(id, id)` and may stop early (leaving the loop resets the
+ * statement): rows are streamed from SQLite, never collected, so the cost of a node is bounded by what the search
+ * actually consumes plus SQLite's sort of that node's edges.
+ */
+function prepareNeighborEdges(db: DatabaseSync): StatementSync {
+  return db.prepare(NEIGHBOR_SQL);
 }
 
 function otherEnd(e: GraphEdgeDto, id: string): string {
@@ -402,11 +409,14 @@ export function graphQuery(db: DatabaseSync, q: GraphQueryInput): GraphQueryResu
       cache.set(s);
     }
     let frontier = [...order];
+    const neighborStmt = prepareNeighborEdges(db);
     expand: for (let d = 0; d < depth && frontier.length > 0; d++) {
       const next: string[] = [];
       for (const id of frontier) {
-        // Enough rows that, even if every already-visited node is among them, maxNodes unvisited ones remain.
-        for (const e of neighborEdges(db, id, maxNodes + visited.size + 1)) {
+        // All edges of the node are streamed (heaviest first): the kinds filter is applied per row, so an allowed
+        // neighbour behind thousands of heavier filtered-out ones is still found, and the loop stops at maxNodes.
+        for (const row of neighborStmt.iterate(id, id)) {
+          const e = edgeFromRow(row);
           const other = otherEnd(e, id);
           if (visited.has(other)) continue;
           const node = cache.get(other);
@@ -475,12 +485,14 @@ export function shortestPath(db: DatabaseSync, from: string, to: string, opts: S
     let frontier = [start.id];
     let truncated = false;
     let found = false;
+    const neighborStmt = prepareNeighborEdges(db);
     search: for (let d = 0; d < maxDepth && frontier.length > 0; d++) {
       const next: string[] = [];
       for (const id of frontier) {
-        const edges = neighborEdges(db, id, SHORTEST_PATH_FANOUT);
-        if (edges.length >= SHORTEST_PATH_FANOUT) truncated = true;
-        for (const e of edges) {
+        // Every edge of the node takes part (a path over a light edge of a hub must not be missed): only the
+        // exploration budget below can stop the search, and it is reported.
+        for (const row of neighborStmt.iterate(id, id)) {
+          const e = edgeFromRow(row);
           const other = otherEnd(e, id);
           if (seen.has(other)) continue;
           seen.add(other);
@@ -546,10 +558,7 @@ export function neighbors(db: DatabaseSync, nodeId: string, opts: NeighborsOptio
     const cache = new NodeCache(db);
     const out: NeighborDto[] = [];
     let total = 0;
-    const sql =
-      'SELECT edge_id, src, dst, kind, weight FROM graph_edges WHERE src = ? UNION ALL ' +
-      'SELECT edge_id, src, dst, kind, weight FROM graph_edges WHERE dst = ? ORDER BY weight DESC, edge_id ASC';
-    for (const r of db.prepare(sql).iterate(id, id)) {
+    for (const r of prepareNeighborEdges(db).iterate(id, id)) {
       const edge = edgeFromRow(r);
       if (edgeKinds !== null && !edgeKinds.has(edge.kind)) continue;
       const other = cache.get(otherEnd(edge, id));

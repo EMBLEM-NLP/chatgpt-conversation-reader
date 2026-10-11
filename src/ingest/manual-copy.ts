@@ -232,7 +232,8 @@ function normalize(raw: unknown, shape: 'IMPORT_PARSE_ERROR' | 'INVALID_ARGUMENT
     for (const k of Object.keys(m)) if (!MESSAGE_KEYS.has(k)) notes.note('UNKNOWN_KEY_IGNORED', 'Unknown keys in the document were ignored.');
     const role = own(m, 'role');
     if (typeof role !== 'string' || role.length === 0) throw err(`${at}.role`, 'missing_or_not_a_string');
-    if (role.length > MAX_ROLE_CHARS || CONTROL_RE.test(role)) throw err(`${at}.role`, 'invalid');
+    // A lone surrogate cannot be stored as written (SQLite would rewrite it), so the identifier is refused instead of silently altered.
+    if (role.length > MAX_ROLE_CHARS || CONTROL_RE.test(role) || LONE_SURROGATE_TEST.test(role)) throw err(`${at}.role`, 'invalid');
     const textRaw = own(m, 'text');
     if (typeof textRaw !== 'string') throw err(`${at}.text`, 'missing_or_not_a_string');
     const text = cleanText(textRaw, notes);
@@ -252,7 +253,7 @@ function normalize(raw: unknown, shape: 'IMPORT_PARSE_ERROR' | 'INVALID_ARGUMENT
     const modelRaw = own(m, 'modelSlug');
     if (modelRaw !== undefined && modelRaw !== null) {
       if (typeof modelRaw !== 'string') throw err(`${at}.modelSlug`, 'not_a_string');
-      if (modelRaw.length > MAX_MODEL_CHARS || CONTROL_RE.test(modelRaw)) throw err(`${at}.modelSlug`, 'invalid');
+      if (modelRaw.length > MAX_MODEL_CHARS || CONTROL_RE.test(modelRaw) || LONE_SURROGATE_TEST.test(modelRaw)) throw err(`${at}.modelSlug`, 'invalid');
       modelSlug = modelRaw === '' ? null : modelRaw; // '' = "not stated"
     }
     messages.push({ role, text, createdAt, modelSlug });

@@ -28,6 +28,9 @@
  *    "repaired" (a lossy repair would merge distinct ids). Duplicate message uuids get `~dupN` suffixes in linear time.
  *  - Output is bounded per conversation (MAX_ITEMS_PER_CONVERSATION blocks/attachments) as well as per message, and the
  *    text composed from several text blocks is capped like every other body.
+ *  - Nothing the source said is lost without a trace: a `chat_messages` entry that is not an object is not a message, but
+ *    its raw value is kept (bounded) in rawMetadata._gcr, and repeated JSON keys (which JSON.parse silently collapses to
+ *    the last value) are counted from the raw text and reported as DUPLICATE_KEY.
  *
  * Security: the element is untrusted DATA. All object access is by own-property lookup; keys that come from the
  * input are never used to build objects or SQL; ids are looked up in Maps/Sets (so `__proto__` is just a string);
@@ -61,6 +64,12 @@ export const MAX_ATTACHMENTS_PER_MESSAGE = 5_000;
  * objects (~36x), so a 256 MiB element would need ~9 GB. Beyond the budget the content is only in `rawSource`.
  */
 export const MAX_ITEMS_PER_CONVERSATION = 2_000_000;
+/** Raw values of skipped (non-object) chat_messages entries kept in rawMetadata._gcr; the rest is only counted (the element SHA-256 covers it). */
+export const MAX_PRESERVED_SKIPPED_ENTRIES = 1000;
+/** Nesting levels (root = 1) whose object keys are compared for duplicates; deeper structures (tool inputs, citations) are not. */
+export const DUPLICATE_KEY_TRACK_DEPTH = 12;
+/** Distinct keys remembered per object while looking for duplicates; an object with more keys is only checked for its first ones. */
+export const DUPLICATE_KEY_TRACK_KEYS = 10_000;
 /** Purely informational warnings start with this prefix (same convention as src/ingest/chatgpt-export.ts). */
 export const INFO_PREFIX = '[info] ';
 /** At most this many ids are listed per warning code (the total count is always reported). */
@@ -106,6 +115,7 @@ export const CLAUDE_WARNING_CODES = {
   BLOCKS_TRUNCATED: 'BLOCKS_TRUNCATED',
   ATTACHMENTS_TRUNCATED: 'ATTACHMENTS_TRUNCATED',
   FOREIGN_PROVIDER_MARKER: 'FOREIGN_PROVIDER_MARKER',
+  DUPLICATE_KEY: 'DUPLICATE_KEY',
 } as const;
 
 const W = CLAUDE_WARNING_CODES;
@@ -139,14 +149,14 @@ interface WarningEntry {
 class WarningLog {
   private readonly entries = new Map<string, WarningEntry>();
 
-  /** `message` must be FIXED text: warnings never carry conversation content. `id` is a conversation/message id. */
-  add(code: string, message: string, id?: string): void {
+  /** `message` must be FIXED text: warnings never carry conversation content. `id` is a conversation/message id. `times` counts several occurrences at once. */
+  add(code: string, message: string, id?: string, times = 1): void {
     let entry = this.entries.get(code);
     if (entry === undefined) {
       entry = { message, count: 0, ids: [], idSet: new Set() };
       this.entries.set(code, entry);
     }
-    entry.count++;
+    entry.count += times;
     if (id !== undefined && !entry.idSet.has(id)) {
       entry.idSet.add(id);
       if (entry.ids.length < MAX_WARNING_IDS) entry.ids.push(id);
@@ -346,6 +356,93 @@ export function jsonDepthExceeds(root: unknown, maxDepth: number): boolean {
 }
 
 // ------------------------------------------------------------------------------------------
+// Duplicate keys (invisible after JSON.parse)
+// ------------------------------------------------------------------------------------------
+
+function decodeJsonKey(rawBody: string): string {
+  try {
+    const v: unknown = JSON.parse(`"${rawBody}"`);
+    return typeof v === 'string' ? v : rawBody;
+  } catch {
+    return rawBody; // unreachable for text that JSON.parse already accepted as a whole; never lose the key
+  }
+}
+
+/**
+ * How many object keys repeat inside an object of the (already valid) JSON `text`.
+ *
+ * WHY: `JSON.parse` keeps only the LAST of two equal keys, so a repeated `chat_messages` hides the first array, a repeated
+ * `sender` flips a role, and a differential parser (first-wins) would see another conversation: none of it would leave a
+ * trace. Keys are compared after JSON decoding (`"a"` equals `"\u0061"`). The scan is one left-to-right pass with an
+ * explicit frame stack (no recursion, no regular expressions), string contents are skipped with `indexOf` plus
+ * backslash-parity counting (so a string VALUE that looks like `"a":1,"a":2` is never read as keys), and it is bounded:
+ * only the first DUPLICATE_KEY_TRACK_DEPTH levels are compared and at most DUPLICATE_KEY_TRACK_KEYS distinct keys are
+ * remembered per object. Pure and deterministic.
+ */
+export function countDuplicateKeys(text: string): number {
+  const n = text.length;
+  // One entry per tracked open container: the keys seen so far for an object, null for an array.
+  const keysOf: Array<Set<string> | null> = [];
+  const expectKey: boolean[] = [];
+  let untracked = 0; // open containers below the tracked depth
+  let duplicates = 0;
+  let i = 0;
+  while (i < n) {
+    const c = text.charCodeAt(i);
+    if (c === 0x22) {
+      let end = i + 1;
+      for (;;) {
+        const q = text.indexOf('"', end);
+        if (q === -1) {
+          end = n;
+          break;
+        }
+        let back = q - 1;
+        while (back > i && text.charCodeAt(back) === 0x5c) back--;
+        if (((q - 1 - back) & 1) === 0) {
+          end = q;
+          break;
+        }
+        end = q + 1;
+      }
+      const top = keysOf.length - 1;
+      if (untracked === 0 && top >= 0 && expectKey[top] === true) {
+        expectKey[top] = false;
+        const keys = keysOf[top];
+        if (keys !== null && keys !== undefined) {
+          let key = text.slice(i + 1, end);
+          if (key.includes('\\')) key = decodeJsonKey(key);
+          if (keys.has(key)) duplicates++;
+          else if (keys.size < DUPLICATE_KEY_TRACK_KEYS) keys.add(key);
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (c === 0x7b || c === 0x5b) {
+      if (untracked > 0 || keysOf.length >= DUPLICATE_KEY_TRACK_DEPTH) {
+        untracked++;
+      } else {
+        keysOf.push(c === 0x7b ? new Set<string>() : null);
+        expectKey.push(c === 0x7b);
+      }
+    } else if (c === 0x7d || c === 0x5d) {
+      if (untracked > 0) {
+        untracked--;
+      } else {
+        keysOf.pop();
+        expectKey.pop();
+      }
+    } else if (c === 0x2c && untracked === 0) {
+      const top = keysOf.length - 1;
+      if (top >= 0 && keysOf[top] !== null) expectKey[top] = true;
+    }
+    i++;
+  }
+  return duplicates;
+}
+
+// ------------------------------------------------------------------------------------------
 // Content blocks
 // ------------------------------------------------------------------------------------------
 
@@ -355,10 +452,17 @@ function optionalBoundedString(log: WarningLog, raw: unknown, max: number, id: s
   return cleaned === '' ? null : cleaned;
 }
 
+/**
+ * One FIXED text for the code: warnings are aggregated per code and keep the message of the FIRST occurrence, so a message that
+ * named one malformed shape would misdescribe the others counted under the same code.
+ */
+const MALFORMED_BLOCK_MESSAGE =
+  'A content block is malformed (a block without a string "type", or a text/thinking/voice_note block without a text string); it is kept without text or as an "unknown" block with the raw value, and the raw message is in rawSource.';
+
 function textBlock(log: WarningLog, raw: JsonObject, id: string): ContentBlock {
   const t = own(raw, 'text');
   if (typeof t === 'string') return { type: 'text', text: cleanBody(log, t, id) };
-  log.add(W.MALFORMED_CONTENT_BLOCK, 'A "text" content block has no text string; it is kept without text.', id);
+  log.add(W.MALFORMED_CONTENT_BLOCK, MALFORMED_BLOCK_MESSAGE, id);
   return { type: 'text' };
 }
 
@@ -367,7 +471,10 @@ function thinkingBlock(log: WarningLog, raw: JsonObject, id: string): ContentBlo
   // reasoning, never part of message.text, and renderers must exclude it unless the operator opts in.
   const body = own(raw, 'thinking') ?? own(raw, 'text');
   const metadata = { hidden: true, sourceType: 'thinking' };
-  return typeof body === 'string' ? { type: 'thoughts', text: cleanBody(log, body, id), metadata } : { type: 'thoughts', metadata };
+  if (typeof body === 'string') return { type: 'thoughts', text: cleanBody(log, body, id), metadata };
+  // The unusable body stays in rawSource; the block is kept (still hidden) and the loss of its text is reported.
+  log.add(W.MALFORMED_CONTENT_BLOCK, MALFORMED_BLOCK_MESSAGE, id);
+  return { type: 'thoughts', metadata };
 }
 
 function toolUseBlock(log: WarningLog, raw: JsonObject, id: string): ContentBlock {
@@ -418,7 +525,9 @@ function imageBlock(log: WarningLog, raw: JsonObject, id: string): ContentBlock 
 function voiceNoteBlock(log: WarningLog, raw: JsonObject, id: string): ContentBlock {
   const t = own(raw, 'text');
   const metadata = { sourceType: 'voice_note' };
-  return typeof t === 'string' ? { type: 'voice_note', text: cleanBody(log, t, id), metadata } : { type: 'voice_note', metadata };
+  if (typeof t === 'string') return { type: 'voice_note', text: cleanBody(log, t, id), metadata };
+  log.add(W.MALFORMED_CONTENT_BLOCK, MALFORMED_BLOCK_MESSAGE, id);
+  return { type: 'voice_note', metadata };
 }
 
 function unknownBlock(log: WarningLog, raw: unknown, id: string): ContentBlock {
@@ -427,7 +536,7 @@ function unknownBlock(log: WarningLog, raw: unknown, id: string): ContentBlock {
     log.add(W.UNKNOWN_CONTENT_TYPE, 'A content block has a type this adapter does not know; it is kept as an "unknown" block with the raw value.', id);
     return { type: 'unknown', metadata: { sourceType: cleanBounded(log, sourceType, MAX_SHORT_STRING, id), raw } };
   }
-  log.add(W.MALFORMED_CONTENT_BLOCK, 'A content block is not an object with a string "type"; it is kept as an "unknown" block with the raw value.', id);
+  log.add(W.MALFORMED_CONTENT_BLOCK, MALFORMED_BLOCK_MESSAGE, id);
   return { type: 'unknown', metadata: { sourceType: null, raw } };
 }
 
@@ -626,7 +735,13 @@ function capJoined(log: WarningLog, joined: string, id: string): string {
   return t.value;
 }
 
-function assignMessageIds(log: WarningLog, chatMessages: readonly unknown[], convId: string): { sources: Array<{ ordinal: number; source: JsonObject; id: string }>; firstIdByOriginal: Map<string, string> } {
+/** chat_messages entries that are not objects: not messages, but their raw values are kept (bounded) so the skip loses nothing. */
+interface SkippedEntries {
+  kept: Array<{ ordinal: number; value: unknown }>;
+  total: number;
+}
+
+function assignMessageIds(log: WarningLog, chatMessages: readonly unknown[], convId: string, skipped: SkippedEntries): { sources: Array<{ ordinal: number; source: JsonObject; id: string }>; firstIdByOriginal: Map<string, string> } {
   const sources: Array<{ ordinal: number; source: JsonObject; id: string }> = [];
   const used = new Set<string>();
   const firstIdByOriginal = new Map<string, string>();
@@ -634,7 +749,9 @@ function assignMessageIds(log: WarningLog, chatMessages: readonly unknown[], con
   for (let ordinal = 0; ordinal < chatMessages.length; ordinal++) {
     const el = chatMessages[ordinal];
     if (!isRecord(el)) {
-      log.add(W.NON_OBJECT_MESSAGE, 'A chat_messages entry is not an object and was skipped (it is not stored).', convId);
+      log.add(W.NON_OBJECT_MESSAGE, `A chat_messages entry is not an object, so it is not a message; its raw value is kept in rawMetadata._gcr.nonObjectChatMessages (at most the first ${MAX_PRESERVED_SKIPPED_ENTRIES}, the rest is counted).`, convId);
+      skipped.total++;
+      if (skipped.kept.length < MAX_PRESERVED_SKIPPED_ENTRIES) skipped.kept.push({ ordinal, value: el });
       continue;
     }
     const rawId = own(el, 'uuid');
@@ -697,8 +814,8 @@ function compareDrafts(a: Draft, b: Draft): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; // code-unit order, never locale-dependent
 }
 
-function buildDrafts(log: WarningLog, chatMessages: readonly unknown[], convId: string): Draft[] {
-  const { sources, firstIdByOriginal } = assignMessageIds(log, chatMessages, convId);
+function buildDrafts(log: WarningLog, chatMessages: readonly unknown[], convId: string, skipped: SkippedEntries): Draft[] {
+  const { sources, firstIdByOriginal } = assignMessageIds(log, chatMessages, convId, skipped);
   // Explicit mode as soon as ANY message carries the key: "explicit pointers win" (task rule), decided per conversation.
   const explicit = sources.some((s) => Object.hasOwn(s.source, 'parent_message_uuid'));
   const drafts: Draft[] = [];
@@ -763,6 +880,29 @@ function resolveCurrentNodeId(drafts: readonly Draft[], byId: ReadonlyMap<string
   }
   // Every message must lie on the single leaf->root path; a revisited node (cycle) ends the walk early and fails this.
   return seen.size === drafts.length && current === undefined ? leaf.id : null;
+}
+
+/** Own data property, also for the key "__proto__" (plain assignment would change the prototype instead). */
+function defineOwn(target: JsonObject, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+/**
+ * The conversation object minus its message tree. When entries were skipped, the adapter's own `_gcr` block is added (same
+ * convention as the ChatGPT adapter): a source key named `_gcr` is kept as `_gcr_original` (or `_gcr_original_2`, ...), so it can
+ * neither spoof the block nor be lost. Without skipped entries rawMetadata is exactly the source minus `chat_messages`.
+ */
+function buildRawMetadata(parsed: JsonObject, skipped: SkippedEntries): JsonObject {
+  const { chat_messages: _messageTree, ...rest } = parsed;
+  if (skipped.total === 0) return rest;
+  const out: JsonObject = {};
+  let moved = '_gcr_original';
+  for (let n = 2; Object.hasOwn(rest, moved); n++) moved = `_gcr_original_${n}`;
+  for (const key of Object.keys(rest)) defineOwn(out, key === '_gcr' ? moved : key, rest[key]);
+  const gcr: JsonObject = { nonObjectChatMessages: skipped.kept.map((e) => ({ ordinal: e.ordinal, value: e.value })) };
+  if (skipped.total > skipped.kept.length) gcr['nonObjectChatMessagesOmitted'] = skipped.total - skipped.kept.length;
+  defineOwn(out, '_gcr', gcr);
+  return out;
 }
 
 function countRoles(messages: readonly MessageRecord[]): Record<string, number> {
@@ -881,7 +1021,13 @@ function normalizeElement(text: string, ctx: AdapterContext, rawElementIndex: nu
     log.add(W.FOREIGN_PROVIDER_MARKER, 'The element also has a ChatGPT-style object "mapping"; only chat_messages was converted and the mapping was not read (it is kept in rawMetadata).', convId);
   }
 
-  const drafts = buildDrafts(log, chatMessages, convId);
+  const duplicateKeys = countDuplicateKeys(text);
+  if (duplicateKeys > 0) {
+    log.add(W.DUPLICATE_KEY, 'An object contains the same key more than once; like JSON.parse, the LAST value was kept (the element SHA-256 covers the exact bytes).', convId, duplicateKeys);
+  }
+
+  const skippedEntries: SkippedEntries = { kept: [], total: 0 };
+  const drafts = buildDrafts(log, chatMessages, convId, skippedEntries);
   const explicit = drafts.some((d) => Object.hasOwn(d.source, 'parent_message_uuid'));
   const byId = new Map(drafts.map((d) => [d.id, d] as const));
   const children = deriveChildren(drafts, byId, explicit);
@@ -917,7 +1063,7 @@ function normalizeElement(text: string, ctx: AdapterContext, rawElementIndex: nu
     rawSource: d.source,
   }));
 
-  const { chat_messages: _messageTree, ...rawMetadata } = parsed;
+  const rawMetadata = buildRawMetadata(parsed, skippedEntries);
   const record: ConversationRecord = {
     provider: 'claude',
     accountLabel: ctx.accountLabel,

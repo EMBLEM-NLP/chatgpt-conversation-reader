@@ -55,7 +55,7 @@ const ADVERSARIAL: ReadonlyArray<readonly [string, string]> = [
   ['CJK mixed with latin', rep('日a', MIB)],
   ['combining marks (Zalgo)', `a${rep('\u{301}\u{316}', MIB)}`],
   ['150k distinct words', Array.from({ length: 150_000 }, (_, i) => `w${i.toString(36)}xx`).join(' ').slice(0, MIB)],
-  ['mixed entity soup', rep('http://a.com/?q=1#x a@b.cc 2025-01-15 123e4567-e89b-12d3-a456-426614174000 ```js\n', MIB)],
+  ['mixed entity soup', rep('http://a.com/?q=1#x a@b.cc 2025-01-15 00000000-0000-4000-8000-0000000000ab ```js\n', MIB)],
 ];
 
 function timed(fn: () => unknown): number {

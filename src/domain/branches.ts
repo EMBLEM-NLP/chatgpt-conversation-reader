@@ -148,7 +148,7 @@ function compareStrings(a: string, b: string): number {
  * and the text). Only records that agree on ALL of these (true clones) are tie-broken by input order, and for those the
  * choice is unobservable except through blocks/attachments/rawSource. The comparison reads content but never emits it.
  */
-const DUPLICATE_TIEBREAK_FIELDS = ['createdAt', 'updatedAt', 'authorRole', 'authorName', 'modelSlug', 'channel', 'recipient', 'contentType', 'status', 'text'] as const;
+const DUPLICATE_TIEBREAK_FIELDS = ['createdAt', 'updatedAt', 'conversationId', 'authorRole', 'authorName', 'modelSlug', 'channel', 'recipient', 'contentType', 'status', 'text'] as const;
 
 /** null/non-strings first, then plain code-unit order. */
 function compareNullableText(a: unknown, b: unknown): number {
@@ -469,9 +469,14 @@ export function analyzeTree(conversationId: string, messages: readonly MessageRe
   if (unreachable.length > 0) {
     const cycles = findCycles(unreachable, s.nodes);
     cycles.slice(0, MAX_CYCLE_WARNINGS).forEach((cycle) => {
+      // A capped id list no longer closes on itself, so the message must not claim that it does.
+      const order =
+        cycle.length > MAX_WARNING_IDS
+          ? `only the first ${MAX_WARNING_IDS} ids are listed, in cycle order: each id's parent is the next id in the list`
+          : "each id's parent is the next id in the list, the last one's parent is the first";
       warnings.push({
         code: 'CYCLE_DETECTED',
-        message: `Parent pointers form a cycle of ${cycle.length} nodes (each id's parent is the next id in the list, the last one's parent is the first). These nodes and their descendants are unreachable from any root.`,
+        message: `Parent pointers form a cycle of ${cycle.length} nodes (${order}). These nodes and their descendants are unreachable from any root.`,
         ids: cycle.slice(0, MAX_WARNING_IDS).map(echoId),
       });
     });
@@ -720,10 +725,12 @@ export function threadForBranch(analysis: TreeAnalysis, messages: readonly Messa
  *
  *  - 'last_child':  from the FIRST root, follow the last child at every node (declared order when it agrees with the
  *                   parent pointers, else the sorted fallback) down to a leaf.
- *  - 'latest_leaf': the branch whose leaf has the greatest createdAt; ties by greater ordinal, then greater id. Leaves
- *                   without a usable timestamp never win; if no leaf has one the result is null (no guessing).
+ *  - 'latest_leaf': the branch whose leaf has the greatest createdAt among ALL reachable leaves (`analysis.leafIds`, which is
+ *                   complete even for a truncated analysis); ties by greater ordinal, then greater id. Leaves without a
+ *                   usable timestamp never win; if no leaf has one the result is null (no guessing).
  *
- * Returns null when no branch can be selected (no branches, truncated analysis without the chosen leaf, no timestamps).
+ * Returns null when no branch can be selected (no branches, no timestamps, or a truncated analysis whose enumerated
+ * branches do not include the chosen leaf: a truncated analysis never yields a different answer than the full one).
  */
 export function selectBranchByPolicy(analysis: TreeAnalysis, messages: readonly MessageRecord[], policy: BranchPolicy): { branch: Branch; warning: Warning } | null {
   if (policy !== 'last_child' && policy !== 'latest_leaf') {
@@ -749,9 +756,14 @@ export function selectBranchByPolicy(analysis: TreeAnalysis, messages: readonly 
     branch = analysis.branches.find((b) => b.leafId === leaf);
   } else {
     const { nodes } = indexMessages(messages);
+    // Candidates are ALL reachable leaves (`leafIds` stays complete when enumeration was truncated), not just the enumerated
+    // branches: otherwise a truncated analysis would present the newest ENUMERATED leaf as "the latest leaf". If the real
+    // winner was not enumerated there is no Branch to return and the result is null (same rule as 'last_child').
+    const candidateIds: readonly unknown[] = Array.isArray(analysis.leafIds) ? analysis.leafIds : analysis.branches.map((b) => b.leafId);
     let best: TreeNode | undefined;
-    for (const b of analysis.branches) {
-      const leaf = nodes.get(b.leafId);
+    for (const candidateId of candidateIds) {
+      if (typeof candidateId !== 'string') continue;
+      const leaf = nodes.get(candidateId);
       if (leaf === undefined || leaf.key === Number.POSITIVE_INFINITY) continue;
       if (
         best === undefined ||

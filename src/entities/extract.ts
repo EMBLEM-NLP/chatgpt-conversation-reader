@@ -12,13 +12,17 @@
  *    that the other extractors see, so a token inside a query string can never resurface as a UUID, timestamp or keyword.
  *  - E-mail addresses are blanked before keyword extraction (their parts would otherwise become keywords). Phone
  *    numbers are never extracted: keywords must contain at least three letters, so digit strings are inert.
- *  - Only http(s) URLs are recognised; `javascript:`, `data:`, `file:` and friends never match.
+ *  - Only http(s) URLs are recognised; `javascript:`, `data:`, `file:` and friends never match. URL-shaped text with any
+ *    OTHER scheme (`ftp://u:pw@h/`, `postgres://u:pw@db/x?y`, `s3://b/k?sig=..`, or `http` glued to letters as in
+ *    "linkhttps://h/?token=..") is not extracted either, but its userinfo, query and fragment are blanked so that
+ *    credentials and tokens cannot resurface as keywords.
  *
  * Complexity / ReDoS (all verified by test/entities/extract.redos.test.ts)
  *  - Every regular expression is free of nested or overlapping quantifiers (each repeated item is a single character
  *    class, fixed-width groups, or bounded repeats). The two scanners that would be quadratic as regexes (URL
  *    extents and e-mail addresses) are written as bounded manual scans that always consume what they inspect.
- *  - Input longer than `maxTextChars` (default 200 000 UTF-16 units) is cut BEFORE any work is done.
+ *  - Input longer than `maxTextChars` (default 200 000 UTF-16 units) is cut BEFORE any work is done, and the NFKC-normalised
+ *    text is cut to the same bound again (compatibility characters such as U+FDFA expand up to 18 times).
  *  - NFKC normalisation is quadratic in ICU for very long runs of combining marks (200 000 marks take ~10 s), so runs
  *    of more than 8 consecutive combining marks are truncated first (`normalizeNfkc`). Real scripts never need more.
  *
@@ -119,6 +123,20 @@ function capText(text: string, max: number): string {
   return text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
 }
 
+/** Largest NFKC expansion of one UTF-16 unit (U+FDFA becomes 18 units). */
+const MAX_NFKC_EXPANSION = 18;
+
+/**
+ * true when `extractEntities` would not look at the whole text because of `maxTextChars`: the text is longer than the
+ * cap, or it is NFKC-normalised to something longer than the cap. Lets callers (graph/build.ts) warn about cuts instead
+ * of swallowing them. Costs a second normalisation only for non-ASCII text that could possibly expand past the cap.
+ */
+export function exceedsTextCap(text: string, maxTextChars: number): boolean {
+  if (text.length > maxTextChars) return true;
+  if (text.length * MAX_NFKC_EXPANSION <= maxTextChars || ASCII_ONLY.test(text)) return false;
+  return normalizeNfkc(text).length > maxTextChars;
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Normalisation
 // ---------------------------------------------------------------------------------------------------------------
@@ -161,8 +179,8 @@ function blank(text: string, ranges: readonly Range[]): string {
 // URLs
 // ---------------------------------------------------------------------------------------------------------------
 
-/** `http://` or `https://` that does not continue a longer scheme-like word. Single-character lookbehind: linear. */
-const SCHEME_START = /(?<![A-Za-z0-9+.-])https?:\/\//giu;
+/** Longest run of scheme characters (letters, digits, `+ - .`) in front of "://" that is still treated as a scheme. */
+const MAX_SCHEME_CHARS = 32;
 /** First character that cannot be part of a URL (whitespace, controls, quotes, brackets of markup, CJK punctuation, bidi/zero-width). */
 const URL_END = /[\s\u0000-\u001f\u007f-\u009f<>"'`\\\u{200b}-\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}\u{3000}-\u{303f}\u{ff00}-\u{ffef}]/gu;
 const TRAILING_PUNCT = new Set(['.', ',', ';', ':', '!', '?', '*', '\u{2026}']);
@@ -179,7 +197,10 @@ interface UrlHit {
 
 interface UrlScan {
   hits: UrlHit[];
-  /** Whole runs that started like a URL but were not acceptable (blanked everywhere). */
+  /**
+   * Ranges blanked for every later pass: whole runs that started like an http(s) URL but were not acceptable, and the
+   * secret parts (userinfo, query, fragment) of URL-shaped text with any OTHER scheme (see scanUrls).
+   */
   rejected: Range[];
 }
 
@@ -333,26 +354,70 @@ function parseUrlCandidate(core: string, start: number): Omit<UrlHit, 'start' | 
   return { value: `${scheme}://${hostPort}${path}`, normalized: `${hostPort}${path}`, secretRanges };
 }
 
+function isSchemeCharCode(c: number): boolean {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 45 || c === 46; // 0-9 A-Z a-z + - .
+}
+
 /**
- * Find http(s) URLs. Every candidate consumes its whole run (up to the next URL-terminating character) whether it is
- * accepted or not, so no character is inspected more than a constant number of times: linear in the text length even for
- * "http://http://http://..." or one gigantic run.
+ * Secret parts of URL-shaped text whose scheme is NOT http(s) (`ftp://u:pw@h/`, `postgres://u:pw@db/x?y`, `s3://b/k?sig=..`,
+ * and also an http scheme glued to preceding letters such as "linkhttps://h/?token=..."): userinfo, query and fragment.
+ * Such text is never extracted as a URL entity, but its secrets must not resurface as keywords either (privacy), so
+ * they are blanked like those of an http(s) URL. Host and path stay ordinary text. `authStart` is the index just after
+ * "://" and `runEnd` the exclusive end of the run. One forward pass over the run: linear.
+ */
+function otherSchemeSecrets(text: string, authStart: number, runEnd: number, out: Range[]): void {
+  let i = authStart;
+  let lastAt = -1;
+  while (i < runEnd) {
+    const c = text.charCodeAt(i);
+    if (c === 47 || c === 63 || c === 35) break; // / ? #
+    if (c === 64) lastAt = i; // userinfo ends at the LAST '@' of the authority
+    i++;
+  }
+  if (lastAt >= 0) out.push([authStart, lastAt + 1]);
+  while (i < runEnd) {
+    const c = text.charCodeAt(i);
+    if (c === 63 || c === 35) break; // ? #
+    i++;
+  }
+  if (i < runEnd) out.push([i, runEnd]);
+}
+
+/**
+ * Find http(s) URLs (and blank the secrets of other URL-shaped text, see otherSchemeSecrets). Every "://" is examined
+ * once: the scheme is the maximal run of scheme characters in front of it (at most MAX_SCHEME_CHARS), and the candidate
+ * consumes its whole run (up to the next URL-terminating character) whether it is accepted or not, so no character is
+ * inspected more than a constant number of times: linear in the text length even for "http://http://http://..." or one
+ * gigantic run.
  */
 function scanUrls(text: string): UrlScan {
   const hits: UrlHit[] = [];
   const rejected: Range[] = [];
-  if (text.length < 8) return { hits, rejected };
-  SCHEME_START.lastIndex = 0;
+  if (text.length < 4) return { hits, rejected };
+  let from = 0;
   for (;;) {
-    const m = SCHEME_START.exec(text);
-    if (m === null) break;
-    const start = m.index;
-    URL_END.lastIndex = start;
+    const sep = text.indexOf('://', from);
+    if (sep < 0) break;
+    // Walk back over scheme characters; never past the previous run and never more than MAX_SCHEME_CHARS + 1 of them.
+    const lowest = Math.max(from, sep - (MAX_SCHEME_CHARS + 1));
+    let start = sep;
+    while (start > lowest && isSchemeCharCode(text.charCodeAt(start - 1))) start--;
+    if (start === sep) {
+      from = sep + 3; // "://" without a scheme in front of it
+      continue;
+    }
+    URL_END.lastIndex = sep + 3;
     const t = URL_END.exec(text);
     const runEnd = t === null ? text.length : t.index;
-    SCHEME_START.lastIndex = runEnd; // continue AFTER the run: nested "http://" inside a query string is never examined
+    from = runEnd; // continue AFTER the run: nested "http://" inside a query string is never examined
     if (runEnd - start > MAX_URL_CHARS) {
       rejected.push([start, runEnd]);
+      continue;
+    }
+    // Only a scheme that is exactly "http" or "https" starts a URL: "xhttp://" and "git+https://" are other schemes.
+    const schemeLen = sep - start;
+    if (schemeLen < 4 || schemeLen > 5 || !/^https?$/i.test(text.slice(start, sep))) {
+      otherSchemeSecrets(text, sep + 3, runEnd, rejected);
       continue;
     }
     const core = trimUrlTail(text.slice(start, runEnd));
@@ -433,9 +498,15 @@ const UUID_RE = /(?<![0-9A-Za-z])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0
 /**
  * ISO-8601 date or date-time. Every repeat is a bounded run of digits and every optional group is fixed-shape, so the
  * pattern cannot backtrack beyond a constant number of steps per start position.
+ *
+ * Maximal munch (tricky): the token is first captured greedily inside a LOOKAHEAD and only then consumed with the
+ * backreference `\1`. JavaScript lookaheads are atomic, so if the trailing `(?![0-9A-Za-z])` fails the engine cannot go back
+ * and settle for a shorter prefix. Without this, "2025-01-15T10:30:00Zextra" would silently yield the lower-precision
+ * (and wrong) timestamp "2025-01-15T10:30". Capture groups: 1 = whole token, 2..4 = Y-M-D, 5 = hour, 6 = minute,
+ * 7 = second, 8 = fraction, 9 = zone.
  */
 const TIMESTAMP_RE =
-  /(?<![0-9A-Za-z])(\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?(Z|z|[+-]\d{2}(?::?\d{2})?)?)?(?![0-9A-Za-z])/g;
+  /(?<![0-9A-Za-z])(?=((\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?(Z|z|[+-]\d{2}(?::?\d{2})?)?)?))\1(?![0-9A-Za-z])/g;
 
 function isLeapYear(y: number): boolean {
   return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
@@ -743,7 +814,10 @@ export function extractEntities(input: ExtractInput, opts?: ExtractOptions): Ext
   const limits = resolveLimits(opts);
   if (typeof input !== 'object' || input === null || typeof input.text !== 'string') throw badArg('input.text', 'expected a string');
 
-  const text = normalizeNfkc(capText(input.text, limits.maxTextChars));
+  // The cap is applied twice: before normalisation (so ICU never sees more than maxTextChars units) and again after it,
+  // because NFKC can expand one unit into up to 18 (U+FDFA): without the second cut a capped text could still become
+  // 18 times larger than the documented bound.
+  const text = capText(normalizeNfkc(capText(input.text, limits.maxTextChars)), limits.maxTextChars);
   const buckets: Record<EntityKind, Bucket> = {
     url: new Bucket(),
     uuid: new Bucket(),
@@ -777,14 +851,14 @@ export function extractEntities(input: ExtractInput, opts?: ExtractOptions): Ext
   TIMESTAMP_RE.lastIndex = 0;
   for (let m = TIMESTAMP_RE.exec(noEmail); m !== null; m = TIMESTAMP_RE.exec(noEmail)) {
     const canonical = canonicalTimestamp({
-      year: Number(m[1]),
-      month: Number(m[2]),
-      day: Number(m[3]),
-      hour: m[4] === undefined ? null : Number(m[4]),
-      minute: m[5] === undefined ? 0 : Number(m[5]),
-      second: m[6] === undefined ? null : Number(m[6]),
-      fraction: m[7] === undefined ? '' : m[7],
-      zone: m[8] === undefined ? null : m[8],
+      year: Number(m[2]),
+      month: Number(m[3]),
+      day: Number(m[4]),
+      hour: m[5] === undefined ? null : Number(m[5]),
+      minute: m[6] === undefined ? 0 : Number(m[6]),
+      second: m[7] === undefined ? null : Number(m[7]),
+      fraction: m[8] === undefined ? '' : m[8],
+      zone: m[9] === undefined ? null : m[9],
     });
     if (canonical === null) continue;
     buckets.timestamp.add(m[0], canonical);

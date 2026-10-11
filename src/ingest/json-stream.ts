@@ -33,7 +33,11 @@ export interface JsonElement {
 }
 
 export interface JsonLinesOptions {
-  /** Largest single element in bytes; defaults to DEFAULT_IMPORT_LIMITS.maxElementBytes. */
+  /**
+   * Largest single element in bytes; defaults to DEFAULT_IMPORT_LIMITS.maxElementBytes. A fractional value is rounded
+   * down, a value above the maximum JS string length is clamped to it (such an element could not be returned as text),
+   * and a value below one byte is INVALID_ARGUMENT.
+   */
   maxElementBytes?: number;
 }
 
@@ -139,12 +143,36 @@ function elementTooLarge(index: number, max: number, byteOffset: number): GcrErr
   });
 }
 
+/** A source must be an async or sync iterable; anything else (null, a number, a plain object) is a caller bug, not a TypeError. */
+function assertIterableSource(source: unknown): void {
+  const candidate = source as { [Symbol.asyncIterator]?: unknown; [Symbol.iterator]?: unknown } | null | undefined;
+  // Property reads on primitives (numbers, booleans, symbols) are safe and yield undefined; only null/undefined would throw.
+  const iterable =
+    candidate !== null &&
+    candidate !== undefined &&
+    (typeof candidate[Symbol.asyncIterator] === 'function' || typeof candidate[Symbol.iterator] === 'function');
+  if (!iterable) {
+    throw new GcrError('INVALID_ARGUMENT', 'A JSON byte source (an iterable of Buffer or Uint8Array chunks) is required.', {
+      details: { reason: 'BAD_SOURCE' },
+    });
+  }
+}
+
 /** Accept the Buffer/Uint8Array the type promises, fail loudly (and generically) for anything else (e.g. string chunks). */
 function toBuffer(chunk: unknown): Buffer {
   if (Buffer.isBuffer(chunk)) return chunk;
   if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
   throw new GcrError('INVALID_ARGUMENT', 'JSON source chunks must be Buffer or Uint8Array.', { details: { reason: 'BAD_CHUNK_TYPE' } });
 }
+
+/**
+ * V8's maximum string length on 64-bit platforms (2^29 - 24 UTF-16 code units; `buffer.constants.MAX_STRING_LENGTH`).
+ * The yielded text is a JS string and UTF-8 decoding never produces more code units than there are bytes, so an element
+ * larger than this can never be delivered: without this clamp a caller that raised `maxElementBytes` above it would
+ * buffer ~512 MiB and then fail with a raw ERR_STRING_TOO_LONG instead of a GcrError. (A test pins the constant to the
+ * runtime's value.)
+ */
+const MAX_DECODABLE_ELEMENT_BYTES = 0x1fffffe8;
 
 /** Retain at most this much accumulation buffer between elements so one giant element does not pin memory forever. */
 const MAX_RETAINED_ACC_BYTES = 4 * 1024 * 1024;
@@ -194,7 +222,17 @@ class ElementScanner {
     this.lines = mode === 'lines';
     this.allowSingleObject = mode === 'array' && opts.allowSingleObject === true;
     // Reuse the central validation so a bad option (0, NaN, Infinity, negative) is rejected exactly like ImportLimits.
-    this.maxElementBytes = resolveLimits(opts.maxElementBytes === undefined ? {} : { maxElementBytes: opts.maxElementBytes }).maxElementBytes;
+    const requested = resolveLimits(opts.maxElementBytes === undefined ? {} : { maxElementBytes: opts.maxElementBytes }).maxElementBytes;
+    // The scanners compare WHOLE byte positions, so the limit must be a whole number: an element of n bytes is allowed iff
+    // n <= limit, i.e. n <= floor(limit). (Comparing against a fractional limit let ceil(limit) bytes through.) A limit
+    // below one byte could never admit any element and is refused like any other non-positive value.
+    const whole = Math.min(Math.floor(requested), MAX_DECODABLE_ELEMENT_BYTES);
+    if (whole < 1) {
+      throw new GcrError('INVALID_ARGUMENT', 'Import limit maxElementBytes must be at least one byte.', {
+        details: { reason: 'LIMIT_NOT_POSITIVE_FINITE', limit: 'maxElementBytes' },
+      });
+    }
+    this.maxElementBytes = whole;
     this.phase = this.lines ? PH_LINE_START : PH_START;
   }
 
@@ -504,6 +542,7 @@ export async function* jsonArrayElements(
   opts: JsonStreamOptions = {},
 ): AsyncGenerator<JsonElement, void, undefined> {
   const scanner = new ElementScanner('array', opts);
+  assertIterableSource(source);
   for await (const raw of source) {
     const chunk = toBuffer(raw);
     if (chunk.length === 0) continue;
@@ -522,6 +561,7 @@ export async function* jsonLinesElements(
   opts: JsonLinesOptions = {},
 ): AsyncGenerator<JsonElement, void, undefined> {
   const scanner = new ElementScanner('lines', opts);
+  assertIterableSource(source);
   for await (const raw of source) {
     const chunk = toBuffer(raw);
     if (chunk.length === 0) continue;

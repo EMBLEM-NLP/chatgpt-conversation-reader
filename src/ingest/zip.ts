@@ -206,9 +206,12 @@ function normalizeValidationError(e: unknown): GcrError {
  * character, letter or digit as \u{hex} and cut it to at most 80 characters. Exported for tests.
  */
 export function sanitizeEntryName(name: string, maxChars = 80): string {
+  // The limit is what keeps hostile text out of messages, so it must always bite: NaN/Infinity (which compare false against
+  // every length and would switch truncation off) fall back to the default; fractions round down; below 0 means nothing fits.
+  const limit = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 80;
   // The text is assembled from whole "pieces" (one code point, or one \u{hex} escape). Truncation keeps only whole
   // pieces, so it can neither leave half of a surrogate pair (an ill-formed string) nor half an escape sequence.
-  const keep = Math.max(0, maxChars - 3); // room for the "..." marker
+  const keep = Math.max(0, limit - 3); // room for the "..." marker
   let out = '';
   let cut = ''; // longest prefix of whole pieces that still leaves room for the marker
   let cutClosed = false;
@@ -216,7 +219,8 @@ export function sanitizeEntryName(name: string, maxChars = 80): string {
     const cp = ch.codePointAt(0) as number;
     const plain = (cp >= 0x20 && cp < 0x7f) || (cp > 0x9f && /^[\p{L}\p{N}]$/u.test(ch));
     const piece = plain ? ch : `\\u{${cp.toString(16)}}`;
-    if (out.length + piece.length > maxChars) return cut + '...';
+    // With room for fewer than three characters the marker itself is cut so the result never exceeds the limit.
+    if (out.length + piece.length > limit) return limit >= 3 ? cut + '...' : '...'.slice(0, limit);
     out += piece;
     if (!cutClosed) {
       if (out.length <= keep) cut = out;

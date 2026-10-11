@@ -39,7 +39,7 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 import type { AttachmentRef, ContentBlock } from '../domain/types.js';
 import { toDbError } from '../db/open.js';
-import { extractEntities, DEFAULT_MAX_TEXT_CHARS, ENTITY_KINDS, isEntityKind } from '../entities/extract.js';
+import { extractEntities, exceedsTextCap, DEFAULT_MAX_TEXT_CHARS, ENTITY_KINDS, isEntityKind } from '../entities/extract.js';
 import type { EntityKind } from '../entities/extract.js';
 import { GcrError } from '../errors.js';
 import type { Warning } from '../errors.js';
@@ -126,8 +126,12 @@ export type ParsedNodeId =
   | { type: 'entity'; kind: EntityKind; normalized: string }
   | { type: 'tool'; kind: 'tool'; normalized: string };
 
-/** Inverse of conversationNodeId / entityNodeId; null for strings that are not graph node ids. */
+/**
+ * Inverse of conversationNodeId / entityNodeId; null for anything that is not a graph node id (callers pass ids that came
+ * from users or tool input, so a non-string is "not an id", never a TypeError).
+ */
 export function parseNodeId(id: string): ParsedNodeId | null {
+  if (typeof id !== 'string') return null;
   if (id.startsWith('tool:')) return { type: 'tool', kind: 'tool', normalized: id.slice(5) };
   if (id.startsWith('ent:')) {
     const rest = id.slice(4);
@@ -226,15 +230,29 @@ function num(r: Row, k: string): number {
 /** Control characters, bidi overrides/isolates and line/paragraph separators: replaced because labels end up in UIs and terminals. */
 const UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u{200e}\u{200f}\u{2028}\u{2029}\u{202a}-\u{202e}\u{2066}-\u{2069}]/gu;
 
-/** Untrusted text -> single-line label of at most LABEL_MAX_CHARS UTF-16 units (never cut inside a surrogate pair). */
-export function cleanLabel(raw: string, fallback: string): string {
+/** Label used when neither the text nor the fallback has anything printable left. */
+const UNNAMED_LABEL = '(unnamed)';
+
+function sanitizeLabel(raw: string): string {
   let s = raw.length > 4 * LABEL_MAX_CHARS ? raw.slice(0, 4 * LABEL_MAX_CHARS) : raw;
   s = s.replace(UNSAFE_LABEL_CHARS, ' ').trim();
   if (s.length > LABEL_MAX_CHARS) {
     const last = s.charCodeAt(LABEL_MAX_CHARS - 1);
     s = s.slice(0, last >= 0xd800 && last <= 0xdbff ? LABEL_MAX_CHARS - 1 : LABEL_MAX_CHARS);
   }
-  return s.length > 0 ? s : fallback;
+  return s;
+}
+
+/**
+ * Untrusted text -> single-line label of at most LABEL_MAX_CHARS UTF-16 units (never cut inside a surrogate pair).
+ * The fallback (typically an id taken from the import, which is just as untrusted) goes through the same cleaning, so
+ * the result never contains control or bidi characters whatever the inputs are.
+ */
+export function cleanLabel(raw: string, fallback: string): string {
+  const s = sanitizeLabel(raw);
+  if (s.length > 0) return s;
+  const f = sanitizeLabel(fallback);
+  return f.length > 0 ? f : UNNAMED_LABEL;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -343,7 +361,12 @@ function scanMessages(db: DatabaseSync, cfg: Config): ScanState {
     const convNode = conversationNodeId(provider, accountLabel, conversationId);
     state.conversationMessages.set(convNode, (state.conversationMessages.get(convNode) ?? 0) + 1);
 
-    if (num(r, 'text_len') > cfg.maxTextChars) {
+    // Several lengths are compared on purpose: SQLite's substr()/length() count Unicode CODE POINTS while
+    // extractEntities caps UTF-16 code UNITS (a message of astral characters, e.g. emoji, can be cut by the extractor
+    // even though SQLite did not cut it) and also caps the NFKC-normalised text (compatibility characters expand).
+    // Every kind of cut must be reported, never swallowed silently.
+    const text = str(r, 'text');
+    if (num(r, 'text_len') > cfg.maxTextChars || exceedsTextCap(text, cfg.maxTextChars)) {
       state.truncatedCount++;
       if (state.truncatedMessageIds.length < WARNING_ID_SAMPLE) state.truncatedMessageIds.push(messageId);
     }
@@ -352,7 +375,7 @@ function scanMessages(db: DatabaseSync, cfg: Config): ScanState {
     if (blocks === null || attachments === null) state.invalidJsonCount++;
     const found = extractEntities(
       {
-        text: str(r, 'text'),
+        text,
         authorRole: str(r, 'author_role'),
         recipient: strOrNull(r, 'recipient'),
         authorName: strOrNull(r, 'author_name'),
@@ -572,16 +595,21 @@ function writeEdges(db: DatabaseSync, cfg: Config, state: ScanState): WriteStats
 // Transaction wrapper
 // ---------------------------------------------------------------------------------------------------------------
 
-function count(db: DatabaseSync, table: string): number {
-  // `table` is always a literal from this file.
+/** The only identifiers that may be interpolated into SQL here: a closed union, so a caller cannot pass anything else. */
+type CountableTable = 'graph_edges';
+
+function count(db: DatabaseSync, table: CountableTable): number {
   const r = db.prepare(`SELECT count(*) AS n FROM ${table}`).get();
   return r === undefined ? 0 : num(r, 'n');
 }
 
+/** Children before parents (foreign keys): graph_edge_evidence -> graph_edges, entity_mentions -> entities. Static allow-list. */
+const DERIVED_TABLES_CHILDREN_FIRST: readonly string[] = ['graph_edge_evidence', 'graph_edges', 'graph_communities', 'graph_nodes', 'entity_mentions', 'entities'];
+
 function clearDerived(db: DatabaseSync): void {
+  // Both interpolated identifiers come from static lists in this file (DERIVED_INDEXES, DERIVED_TABLES_CHILDREN_FIRST).
   for (const ix of DERIVED_INDEXES) db.exec(`DROP INDEX IF EXISTS ${ix.name}`);
-  // Children before parents: graph_edge_evidence -> graph_edges, entity_mentions -> entities.
-  for (const t of ['graph_edge_evidence', 'graph_edges', 'graph_communities', 'graph_nodes', 'entity_mentions', 'entities']) db.exec(`DELETE FROM ${t}`);
+  for (const t of DERIVED_TABLES_CHILDREN_FIRST) db.exec(`DELETE FROM ${t}`);
 }
 
 /**

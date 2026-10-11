@@ -21,7 +21,7 @@
  * bounded by the largest single conversation, not by the database. Message text is never read for that pass (only ids,
  * parent pointers, child lists, kind, hidden flag, timestamps and ordinal).
  *
- * Determinism: sample ids are the lowest ids (plain string order) among the offenders; byCode entries are ordered by
+ * Determinism: sample ids are the lowest ids (Unicode code point order = SQLite BINARY, for SQL- and tree-derived samples alike) among the offenders; byCode entries are ordered by
  * count (descending) then key; nothing depends on the clock, randomness or row order.
  *
  * Model honesty (FR-16): "missing_model" only COUNTS messages whose source gave no model; it never fills one in.
@@ -40,7 +40,8 @@ import { NAMED_CONTENT_TYPES } from '../ingest/chatgpt-export.js';
 // Public types
 // ---------------------------------------------------------------------------------------------------------------
 
-export const AUDIT_CHECKS = [
+/** Frozen: the check allow-list (and the canonical result order) must not be changeable at run time by another module. */
+export const AUDIT_CHECKS = Object.freeze([
   'missing_model',
   'empty',
   'untitled',
@@ -50,7 +51,7 @@ export const AUDIT_CHECKS = [
   'unknown_content_types',
   'timestamps',
   'hidden',
-] as const;
+] as const);
 export type AuditCheck = (typeof AUDIT_CHECKS)[number];
 
 export interface AuditOptions {
@@ -85,7 +86,11 @@ export interface AuditFinding {
 export interface AuditResult {
   scanned: { conversations: number; messages: number };
   findings: AuditFinding[];
-  /** Always present. Computed from the tree pass; see the BRANCH_PROVENANCE_NOT_COMPUTED warning. */
+  /**
+   * Always present. Computed from the tree pass; see the BRANCH_PROVENANCE_NOT_COMPUTED warning. "Known" means the source
+   * gave a VALID active-branch pointer (the complement of the no_current_node finding), even if branch enumeration was
+   * truncated before that branch; "unknown" is exactly the conversations no_current_node flags.
+   */
   branchProvenance: {
     conversationsWithMultipleBranches: number;
     maxBranchesInOneConversation: number;
@@ -104,14 +109,14 @@ export const AUDIT_SAMPLE_DEFAULT = 5;
 export const AUDIT_SAMPLE_MAX = 50;
 
 /** Author roles the importers produce for ChatGPT / Claude conversations. Anything else is "unknown". */
-export const KNOWN_ROLES: readonly string[] = ['user', 'assistant', 'system', 'tool'];
+export const KNOWN_ROLES: readonly string[] = Object.freeze(['user', 'assistant', 'system', 'tool']);
 
 /**
- * `content_type` values the ChatGPT adapter has an explicit handler for. This IS the adapter's own list (imported, so the
- * two cannot drift); the "unknown_content_types" check applies to provider 'chatgpt' only, because other providers use
+ * `content_type` values the ChatGPT adapter has an explicit handler for. A frozen COPY of the adapter's own list (imported, so
+ * the two cannot drift; copied, so freezing it does not touch the adapter's array); the "unknown_content_types" check applies to provider 'chatgpt' only, because other providers use
  * their own vocabulary (the Claude adapter stores no content_type at all).
  */
-export const KNOWN_CHATGPT_CONTENT_TYPES: readonly string[] = NAMED_CONTENT_TYPES;
+export const KNOWN_CHATGPT_CONTENT_TYPES: readonly string[] = Object.freeze([...NAMED_CONTENT_TYPES]);
 
 /** Level used when a check finds something. Count 0 is always reported as 'info'. */
 const SEVERITY_WHEN_FOUND: Readonly<Record<AuditCheck, 'info' | 'warn' | 'error'>> = {
@@ -312,11 +317,33 @@ function toRecord(entries: Iterable<[string, number]>): Record<string, number> {
   return Object.fromEntries(entries);
 }
 
-function mapToSortedEntries(m: Map<string, number>): Array<[string, number]> {
-  return Array.from(m.entries()).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+/**
+ * Orders strings by Unicode CODE POINT, which is exactly SQLite's BINARY collation (UTF-8 byte order). JavaScript's `<`
+ * compares UTF-16 code units and disagrees for an astral character (surrogate pair, U+10000+) against U+E000..U+FFFF, so
+ * "lowest id first" would mean different things for SQL-derived samples and tree-pass samples. Surrogates are remapped
+ * above the rest of the BMP, the standard trick for turning a code unit comparison into a code point comparison.
+ */
+function compareCodePoints(a: string, b: string): number {
+  if (a === b) return 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    let x = a.charCodeAt(i);
+    let y = b.charCodeAt(i);
+    if (x === y) continue;
+    if (x >= 0xd800 && y >= 0xd800) {
+      x = x >= 0xe000 ? x - 0x800 : x + 0x2000;
+      y = y >= 0xe000 ? y - 0x800 : y + 0x2000;
+    }
+    return x < y ? -1 : 1;
+  }
+  return a.length < b.length ? -1 : 1; // a proper prefix is smaller (a !== b, so the lengths differ here)
 }
 
-/** Keeps the `cap` smallest distinct strings seen (plain string order) in O(cap) memory. */
+function mapToSortedEntries(m: Map<string, number>): Array<[string, number]> {
+  return Array.from(m.entries()).sort((a, b) => b[1] - a[1] || compareCodePoints(a[0], b[0]));
+}
+
+/** Keeps the `cap` smallest distinct strings seen (code point order, see compareCodePoints) in O(cap) memory. */
 class SmallestK {
   private readonly cap: number;
   private readonly items: string[] = [];
@@ -328,12 +355,12 @@ class SmallestK {
   add(id: string): void {
     const items = this.items;
     const last = items[items.length - 1];
-    if (items.length >= this.cap && last !== undefined && id >= last) return;
+    if (items.length >= this.cap && last !== undefined && compareCodePoints(id, last) >= 0) return;
     let lo = 0;
     let hi = items.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if ((items[mid] as string) < id) lo = mid + 1;
+      if (compareCodePoints(items[mid] as string, id) < 0) lo = mid + 1;
       else hi = mid;
     }
     if (items[lo] === id) return;
@@ -360,8 +387,24 @@ function inReadSnapshot<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
-function resolveDb(h: DatabaseSync | Repository): DatabaseSync {
-  return 'db' in h ? h.db : h;
+/** A node:sqlite connection, recognised by behaviour (exec/prepare), not by class, so a closed one still passes and reports DB_ERROR later. */
+function isConnection(x: unknown): x is DatabaseSync {
+  if (typeof x !== 'object' || x === null) return false;
+  const c = x as { exec?: unknown; prepare?: unknown };
+  return typeof c.exec === 'function' && typeof c.prepare === 'function';
+}
+
+/**
+ * Accepts the raw connection or a Repository. Anything else (null, a string, `{}`...) is INVALID_ARGUMENT: a raw TypeError
+ * from the `in` operator, or a misleading DB_ERROR for an object that is no database, would break the GcrError contract.
+ */
+function resolveDb(h: unknown): DatabaseSync {
+  if (typeof h === 'object' && h !== null) {
+    const inner = (h as { db?: unknown }).db;
+    if (isConnection(inner)) return inner;
+    if (isConnection(h)) return h;
+  }
+  throw badArg('db', 'expected a DatabaseSync connection or a Repository');
 }
 
 function pct(count: number, total: number): string {
@@ -515,10 +558,14 @@ function treePass(db: DatabaseSync, f: Filters): PassOutcome {
     }
 
     // ---- branch provenance (leafIds lists ALL reachable leaves, even when enumeration was truncated) ----
+    // "Known" = the source gave a VALID active-branch pointer (analyzeTree raised neither NO_CURRENT_NODE nor
+    // INVALID_CURRENT_NODE), i.e. exactly the conversations the no_current_node check does not flag. It must not depend on
+    // `analysis.activeBranchId`: that is null when BRANCH_LIMIT_EXCEEDED stopped enumeration before the active branch,
+    // although the pointer is valid and the branch is known (merely not enumerated).
     const leaves = analysis.leafIds.length;
     if (leaves > 1) out.branch.multiple++;
     if (leaves > out.branch.max) out.branch.max = leaves;
-    if (analysis.activeBranchId !== null) out.branch.known++;
+    if (currentCodes.size === 0) out.branch.known++;
     else out.branch.unknown++;
 
     // ---- timestamps ----

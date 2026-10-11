@@ -476,12 +476,12 @@ describe('buildGraph: privacy and labels', () => {
   it('url secrets never reach any derived table', async () => {
     const { db, repo } = fresh();
     await importAll(repo, [
-      chain('s1', ['open https://alice:hunter2@files.example.com/doc?sig=ZQSECRET99&u=123e4567-e89b-12d3-a456-426614174000#frag99']),
+      chain('s1', ['open https://alice:hunter2@files.example.com/doc?sig=ZQSECRET99&u=00000000-0000-4000-8000-0000000000ab#frag99']),
       chain('s2', ['open https://files.example.com/doc?sig=OTHERSECRET77']),
     ]);
     buildGraph(db, { minEntityConversations: 1 });
     const all = DERIVED.map((t) => JSON.stringify(rows(db, `SELECT * FROM ${t}`))).join('\n').toLowerCase();
-    for (const secret of ['hunter2', 'alice', 'zqsecret99', 'othersecret77', 'frag99', '123e4567']) assert.ok(!all.includes(secret), secret);
+    for (const secret of ['hunter2', 'alice', 'zqsecret99', 'othersecret77', 'frag99', '0000000000ab']) assert.ok(!all.includes(secret), secret);
     assert.ok(all.includes('files.example.com/doc'));
     assert.equal(scalar(db, "SELECT weight AS n FROM graph_nodes WHERE node_id = 'ent:url:files.example.com/doc'"), 2);
   });
@@ -525,6 +525,23 @@ describe('buildGraph: privacy and labels', () => {
     assert.deepEqual(w.ids, ['long-m0']);
     const keywords = rows(db, "SELECT normalized FROM entities WHERE kind = 'keyword'").map((e) => String(e['normalized']));
     assert.deepEqual(keywords, ['alphax', 'betax']);
+  });
+
+  it('also warns when only the extractor cut the text: SQLite counts code points, the extractor UTF-16 units', async () => {
+    const { db, repo } = fresh();
+    // 30 emoji + " alphax" = 37 code points (below the cap of 40 for SQLite) but 67 UTF-16 units (above it for the extractor).
+    await importAll(repo, [chain('astral', [`${'\u{1F600}'.repeat(30)} alphax`])]);
+    const r = buildGraph(db, { maxTextChars: 40, minEntityConversations: 1 });
+    const w = r.warnings.find((x) => x.code === 'TEXT_TRUNCATED_FOR_EXTRACTION');
+    assert.ok(w !== undefined, 'the silent cut must be reported');
+    assert.deepEqual(w.ids, ['astral-m0']);
+    assert.equal(scalar(db, "SELECT count(*) AS n FROM entities WHERE normalized = 'alphax'"), 0, 'the keyword beyond the cap is not extracted');
+    // Negative: with a cap that holds the whole text in both measures nothing is reported.
+    assert.deepEqual(buildGraph(db, { maxTextChars: 80, minEntityConversations: 1 }).warnings, []);
+    // Negative: an astral message that fits under the cap in UTF-16 units does not warn either.
+    const other = fresh();
+    await importAll(other.repo, [chain('short', ['\u{1F600}\u{1F600} alphax'])]);
+    assert.deepEqual(buildGraph(other.db, { maxTextChars: 40, minEntityConversations: 1 }).warnings, []);
   });
 });
 

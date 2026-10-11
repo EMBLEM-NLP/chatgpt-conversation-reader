@@ -18,12 +18,13 @@ import { openDatabase } from '../../src/db/open.js';
 import { Repository } from '../../src/db/repo.js';
 import type { ImportBatchMeta } from '../../src/db/repo.js';
 import type { ConversationRecord } from '../../src/domain/types.js';
+import * as drafts from '../../src/drafts/drafts.js';
 import { LocalStore, verifyAuditLog } from '../../src/drafts/drafts.js';
 import { GcrError } from '../../src/errors.js';
 import { convo, iso, link, linearConversation, msg } from '../helpers/records.js';
 
 const SEED = 20261010;
-const CONV = 'f00dfeed-0000-4000-8000-0000000000b1';
+const CONV = '00000000-0000-4000-8000-0000000000b1';
 const BT = '`';
 
 const META: ImportBatchMeta = {
@@ -138,15 +139,40 @@ describe('SQL injection: every text field is data', () => {
     assert.deepEqual(db.prepare("SELECT name FROM sqlite_schema WHERE name LIKE '%evil%'").all(), []);
   });
 
-  it('namespace and kind (pattern-validated) reject every payload; nothing is stored', async () => {
+  it('namespace and kind are accepted exactly when they match the SPEC patterns: hostile payloads are refused, and a payload that happens to be a legal token is plain data', async () => {
+    // The SPEC patterns, restated here independently of the implementation so this is a real oracle, not a tautology.
+    const NAMESPACE_SPEC = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+    const KIND_SPEC = /^[a-z][a-z0-9_]{0,31}$/;
     const { db, store } = await memEnv();
+    const schemaBefore = schemaHash(db);
+    const nsLegal = SQL_PAYLOADS.filter((p) => NAMESPACE_SPEC.test(p));
+    const kindLegal = SQL_PAYLOADS.filter((p) => KIND_SPEC.test(p));
+    // Non-vacuity: the oracle must be exercised in BOTH directions (the hex-looking payload IS a legal namespace).
+    assert.ok(nsLegal.includes('0x41424344'), 'the list contains a payload that is a legal namespace');
+    assert.ok(nsLegal.length < SQL_PAYLOADS.length / 2, 'and most payloads are not');
+
     for (const p of SQL_PAYLOADS) {
-      assert.throws(() => store.createDraft({ conversationRef: { conversationId: CONV }, body: 'x', namespace: p }), code('INVALID_ARGUMENT'));
-      assert.throws(() => store.createAnnotation({ conversationRef: { conversationId: CONV }, body: 'x', kind: p }), code('INVALID_ARGUMENT'));
-      assert.throws(() => store.listDrafts({ namespace: p }), code('INVALID_ARGUMENT'));
-      assert.throws(() => store.listAnnotations({ kind: p }), code('INVALID_ARGUMENT'));
+      if (NAMESPACE_SPEC.test(p)) {
+        const d = store.createDraft({ conversationRef: { conversationId: CONV }, body: 'x', namespace: p });
+        assert.equal(d.namespace, p, 'a legal token is stored verbatim');
+        assert.equal(store.listDrafts({ namespace: p }).total, 1, 'and lists only itself');
+      } else {
+        assert.throws(() => store.createDraft({ conversationRef: { conversationId: CONV }, body: 'x', namespace: p }), code('INVALID_ARGUMENT'), JSON.stringify(p));
+        assert.throws(() => store.listDrafts({ namespace: p }), code('INVALID_ARGUMENT'), JSON.stringify(p));
+      }
+      if (KIND_SPEC.test(p)) {
+        assert.equal(store.createAnnotation({ conversationRef: { conversationId: CONV }, body: 'x', kind: p }).kind, p);
+        assert.equal(store.listAnnotations({ kind: p }).total, 1);
+      } else {
+        assert.throws(() => store.createAnnotation({ conversationRef: { conversationId: CONV }, body: 'x', kind: p }), code('INVALID_ARGUMENT'), JSON.stringify(p));
+        assert.throws(() => store.listAnnotations({ kind: p }), code('INVALID_ARGUMENT'), JSON.stringify(p));
+      }
     }
-    assert.equal(count(db, 'local_drafts') + count(db, 'local_annotations') + count(db, 'local_audit_log'), 0);
+    assert.equal(count(db, 'local_drafts'), nsLegal.length, 'only the legal namespaces produced a draft');
+    assert.equal(count(db, 'local_annotations'), kindLegal.length, 'only the legal kinds produced an annotation');
+    assert.equal(count(db, 'local_audit_log'), nsLegal.length + kindLegal.length, 'a refused call leaves no audit row');
+    assert.equal(schemaHash(db), schemaBefore, 'no payload executed as SQL');
+    assert.deepEqual(verifyAuditLog(db), { rows: nsLegal.length + kindLegal.length, ok: true });
   });
 
   it('payloads in ids, refs and anchors only ever MISS: they are looked up as literal values, never interpreted', async () => {
@@ -263,9 +289,13 @@ describe('NUL bytes and lone surrogates', () => {
 
 // ===================================================================================================================
 interface ParsedDoc {
+  /** ATX headings that a markdown reader would see: lines OUTSIDE the fenced block only (inside it they are literal text). */
   headings: string[];
+  /** Lines before the opening fence (the provenance header). */
+  header: string[];
   fence: string;
   info: string;
+  /** What a CommonMark reader sees as the code block's content: every line between the fences, each followed by a line ending. */
   content: string;
   trailing: string[];
 }
@@ -273,11 +303,11 @@ interface ParsedDoc {
 /**
  * A minimal CommonMark fenced-code-block reader for the document renderDraftMarkdown produces. It follows the real
  * rules: the opening fence is 3+ backticks (info string without backticks); a closing fence is up to 3 spaces of
- * indent, at least as many backticks as the opener, and nothing but whitespace after them.
+ * indent, at least as many backticks as the opener, and nothing but whitespace after them. Lines are split at "\n" only;
+ * a consumer that also treats CR as a line ending is covered by `parseDraftDocCr` below.
  */
 function parseDraftDoc(md: string): ParsedDoc {
   const lines = md.split('\n');
-  const headings = lines.filter((l) => /^#{1,6}( |$)/.test(l));
   const bodyHeading = lines.indexOf('## Draft body');
   assert.ok(bodyHeading >= 0, 'has the body heading');
   const openIdx = bodyHeading + 2;
@@ -294,7 +324,41 @@ function parseDraftDoc(md: string): ParsedDoc {
   }
   assert.ok(closeIdx > openIdx, 'a closing fence exists');
   assert.equal(lines[closeIdx], fence, 'the closer is exactly the opener');
-  return { headings, fence, info: open[2] ?? '', content: lines.slice(openIdx + 1, closeIdx).join('\n'), trailing: lines.slice(closeIdx + 1) };
+  const header = lines.slice(0, openIdx);
+  const trailing = lines.slice(closeIdx + 1);
+  // A heading is an ATX heading (up to 3 spaces of indent) that is NOT part of the code block. The body lines between
+  // the fences are deliberately excluded: `# x` inside a fence is text, and counting it would test the wrong thing.
+  const headings = [...header, ...trailing].filter((l) => /^ {0,3}#{1,6}( |$)/.test(l));
+  const content = lines
+    .slice(openIdx + 1, closeIdx)
+    .map((l) => `${l}\n`)
+    .join('');
+  return { headings, header, fence, info: open[2] ?? '', content, trailing };
+}
+
+/** The same reader for a consumer that treats CR and CRLF as line endings too (CommonMark does). */
+function parseDraftDocCr(md: string): ParsedDoc {
+  return parseDraftDoc(md.replace(/\r\n?/g, '\n'));
+}
+
+/** A code block's content always ends with a line ending, so that is what a faithful rendering of `body` looks like. */
+function asBlockContent(body: string): string {
+  return body.endsWith('\n') ? body : `${body}\n`;
+}
+
+/**
+ * Recover the stored body from a rendering ALONE: the block content, minus the one line ending the block adds if the body
+ * had none. The header's sha256 decides which of the two candidates it was, so the view plus its header pin the body down
+ * exactly (and a rendering that altered any character would match neither candidate).
+ */
+function bodyFromRendering(doc: ParsedDoc): string {
+  const line = doc.header.find((l) => l.startsWith('- Body: ')) ?? '';
+  const m = /^- Body: (\d+) bytes, sha256 ` ([0-9a-f]{64}) `$/.exec(line);
+  assert.ok(m, `header carries the body size and hash: ${JSON.stringify(line)}`);
+  const candidates = [doc.content, doc.content.slice(0, -1)];
+  const hit = candidates.filter((c) => sha(c) === m[2] && Buffer.byteLength(c, 'utf8') === Number(m[1]));
+  assert.equal(hit.length >= 1, true, 'the rendered block reproduces the advertised body (size and sha256)');
+  return hit[0] ?? '';
 }
 
 function longestRun(s: string, ch: string): number {
@@ -340,14 +404,23 @@ describe('renderDraftMarkdown: fence and header injection', () => {
     const { store } = await memEnv();
     for (const [name, body] of ATTACKS) {
       const d = store.createDraft({ conversationRef: { conversationId: CONV }, body });
-      const doc = parseDraftDoc(store.renderDraftMarkdown(d.draftId));
+      const md = store.renderDraftMarkdown(d.draftId);
+      const doc = parseDraftDoc(md);
       const stored = body.replaceAll('\0', '');
       assert.ok(doc.fence.length >= 3, name);
       assert.ok(doc.fence.length > longestRun(stored, BT), `${name}: fence ${doc.fence.length} vs run ${longestRun(stored, BT)}`);
-      assert.equal(doc.content, stored, `${name}: body preserved exactly`);
+      assert.equal(doc.content, asBlockContent(stored), `${name}: body preserved exactly (a code block adds only its final line ending)`);
+      assert.equal(bodyFromRendering(doc), stored, `${name}: the stored body is recoverable from the rendering, character for character`);
       assert.equal(doc.info, 'text', `${name}: the block is declared as plain text`);
       assert.deepEqual(doc.trailing, [''], `${name}: nothing follows the closing fence but the final newline`);
-      assert.deepEqual(doc.headings, ['# GCR local draft (not sent)', '## Draft body'], `${name}: no injected heading (hence no heading from the body)`);
+      // Headings are judged OUTSIDE the block: a "# Pwned heading" line inside the fence is inert text, which is the point.
+      assert.deepEqual(doc.headings, ['# GCR local draft (not sent)', '## Draft body'], `${name}: no heading outside the fence except the two we write`);
+      // A consumer that also splits lines at CR must reach the same conclusions (the CRLF / lone-CR attacks).
+      const cr = parseDraftDocCr(md);
+      assert.equal(cr.fence, doc.fence, `${name}: same fence when CR is a line ending`);
+      assert.equal(cr.content, asBlockContent(stored).replace(/\r\n?/g, '\n'), `${name}: same content when CR is a line ending`);
+      assert.deepEqual(cr.trailing, [''], `${name}: nothing follows the closing fence when CR is a line ending`);
+      assert.deepEqual(cr.headings, doc.headings, `${name}: no heading appears when CR is a line ending`);
     }
   });
 
@@ -358,11 +431,16 @@ describe('renderDraftMarkdown: fence and header injection', () => {
       fc.asyncProperty(fc.array(piece, { minLength: 1, maxLength: 24 }), async (parts) => {
         const body = parts.join('');
         const d = store.createDraft({ conversationRef: { conversationId: CONV }, body });
-        const doc = parseDraftDoc(store.renderDraftMarkdown(d.draftId));
-        assert.equal(doc.content, body);
+        const md = store.renderDraftMarkdown(d.draftId);
+        const doc = parseDraftDoc(md);
+        assert.equal(doc.content, asBlockContent(body));
+        assert.equal(bodyFromRendering(doc), body);
         assert.ok(doc.fence.length > longestRun(body, BT));
         assert.deepEqual(doc.trailing, ['']);
         assert.deepEqual(doc.headings, ['# GCR local draft (not sent)', '## Draft body']);
+        const cr = parseDraftDocCr(md);
+        assert.equal(cr.content, asBlockContent(body).replace(/\r\n?/g, '\n'));
+        assert.deepEqual(cr.headings, doc.headings);
       }),
       { seed: SEED, numRuns: 300 },
     );
@@ -532,6 +610,11 @@ describe('source-level boundary: src/drafts/*.ts cannot touch the network, spawn
       if (re.test(src)) findings.push({ kind: 'module-name', detail: name });
     }
     if (/\bimport\s*\(\s*[^'"`\s)]/.test(src)) findings.push({ kind: 'dynamic-import', detail: 'non-literal import()' });
+    // Sending vocabulary: a quoted standalone sending word (a would-be status value such as 'sent' / "SENT" / `sending`), or a
+    // call to a function named like a sender. User-facing sentences ("GCR never sends messages ...") are longer than the word
+    // alone, so they do not match; the module's own comments are reworded to avoid the quoted form instead of exempting them.
+    if (/(['"`])\s*(?:sent|sending|sends|send)\s*\1/i.test(src)) findings.push({ kind: 'sending-literal', detail: 'quoted sending word' });
+    if (/\b(?:send|post|publish|transmit|dispatch|upload|deliver|submit|broadcast)[A-Z]\w*\s*\(/.test(src)) findings.push({ kind: 'sending-call', detail: 'function named like a sender' });
     if (/\brequire\b(?!\s*\(\s*['"`])/.test(src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, ''))) findings.push({ kind: 'require', detail: 'bare or dynamic require' });
     const idents: Array<[RegExp, string]> = [
       [/\bfetch\s*\(/, 'fetch('],
@@ -584,11 +667,97 @@ describe('source-level boundary: src/drafts/*.ts cannot touch the network, spawn
     assert.match(src, /clock \?\? \(\(\) => new Date\(\)\.toISOString\(\)\)|\?\? \(\(\) => new Date\(\)\.toISOString\(\)\)/);
   });
 
-  it('there is no "sent" status literal or sending verb anywhere in the code', () => {
+  it('there is no sent-style status literal (any case, any quote) or sender-named call anywhere in src/drafts, comments included', () => {
+    for (const f of files) {
+      const src = readFileSync(join(SRC_DIR, f), 'utf8');
+      assert.ok(!/(['"`])\s*(?:sent|sending|sends|send)\s*\1/i.test(src), `${f}: no quoted sending word`);
+      assert.ok(!/\b(?:send|post|publish|transmit|dispatch|upload|deliver|submit|broadcast)[A-Z]\w*\s*\(/.test(src), `${f}: no sending-style function names`);
+    }
     const src = readFileSync(join(SRC_DIR, 'drafts.ts'), 'utf8');
-    assert.ok(!/['"`]sent['"`]/.test(src), "no 'sent' literal");
-    assert.ok(!/\b(send|post|publish|transmit|dispatch|upload)[A-Z]\w*\s*\(/.test(src), 'no sending-style function names');
-    assert.match(src, /status IN \('draft','archived'\)|DRAFT_STATUSES: readonly DraftStatus\[\] = \['draft', 'archived'\]/);
+    assert.match(src, /DRAFT_STATUSES: readonly DraftStatus\[\] = \['draft', 'archived'\]/, 'the two statuses are spelled out exactly once');
+    assert.match(src, /export type DraftStatus = 'draft' \| 'archived';/);
+  });
+
+  /** The argument text of every `.prepare(...)` call, found with a paren matcher that is aware of quotes and escapes. */
+  function prepareArguments(src: string): string[] {
+    const out: string[] = [];
+    for (const m of src.matchAll(/\bprepare\s*\(/g)) {
+      let i = (m.index ?? 0) + m[0].length;
+      const start = i;
+      let depth = 1;
+      let quote: string | null = null;
+      for (; i < src.length && depth > 0; i++) {
+        const c = src[i];
+        if (quote !== null) {
+          if (c === '\\') i++;
+          else if (c === quote) quote = null;
+        } else if (c === "'" || c === '"' || c === '`') quote = c;
+        else if (c === '(') depth++;
+        else if (c === ')') depth--;
+      }
+      out.push(src.slice(start, i - 1));
+    }
+    return out;
+  }
+
+  /** The only statements allowed to contain a `${...}` substitution: the two pager statements (fragments are allow-listed at run time). */
+  const ALLOWED_TEMPLATED_SQL: ReadonlySet<string> = new Set([
+    '`SELECT count(*) AS n FROM ${table}${where}`',
+    '`SELECT * FROM ${table}${where} ${PAGE_ORDER} LIMIT ? OFFSET ?`',
+  ]);
+
+  /** Findings for SQL text that is not a plain literal (or a concatenation of plain literals). */
+  function sqlAssemblyFindings(src: string): string[] {
+    const bad: string[] = [];
+    for (const arg of prepareArguments(src)) {
+      // One trailing comma is formatting (multi-line call); any other comma would be a second argument and is flagged below.
+      const trimmed = arg.trim().replace(/,$/, '').trim();
+      if (trimmed.includes('${')) {
+        if (!ALLOWED_TEMPLATED_SQL.has(trimmed)) bad.push(`interpolated SQL: ${trimmed.slice(0, 60)}`);
+        continue;
+      }
+      // Remove every complete string literal; whatever is left may only be '+' (concatenating literals) and whitespace.
+      const rest = trimmed.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\])*`/g, '').replace(/[+\s]/g, '');
+      if (rest !== '') bad.push(`non-literal SQL: ${trimmed.slice(0, 60)}`);
+    }
+    return bad;
+  }
+
+  it('SQL text is assembled in exactly one place (the allow-listed pager); every other statement is a plain literal with bound parameters', () => {
+    for (const f of files) {
+      const src = readFileSync(join(SRC_DIR, f), 'utf8');
+      assert.deepEqual(sqlAssemblyFindings(src), [], f);
+      assert.ok(prepareArguments(src).length >= 12, 'the scan actually found the statements');
+    }
+    const src = readFileSync(join(SRC_DIR, 'drafts.ts'), 'utf8');
+    // The pager re-validates its fragments at run time; assert the allow-lists are really there and consulted.
+    assert.match(src, /PAGED_TABLES\.has\(table\)/);
+    assert.match(src, /conds\.every\(\(c\) => PAGE_CONDITIONS\.has\(c\)\)/);
+    // No string-built SQL helper anywhere: nothing may exec() anything but fixed text.
+    assert.ok(!/\.exec\(\s*[^'"`\s]/.test(src), 'db.exec is only ever called with a literal');
+    // self-test of the matcher: planted violations are found, ordinary statements are not
+    assert.deepEqual(sqlAssemblyFindings("db.prepare('SELECT 1 FROM t WHERE a = ?').get(x);"), []);
+    assert.deepEqual(sqlAssemblyFindings("db.prepare('SELECT ' + 'a ' + \"FROM t\").get();"), []);
+    assert.equal(sqlAssemblyFindings("db.prepare('SELECT * FROM t WHERE a = ' + value).get();").length, 1);
+    assert.equal(sqlAssemblyFindings('db.prepare(`SELECT * FROM t WHERE a = ${value}`).get();').length, 1);
+    assert.equal(sqlAssemblyFindings('db.prepare(`SELECT count(*) AS n FROM ${table}${where}`).get();').length, 0, 'the approved pager statement');
+    assert.deepEqual(sqlAssemblyFindings("db.prepare(\n  'INSERT INTO t (a, b) ' +\n    'VALUES (?, ?)',\n).run(1, 2);"), [], 'multi-line literal concatenation with a trailing comma');
+    assert.equal(sqlAssemblyFindings("db.prepare('SELECT 1', extra).get();").length, 1, 'a second argument is not a plain literal');
+    assert.equal(sqlAssemblyFindings("db.prepare(sql).all();").length, 1);
+    assert.equal(sqlAssemblyFindings("db.prepare(['SELECT', name].join(' ')).all();").length, 1);
+  });
+
+  it('no exported name and no method of LocalStore (private ones included) is named like a sender', () => {
+    const SENDER_WORDS = new Set(['send', 'sends', 'sending', 'sent', 'transmit', 'transmits', 'transmitted', 'publish', 'published', 'dispatch', 'dispatched', 'upload', 'uploaded', 'deliver', 'delivered', 'delivery', 'submit', 'submitted', 'broadcast']);
+    // camelCase / snake_case / SCREAMING_CASE -> lower-case words
+    const wordsOf = (name: string): string[] => name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[^A-Za-z0-9]+/).map((w) => w.toLowerCase()).filter((w) => w !== '');
+    const names = [...Object.keys(drafts), ...Object.getOwnPropertyNames(LocalStore.prototype)];
+    assert.ok(names.includes('LocalStore') && names.includes('createDraft') && names.includes('verifyAuditLog'), 'the check sees the real API');
+    for (const n of names) assert.deepEqual(wordsOf(n).filter((w) => SENDER_WORDS.has(w)), [], `name ${n}`);
+    // self-test of the word splitter
+    assert.deepEqual(wordsOf('sendDraft'), ['send', 'draft']);
+    assert.deepEqual(wordsOf('MAX_SENT_AT'), ['max', 'sent', 'at']);
+    assert.deepEqual(wordsOf('consentGiven'), ['consent', 'given'], 'a word that merely contains "sent" is not a sender word');
   });
 
   it('SELF-TEST of the scanner: it flags planted violations and accepts clean code (no vacuous pass)', () => {
@@ -608,9 +777,18 @@ describe('source-level boundary: src/drafts/*.ts cannot touch the network, spawn
       ["// import('node:http') hidden after a comment marker\nconst u = 'https://x.invalid'; import('node:dns');", 'dns'],
       ['eval(code);', 'eval'],
       ['new Function("return 1")();', 'Function'],
+      ["export type S = 'draft' | 'sent';", 'sent literal'],
+      ['const status = "SENT";', 'SENT literal, double quotes'],
+      ['const s = `sending`;', 'sending template literal'],
+      ["const s = ' Sent ';", 'padded and capitalised'],
+      ['sendDraft(id);', 'sender call'],
+      ['await publishMessage (x);', 'publish call'],
     ];
     for (const [src, label] of bad) assert.ok(scan(src).length > 0, `not flagged: ${label}: ${src}`);
     const clean = "import { createHash } from 'node:crypto';\nimport type { DatabaseSync } from 'node:sqlite';\nimport { GcrError } from '../errors.js';\nexport const x = 1;\n";
     assert.deepEqual(scan(clean), []);
+    // User-facing sentences and ordinary words around the sending vocabulary are NOT findings (no false positives).
+    const sentences = "const note = 'GCR never sends messages; open this link yourself';\nconst h = '# GCR local draft (not sent)';\nconst present = 'SELECT 1 AS present';\nconst consent = 1;\nconst arr = []; arr.push(1);\n";
+    assert.deepEqual(scan(sentences), []);
   });
 });

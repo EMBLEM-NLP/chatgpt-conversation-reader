@@ -14,7 +14,8 @@
  *                     look-alikes), userinfo, explicit port, any path other than `/c/<segment>[/]`, extra path segments /
  *                     dot segments after `/c/`
  *   INVALID_UUID      the URL shape is right but the single `/c/<segment>` is not a UUID (wrong length, non-hex, ...);
- *                     also used for a bare string that is not a UUID
+ *                     also used for a bare string that is not a UUID (parseConversationRef), including one longer than
+ *                     2048 characters (reason `too_long`; text that starts with a scheme is INVALID_URL `too_long` instead)
  *
  * Error messages and `details` NEVER echo the input (it is untrusted and may carry text meant for an LLM reader).
  */
@@ -200,12 +201,22 @@ export function parseChatGptUrl(input: string): ParsedChatGptUrl {
  * A bare UUID or a chatgpt.com link. Anything that starts with a URL scheme (`<scheme>:`, so also `http:`, `ftp:`,
  * `javascript:`) is treated as a URL and must pass parseChatGptUrl (giving UNSUPPORTED_URL for non-https schemes);
  * everything else must be a bare UUID (surrounding ASCII whitespace trimmed) or INVALID_UUID is thrown.
+ *
+ * The same 2048-character bound as parseChatGptUrl applies to EVERY input, and it is enforced before any linear scan
+ * (only the first 2048 characters are ever inspected to classify the input), so a hostile multi-megabyte string costs
+ * O(1) and a UUID padded with endless whitespace is refused. Over-long URL-looking text is INVALID_URL (reason
+ * `too_long`, from parseChatGptUrl); over-long text that does not start with a scheme cannot be a UUID: INVALID_UUID
+ * (reason `too_long`).
  */
 export function parseConversationRef(input: string): ParsedConversationRef {
   if (typeof input !== 'string') fail('INVALID_ARGUMENT', 'The conversation reference must be a string.', 'not_a_string');
-  if (LEADING_SCHEME_RE.test(input)) {
-    const { conversationId, canonicalUrl } = parseChatGptUrl(input);
+  const tooLong = input.length > MAX_URL_LENGTH;
+  if (LEADING_SCHEME_RE.test(tooLong ? input.slice(0, MAX_URL_LENGTH) : input)) {
+    const { conversationId, canonicalUrl } = parseChatGptUrl(input); // throws INVALID_URL/too_long for an over-long input
     return { conversationId, viaUrl: true, canonicalUrl };
+  }
+  if (tooLong) {
+    fail('INVALID_UUID', `The reference is longer than ${MAX_URL_LENGTH} characters, so it cannot be a UUID.`, 'too_long', { maxLength: MAX_URL_LENGTH, length: input.length });
   }
   return { conversationId: normalizeUuid(trimAsciiWhitespace(input)), viaUrl: false };
 }

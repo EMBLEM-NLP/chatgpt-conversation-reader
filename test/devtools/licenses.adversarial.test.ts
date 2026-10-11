@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { cp, copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, copyFile, mkdir, mkdtemp, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -375,6 +375,403 @@ describe('scripts/licenses.mjs: hostile package metadata cannot write to the ter
       assert.equal(r.stdout.includes('\u001b'), false, 'JSON output must not contain raw ESC');
       const data = JSON.parse(r.stdout) as { packages: Array<{ version: string }> };
       assert.equal(data.packages[0]?.version, `1.0.0${evil}`);
+    });
+  });
+});
+
+// ===================================================================================================
+// Second adversarial pass (continuation of the review above).
+// ===================================================================================================
+
+describe('adversarial: non-SPDX strings joined by any separator are checked word by word', () => {
+  const restricted: ReadonlyArray<readonly [string, string]> = [
+    ['MIT|GPL-3.0', 'GPL'],
+    ['MIT&GPL-3.0', 'GPL'],
+    ['MIT+GPL-3.0', 'GPL'],
+    ['"GPL-3.0"', 'GPL'],
+    ["'LGPL-2.1'", 'LGPL'],
+    ['[GPL-3.0]', 'GPL'],
+    ['{AGPL-3.0}', 'AGPL'],
+    ['<AGPL-3.0>', 'AGPL'],
+    ['MIT:GPL-3.0', 'GPL'],
+    ['MIT\\GPL-3.0', 'GPL'],
+    ['MIT​GPL-3.0', 'GPL'],
+    ['Apache-2.0|SSPL-1.0', 'SSPL'],
+    ['ISC&BUSL-1.1', 'BUSL'],
+  ];
+  for (const [license, family] of restricted) {
+    it(`${JSON.stringify(license)} is ${family}`, () => {
+      assert.equal(nonPermissiveFamily(license), family);
+    });
+  }
+  for (const license of ['MIT|Apache-2.0', 'MIT&ISC', 'MIT+', 'BSD-2-Clause+', '"MIT"', '[Apache-2.0]', 'MIT:ISC']) {
+    it(`${JSON.stringify(license)} is not flagged`, () => {
+      assert.equal(nonPermissiveFamily(license), null);
+    });
+  }
+});
+
+describe('adversarial: spellings of "unlicensed" and custom references', () => {
+  for (const [license, family] of [
+    ['UNLICENCED', 'UNLICENSED'],
+    ['unlicenced', 'UNLICENSED'],
+    ['UNLICENSED', 'UNLICENSED'],
+    ['DocumentRef-tool-1.2:LicenseRef-Proprietary', 'custom license reference'],
+    ['LicenseRef-Proprietary', 'custom license reference'],
+    ['MIT AND DocumentRef-x:LicenseRef-y', 'custom license reference'],
+  ] as const) {
+    it(`${license} is ${family}`, () => {
+      assert.equal(nonPermissiveFamily(license), family);
+    });
+  }
+  it('Unlicense (the public-domain dedication) is not "unlicensed"', () => {
+    assert.equal(nonPermissiveFamily('Unlicense'), null);
+  });
+});
+
+describe('adversarial: the party-name slots of a BSD text cannot carry a condition', () => {
+  const head = `Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+`;
+  const endorsement = (name: string): string =>
+    `\n3. Neither the name of ${name} nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.\n`;
+  const disclaimer = (name: string): string => `
+THIS SOFTWARE IS PROVIDED BY ${name} "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL ${name} BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+`;
+  const bsd2 = (name: string): string => `Copyright (c) 2020 Example Holder\n\n${head}${disclaimer(name)}`;
+  const bsd3 = (endorsed: string, name: string): string => `Copyright (c) 2020 Example Holder\n\n${head}${endorsement(endorsed)}${disclaimer(name)}`;
+
+  for (const name of ['THE COPYRIGHT HOLDER', 'THE REGENTS OF THE UNIVERSITY OF CALIFORNIA', 'XEROX PALO ALTO RESEARCH CENTER', 'MICROSOFT RESEARCH', 'THE AUTHOR(S)', 'EXAMPLE HOLDER, INC.']) {
+    it(`ordinary party name still classifies: ${name}`, () => {
+      assert.equal(classifyLicenseText(bsd2(name)), 'BSD-2-Clause');
+      assert.equal(classifyLicenseText(bsd3(name.toLowerCase(), name)), 'BSD-3-Clause');
+    });
+  }
+  for (const condition of [
+    'the author but commercial use requires a paid license',
+    'the author except for commercial use',
+    'the author unless a fee is paid',
+    'the author for non-commercial purposes only',
+    'the author but no military use',
+    'the author, redistribution prohibited',
+  ]) {
+    it(`a condition in the disclaimer slot is not a name: ${condition}`, () => {
+      assert.equal(classifyLicenseText(bsd2(condition.toUpperCase())), null);
+      assert.equal(classifyLicenseText(bsd3('the author', condition.toUpperCase())), null);
+    });
+    it(`a condition in the endorsement slot is not a name: ${condition}`, () => {
+      assert.equal(classifyLicenseText(bsd3(condition, 'THE AUTHOR')), null);
+    });
+  }
+  it('collectLicenses reports such a package as unknown', async () => {
+    await withTempDir(async (dir) => {
+      await makeProject(dir, [{ key: 'node_modules/a', manifest: manifestOf('a', {}), files: { LICENSE: bsd2('THE AUTHOR BUT COMMERCIAL USE REQUIRES A PAID LICENSE') } }]);
+      assert.equal(only(await collectLicenses(dir), 'a').source, 'unknown');
+    });
+  });
+});
+
+/** The unmodified text, as published by the Apache Software Foundation (identical in 40 of the 46 copies found on the review machine). */
+const APACHE_2_0 = `                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+`;
+
+describe('adversarial: Apache-2.0 is recognised only when the whole text is unmodified', () => {
+  const body = APACHE_2_0.slice(0, APACHE_2_0.indexOf('APPENDIX: How to apply'));
+  /** TypeScript ships the same text without the (a)-(d) list markers of section 4 and without the appendix. */
+  const markerless = body.replace(/^(\s*)\([a-d]\) /gm, '$1');
+  const filledAppendix = APACHE_2_0.replace('Copyright [yyyy] [name of copyright owner]', 'Copyright 2020 Example Holder, Inc.');
+  /** The layout Playwright ships: notice lines in place of the placeholder. */
+  const portionsAppendix = APACHE_2_0.replace('Copyright [yyyy] [name of copyright owner]', 'Portions Copyright (c) Example Corporation.\n   Portions Copyright 2017 Other Inc.');
+
+  it('the genuine text classifies, in every layout it is found in', () => {
+    assert.equal(classifyLicenseText(APACHE_2_0), 'Apache-2.0');
+    assert.equal(classifyLicenseText(APACHE_2_0.replace(/\n/g, '\r\n')), 'Apache-2.0');
+    assert.equal(classifyLicenseText(`﻿${APACHE_2_0}`), 'Apache-2.0');
+    assert.equal(classifyLicenseText(body), 'Apache-2.0');
+    assert.equal(classifyLicenseText(markerless), 'Apache-2.0');
+    assert.equal(classifyLicenseText(filledAppendix), 'Apache-2.0');
+    assert.equal(classifyLicenseText(portionsAppendix), 'Apache-2.0');
+    assert.equal(classifyLicenseText(APACHE_2_0.replace(/^ +/gm, '').replace(/\n(?!\n)/g, ' ')), 'Apache-2.0');
+  });
+
+  const modified: ReadonlyArray<readonly [string, string]> = [
+    ['a sentence added to section 2', APACHE_2_0.replace('2. Grant of Copyright License.', '2. Grant of Copyright License. Commercial use requires a paid license.')],
+    ['a sentence added to section 4', APACHE_2_0.replace('4. Redistribution.', '4. Redistribution. Redistribution is prohibited.')],
+    ['a sentence added just before the end marker', APACHE_2_0.replace('END OF TERMS AND CONDITIONS', 'Use by competitors is not permitted.\n\n   END OF TERMS AND CONDITIONS')],
+    ['one word changed (perpetual -> revocable)', APACHE_2_0.replace('perpetual,', 'revocable,')],
+    ['the trademark clause inverted', APACHE_2_0.replace('This License does not grant permission', 'This License grants permission')],
+    ['a clause deleted (the warranty disclaimer title)', APACHE_2_0.replace('7. Disclaimer of Warranty.', '')],
+    ['text after the appendix', `${APACHE_2_0}\n   Additional term: commercial use is prohibited.\n`],
+    ['text appended to the appendix boilerplate', APACHE_2_0.replace('limitations under the License.', 'limitations under the License. Commercial use prohibited.')],
+    ['the appendix boilerplate altered', APACHE_2_0.replace('you may not use this file except in compliance with the License.', 'you may not use this file except for personal use.')],
+    ['a condition in the appendix copyright notice', APACHE_2_0.replace('Copyright [yyyy] [name of copyright owner]', 'Copyright 2020 Example Holder. Commercial use requires a paid license.')],
+    ['an appendix without any copyright notice', APACHE_2_0.replace('Copyright [yyyy] [name of copyright owner]', 'See the website.')],
+    ['text after the end marker that is not the appendix', `${body}\n   Additional term: commercial use is prohibited.\n`],
+    ['a copyright line before the header', `Copyright 2020 Example Holder\n\n${APACHE_2_0}`],
+    ['a restriction before the header', `Commons Clause: no selling.\n\n${APACHE_2_0}`],
+    ['the Apache 1.1 header on the 2.0 body', APACHE_2_0.replace('Version 2.0, January 2004', 'Version 1.1, January 2004')],
+  ];
+  for (const [name, text] of modified) {
+    it(`unclassified: ${name}`, () => {
+      assert.notEqual(text, APACHE_2_0, 'the fixture edit did not apply');
+      assert.equal(classifyLicenseText(text), null);
+    });
+  }
+
+  it('collectLicenses reports a package whose license file is a modified Apache text as unknown', async () => {
+    await withTempDir(async (dir) => {
+      await makeProject(dir, [
+        { key: 'node_modules/ok', manifest: manifestOf('ok', {}), files: { LICENSE: APACHE_2_0 } },
+        { key: 'node_modules/bad', manifest: manifestOf('bad', {}), files: { LICENSE: `${APACHE_2_0}\n   Additional term: commercial use is prohibited.\n` } },
+      ]);
+      const result = await collectLicenses(dir);
+      assert.deepEqual([only(result, 'ok').license, only(result, 'ok').source], ['Apache-2.0', 'license-file']);
+      assert.equal(only(result, 'bad').source, 'unknown');
+    });
+  });
+});
+
+describe('adversarial: package metadata cannot inject markdown links, images or HTML into the report', () => {
+  const evil = '![x](https://tracker.invalid/p.gif)<img src=x onerror=alert(1)>[y](javascript:alert(1))<https://autolink.invalid>';
+  it('brackets and angle brackets from the name, version and license are escaped in every table and list', async () => {
+    await withTempDir(async (dir) => {
+      await makeProject(dir, [
+        { key: 'node_modules/a', lock: { name: `a${evil}` }, manifest: manifestOf('a', { version: `1.0.0${evil}`, license: `MIT${evil}` }) },
+        { key: 'node_modules/b', manifest: manifestOf('b', {}) },
+      ]);
+      const report = formatLicenseReport(await collectLicenses(dir));
+      assert.equal(/(?<!\\)[\[\]<>]/.test(report), false, `unescaped markup characters in:\n${report}`);
+      assert.ok(report.includes('!\\[x\\](https://tracker.invalid'), 'the text itself is still shown, escaped, not dropped');
+    });
+  });
+  it('the same holds for the entry of a restricted license, which is printed in a list item', async () => {
+    await withTempDir(async (dir) => {
+      await makeProject(dir, [{ key: 'node_modules/a', manifest: manifestOf('a', { license: `GPL-3.0-only ${evil}` }) }]);
+      const report = formatLicenseReport(await collectLicenses(dir));
+      const restrictedLine = report.split('\n').find((l) => l.startsWith('- **a@'));
+      assert.ok(restrictedLine !== undefined, report);
+      // the only unescaped brackets on that line are the family tag that the report itself writes: [GPL]
+      assert.equal(restrictedLine.replace('[GPL]', '').match(/(?<!\\)[\[\]<>]/), null, restrictedLine);
+    });
+  });
+});
+
+describe('adversarial: an absurdly large package-lock.json is refused before it is read', () => {
+  it('reports a clear error instead of loading hundreds of megabytes into memory', async () => {
+    await withTempDir(async (dir) => {
+      const lock = join(dir, 'package-lock.json');
+      await writeFile(lock, '');
+      await truncate(lock, 128 * 1024 * 1024 + 1); // sparse: no disk is used
+      await assert.rejects(collectLicenses(dir), (e: unknown) => e instanceof Error && /too large/i.test(e.message) && 'code' in e && e.code === 'INVALID_ARGUMENT');
+    });
+  });
+  it('a lockfile of ordinary size is unaffected', async () => {
+    await withTempDir(async (dir) => {
+      await makeProject(dir, [{ key: 'node_modules/a', manifest: manifestOf('a', { license: 'MIT' }) }]);
+      assert.equal(only(await collectLicenses(dir), 'a').license, 'MIT');
     });
   });
 });

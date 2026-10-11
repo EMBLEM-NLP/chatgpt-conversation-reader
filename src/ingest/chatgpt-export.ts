@@ -294,7 +294,10 @@ class WarningCollector {
 
   /** `ids` may be one id, several ids (counted as ONE occurrence) or none. `count` lets a caller report many occurrences at once. */
   add(code: ChatGPTAdapterWarningCode, message: string, ids?: string | readonly string[], variant = '', count = 1): void {
-    const key = variant === '' ? code : `${code}\u0001${variant}`;
+    this.addAt(variant === '' ? code : `${code}\u0001${variant}`, code, message, ids, count);
+  }
+
+  private addAt(key: string, code: ChatGPTAdapterWarningCode, message: string, ids: string | readonly string[] | undefined, count: number): void {
     let e = this.entries.get(key);
     if (e === undefined) {
       e = { code, message, count: 0, ids: [], idSet: new Set() };
@@ -320,13 +323,14 @@ class WarningCollector {
     if (!this.entries.has(key)) {
       const seen = this.boundedVariants.get(code) ?? 0;
       if (seen >= maxVariants) {
-        // '\u0002' can never start a regular entry key (those start with a code name), so the overflow entry cannot be forged by a variant.
-        this.add(code, overflowMessage, ids, `\u0002overflow`);
+        // A regular entry key is `code` or `code\u0001<variant>`; `code\u0002` is reachable only from here, so no source-controlled
+        // variant (not even the text "\u0002overflow") can land in, or take over, the overflow summary.
+        this.addAt(`${code}\u0002overflow`, code, overflowMessage, ids, 1);
         return;
       }
       this.boundedVariants.set(code, seen + 1);
     }
-    this.add(code, message, ids, variant);
+    this.addAt(key, code, message, ids, 1);
   }
 
   toWarnings(): Warning[] {
@@ -350,14 +354,26 @@ export interface ElementScan {
   /** Keys that occur more than once in that mapping object, each listed once. */
   duplicateMappingKeys: string[];
   /**
-   * For each duplicated mapping key: SHA-256 (hex) of the source text of every OBJECT body, in file order. The last
-   * body is the one JSON.parse keeps. Non-object bodies (null, numbers...) are not hashed.
+   * For each duplicated mapping key: SHA-256 (hex) of the source text of its OBJECT bodies, in file order. The last body is the
+   * one JSON.parse keeps. Non-object bodies (null, numbers...) are not hashed. BOUNDED (a hostile repeat count must not multiply
+   * memory): at most MAX_DUP_KEYS_HASHED keys, and per key the first MAX_DUP_BODIES_PER_KEY - 1 bodies plus the LAST one;
+   * `duplicateBodiesNotHashed` counts every object body left out by those caps.
    */
   duplicateBodySha256: Map<string, string[]>;
+  /** Object bodies of duplicated mapping keys that have no hash in `duplicateBodySha256` because of the caps (0 = the lists are complete). */
+  duplicateBodiesNotHashed: number;
   /** Duplicate keys found INSIDE node objects (not at mapping level): mapping key of the node -> number of duplicates. */
   nodeKeyDuplicates: Map<string, number>;
   /** Duplicate keys in the conversation object itself or in nested objects outside the mapping. */
   conversationKeyDuplicates: number;
+  /**
+   * Which STRUCTURAL keys occur more than once, in the fixed order STRUCTURAL_KEYS: `mapping` and `current_node` on the
+   * conversation object, `parent`, `children` and `message` on a node of the (last) mapping. JSON.parse keeps the last value, so
+   * the tree the record shows is only one of the readings the file text allows: that makes the structure ambiguous, which is
+   * why such a conversation can never be `exported_tree`. Duplicates of any other key (title, content_type, metadata ...) are
+   * reported as DUPLICATE_KEY only.
+   */
+  structuralKeyDuplicates: string[];
   /** Deepest nesting of objects/arrays in the element (the conversation object itself is depth 1). */
   maxDepth: number;
 }
@@ -366,6 +382,27 @@ const K_OTHER = 0;
 const K_ROOT = 1;
 const K_MAPPING = 2;
 const K_NODE = 3;
+
+/** Duplicated mapping keys whose bodies are hashed; the rest are only counted (also the cap of the warning id list). */
+const MAX_DUP_KEYS_HASHED = 1000;
+/** Per duplicated key: the first MAX - 1 object bodies plus the last one are hashed. */
+const MAX_DUP_BODIES_PER_KEY = 16;
+
+interface DupBodies {
+  /** Object bodies seen for this key (including those that no longer have a range). */
+  total: number;
+  /** Source ranges [start, end) of the kept bodies: the first MAX - 1, then the slot of the latest one. */
+  ranges: Array<[number, number]>;
+}
+
+function recordBody(info: DupBodies, start: number, end: number): void {
+  info.total++;
+  if (info.ranges.length < MAX_DUP_BODIES_PER_KEY) info.ranges.push([start, end]);
+  else info.ranges[MAX_DUP_BODIES_PER_KEY - 1] = [start, end]; // the newest body always survives: it is the one JSON.parse keeps
+}
+
+/** The keys whose duplication makes the tree ambiguous (see ElementScan.structuralKeyDuplicates); this is also the report order. */
+const STRUCTURAL_KEYS = ['mapping', 'current_node', 'parent', 'children', 'message'] as const;
 
 interface ScanFrame {
   isObject: boolean;
@@ -433,9 +470,16 @@ export function scanConversationElement(text: string): ElementScan {
   let firstStart: number[] = [];
   let firstEnd: number[] = [];
   let duplicateMappingKeys: string[] = [];
-  let dupRanges = new Map<string, Array<[number, number]>>();
+  // key -> evidence for a duplicated mapping key; null = duplicated but beyond MAX_DUP_KEYS_HASHED (counted, not hashed)
+  let dupRanges = new Map<string, DupBodies | null>();
+  let notHashed = 0;
+  let notTracked = 0; // entries of dupRanges that are null
   let nodeKeyDuplicates = new Map<string, number>();
   let conversationKeyDuplicates = 0;
+  // Structural duplicates in two scopes: on the conversation object (survive a later "mapping") and inside the nodes of the
+  // current mapping (die with a mapping that a later "mapping" key replaces).
+  const rootStructural = new Set<string>();
+  let nodeStructural = new Set<string>();
   let currentNodeKey = '';
   let depth = 0;
   let maxDepth = 0;
@@ -484,18 +528,36 @@ export function scanConversationElement(text: string): ElementScan {
               duplicateMappingKeys.push(key);
               const s = firstStart[idx];
               const e = firstEnd[idx];
-              dupRanges.set(key, s !== undefined && e !== undefined && s >= 0 && e >= 0 ? [[s, e]] : []);
+              const hasFirstBody = s !== undefined && e !== undefined && s >= 0 && e >= 0;
+              if (dupRanges.size - notTracked < MAX_DUP_KEYS_HASHED) {
+                const info: DupBodies = { total: 0, ranges: [] };
+                if (hasFirstBody) recordBody(info, s, e);
+                dupRanges.set(key, info);
+              } else {
+                dupRanges.set(key, null);
+                notTracked++;
+                if (hasFirstBody) notHashed++;
+              }
             }
           }
         } else {
           if (frameHasKey(top, key)) {
             if (top.underMapping) nodeKeyDuplicates.set(currentNodeKey, (nodeKeyDuplicates.get(currentNodeKey) ?? 0) + 1);
             else conversationKeyDuplicates++;
+            if (top.kind === K_ROOT && (key === 'mapping' || key === 'current_node')) rootStructural.add(key);
+            else if (top.kind === K_NODE && (key === 'parent' || key === 'children' || key === 'message')) nodeStructural.add(key);
           }
           if (top.kind === K_ROOT && key === 'mapping') {
-            // JSON.parse keeps the LAST "mapping": whatever was collected for an earlier one no longer exists.
+            // JSON.parse keeps the LAST "mapping": whatever was collected for an earlier one no longer exists, including the
+            // duplicate findings inside it (they describe nodes that are not in the record).
             mappingKeys = null;
             mappingIndex = null;
+            duplicateMappingKeys = [];
+            dupRanges = new Map();
+            notHashed = 0;
+            notTracked = 0;
+            nodeKeyDuplicates = new Map();
+            nodeStructural = new Set();
           }
         }
       }
@@ -539,6 +601,8 @@ export function scanConversationElement(text: string): ElementScan {
         firstEnd = [];
         duplicateMappingKeys = [];
         dupRanges = new Map();
+        notHashed = 0;
+        notTracked = 0;
         nodeKeyDuplicates = new Map();
         currentNodeKey = '';
       }
@@ -570,7 +634,9 @@ export function scanConversationElement(text: string): ElementScan {
             firstStart[f.pendingIdx] = f.start;
             firstEnd[f.pendingIdx] = i + 1;
           } else {
-            dupRanges.get(f.nodeKey)?.push([f.start, i + 1]);
+            const info = dupRanges.get(f.nodeKey);
+            if (info === undefined || info === null) notHashed++;
+            else recordBody(info, f.start, i + 1);
           }
         }
       }
@@ -591,10 +657,13 @@ export function scanConversationElement(text: string): ElementScan {
   }
 
   const duplicateBodySha256 = new Map<string, string[]>();
-  for (const [key, ranges] of dupRanges) {
-    if (ranges.length > 0) duplicateBodySha256.set(key, ranges.map(([s, e]) => sha256Hex(text.slice(s, e))));
+  for (const [key, info] of dupRanges) {
+    if (info === null) continue;
+    notHashed += info.total - info.ranges.length;
+    if (info.ranges.length > 0) duplicateBodySha256.set(key, info.ranges.map(([s, e]) => sha256Hex(text.slice(s, e))));
   }
-  return { mappingKeys, duplicateMappingKeys, duplicateBodySha256, nodeKeyDuplicates, conversationKeyDuplicates, maxDepth };
+  const structuralKeyDuplicates = STRUCTURAL_KEYS.filter((k) => rootStructural.has(k) || nodeStructural.has(k));
+  return { mappingKeys, duplicateMappingKeys, duplicateBodySha256, duplicateBodiesNotHashed: notHashed, nodeKeyDuplicates, conversationKeyDuplicates, structuralKeyDuplicates, maxDepth };
 }
 
 /**
@@ -764,7 +833,8 @@ function shortString(value: unknown, max: number, wc: WarningCollector, id: stri
 }
 
 function nonNegativeSafeInt(v: unknown): number | null {
-  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) return null;
+  return v === 0 ? 0 : v; // JSON `-0` is a safe integer that is >= 0; the record must hold +0, never negative zero
 }
 
 // ------------------------------------------------------------------------------------------
@@ -772,11 +842,15 @@ function nonNegativeSafeInt(v: unknown): number | null {
 // ------------------------------------------------------------------------------------------
 
 interface AssetIndex {
-  size: number;
+  /** The container's names in the Set's iteration order at build time: the cache is valid only while the live Set still iterates identically. */
+  snapshot: string[];
   exact: Set<string>;
   /** Sorted by (basename, full name) in UTF-16 code unit order. */
   byBase: Array<{ base: string; name: string }>;
 }
+
+/** Resolved on first use: only a conversation that has an attachment id ever touches (or validates) the container's name set. */
+type AssetLookup = () => AssetIndex | null;
 
 const assetIndexCache = new WeakMap<ReadonlySet<string>, AssetIndex>();
 
@@ -792,22 +866,37 @@ function cmp(a: string, b: string): number {
 }
 
 function buildAssetIndex(names: ReadonlySet<string>): AssetIndex {
+  const snapshot: string[] = [];
   const exact = new Set<string>();
   const byBase: Array<{ base: string; name: string }> = [];
   for (const name of names) {
+    snapshot.push(name);
     if (typeof name !== 'string' || !isSafeArchiveRelativePath(name)) continue;
     exact.add(name);
     byBase.push({ base: name.slice(name.lastIndexOf('/') + 1), name });
   }
   byBase.sort((a, b) => cmp(a.base, b.base) || cmp(a.name, b.name));
-  return { size: names.size, exact, byBase };
+  return { snapshot, exact, byBase };
 }
 
+/** true iff `names` still iterates exactly like `snapshot` (same members, same order). Linear, allocation-free, pointer comparisons for unchanged strings. */
+function snapshotMatches(snapshot: readonly string[], names: ReadonlySet<string>): boolean {
+  if (snapshot.length !== names.size) return false;
+  let i = 0;
+  for (const name of names) if (snapshot[i++] !== name) return false;
+  return true;
+}
+
+/**
+ * The lookup index of the container's names, cached per Set object but VALIDATED against the live Set on every call: a Set that was
+ * cleared and refilled, or had one name swapped for another (same size), is re-indexed. WHY not trust identity + size: a stale
+ * index would keep reporting a file that is no longer in the container as present, which is a fabricated asset claim. The check
+ * costs one pass over the names (about 0.7 ms for 100,000 names) per conversation that carries attachment ids.
+ */
 function getAssetIndex(names: ReadonlySet<string> | undefined): AssetIndex | null {
   if (names === undefined || names.size === 0) return null;
   let idx = assetIndexCache.get(names);
-  // The set is declared read-only, but a size change still invalidates the cache rather than serving stale answers.
-  if (idx === undefined || idx.size !== names.size) {
+  if (idx === undefined || !snapshotMatches(idx.snapshot, names)) {
     idx = buildAssetIndex(names);
     assetIndexCache.set(names, idx);
   }
@@ -1002,6 +1091,9 @@ function handlePart(part: unknown, mc: MsgCtx): void {
           const f: unknown = frames[i];
           if (isPlainObject(f)) addPointer(mc, own(f, 'asset_pointer'), own(f, 'size_bytes'));
         }
+        if (frames.length > limit) {
+          mc.wc.add('PARTS_TRUNCATED', `A real-time audio/video part lists more than ${MAX_FRAME_POINTERS} frame pointers; the extra frames were not recorded as attachment references (they remain in rawSource).`, mc.mid, 'frames');
+        }
       }
       addRefBlock(mc, 'audio_ref', '[audio]', { contentType: kind, raw: part });
       return;
@@ -1118,6 +1210,9 @@ const handleThoughts: ContentHandler = (content, mc, ct) => {
     return;
   }
   const limit = Math.min(list.length, mc.limits.maxPartsPerMessage);
+  if (list.length > limit) {
+    mc.wc.add('PARTS_TRUNCATED', 'A thoughts message has more items than the per-message limit; the extra items were not converted to blocks (they remain in rawSource).', mc.mid, 'thoughts');
+  }
   for (let i = 0; i < limit; i++) {
     const item: unknown = list[i];
     if (!isPlainObject(item)) {
@@ -1230,7 +1325,16 @@ function buildContent(content: unknown, mc: MsgCtx): string | null {
     handler(content, mc, ct);
   } else {
     // WHY aggregated per type: a drifting export can carry one new type thousands of times; one warning with a count is enough.
-    mc.wc.add('UNKNOWN_CONTENT_TYPE', `Unknown content_type "${safeToken(ct)}" was kept as raw 'unknown' blocks and contributes no text.`, mc.mid, ct.length <= 256 ? ct : sha256Hex(ct));
+    // WHY bounded: a hostile export can also carry a DIFFERENT type per message; types beyond MAX_DISTINCT_UNKNOWN_CONTENT_TYPES
+    // share one summary warning (count and ids still add up), so the warning list never grows with the number of nodes.
+    mc.wc.addBounded(
+      'UNKNOWN_CONTENT_TYPE',
+      `Unknown content_type "${safeToken(ct)}" was kept as raw 'unknown' blocks and contributes no text.`,
+      `Further unknown content_type values (more than ${MAX_DISTINCT_UNKNOWN_CONTENT_TYPES} distinct ones in this conversation) were kept as raw 'unknown' blocks and contribute no text; they are counted together here.`,
+      mc.mid,
+      ct.length <= 256 ? ct : sha256Hex(ct),
+      MAX_DISTINCT_UNKNOWN_CONTENT_TYPES,
+    );
     addUnknownBlock(mc, { contentType: ct, raw: content });
   }
   return ct;
@@ -1246,6 +1350,9 @@ function collectMetadataAttachments(mc: MsgCtx): void {
     return;
   }
   const limit = Math.min(list.length, mc.limits.maxPartsPerMessage);
+  if (list.length > limit) {
+    mc.wc.add('PARTS_TRUNCATED', 'A message lists more attachments than the per-message limit; the extra entries were not converted to attachment references (they remain in rawSource).', mc.mid, 'attachments');
+  }
   for (let i = 0; i < limit; i++) {
     const a: unknown = list[i];
     if (!isPlainObject(a)) {
@@ -1271,7 +1378,7 @@ function collectMetadataAttachments(mc: MsgCtx): void {
 }
 
 /** Merge drafts that describe the same file (same id, or same pointer when there is no id) and resolve presence in the container. */
-function finalizeAttachments(drafts: readonly AttachmentDraft[], index: AssetIndex | null): AttachmentRef[] {
+function finalizeAttachments(drafts: readonly AttachmentDraft[], lookup: AssetLookup): AttachmentRef[] {
   if (drafts.length === 0) return [];
   const merged: AttachmentDraft[] = [];
   const byId = new Map<string, AttachmentDraft>();
@@ -1296,7 +1403,7 @@ function finalizeAttachments(drafts: readonly AttachmentDraft[], index: AssetInd
     mimeType: d.mimeType,
     sizeBytes: d.sizeBytes,
     assetPointer: d.assetPointer,
-    presentInExportAs: resolvePresentName(index, d.id),
+    presentInExportAs: d.id === null ? null : resolvePresentName(lookup(), d.id),
   }));
 }
 
@@ -1334,7 +1441,7 @@ function buildMessageRecord(
   base: { id: string; conversationId: string; ordinal: number },
   wc: WarningCollector,
   limits: ChatGPTAdapterLimits,
-  assets: AssetIndex | null,
+  assets: AssetLookup,
 ): { record: MessageRecord; facts: MessageFacts } {
   const mid = base.id;
 
@@ -1540,12 +1647,16 @@ function readTitle(conv: JsonObject, st: ConvState): string | null {
   return title;
 }
 
-/** Conversation-level model: informational default only (`default_model_slug`, else the newer `model_slug`); never copied to messages. */
+/**
+ * Conversation-level model: informational default only (`default_model_slug`, else the newer `model_slug`); never copied to messages.
+ * An empty string names no model, exactly like a message's empty `model_slug`: it is null (and the other field is tried).
+ */
 function readDefaultModelSlug(conv: JsonObject, st: ConvState): string | null {
-  return (
-    shortString(own(conv, 'default_model_slug'), MAX_SHORT_STRING, st.wc, st.conversationId, 'default_model_slug') ??
-    shortString(own(conv, 'model_slug'), MAX_SHORT_STRING, st.wc, st.conversationId, 'model_slug')
-  );
+  const slug = (field: string): string | null => {
+    const v = shortString(own(conv, field), MAX_SHORT_STRING, st.wc, st.conversationId, field);
+    return v === null || v.length === 0 ? null : v;
+  };
+  return slug('default_model_slug') ?? slug('model_slug');
 }
 
 interface LocatedNodes {
@@ -1608,12 +1719,46 @@ function assignNodeIds(keys: readonly string[], wc: WarningCollector): { ids: st
   return { ids, idByKey };
 }
 
+/**
+ * Maps any raw node pointer (a `parent`, a `children` entry or `current_node`) to the id the record uses for it.
+ *  - A pointer that names a kept node gets that node's id.
+ *  - A pointer that names nothing (dangling parent, phantom child) keeps its own spelling when that is a safe id no node and no other
+ *    pointer uses; otherwise it gets a deterministic `gcr-ref-<24 hex>` stand-in (bumped with `-1`, `-2` ... until unused).
+ * WHY: a dangling pointer must STAY dangling in the record. Its spelling can equal the stand-in id of an unusable mapping key
+ * (`gcr-node-<hash>`, computable by anyone who reads this file) or another pointer's stand-in; passing it through verbatim would
+ * silently turn a missing parent into an edge to an unrelated node, i.e. fabricate structure. Two different dangling pointers
+ * never share an id either. The answer is memoized, so one raw pointer always yields one id within a conversation.
+ */
+function makePointerResolver(ids: readonly string[], idByKey: ReadonlyMap<string, string>): (raw: string) => string {
+  let taken: Set<string> | null = null; // built on the first dangling pointer only: most conversations have none
+  const dangling = new Map<string, string>();
+  return (raw: string): string => {
+    const node = idByKey.get(raw);
+    if (node !== undefined) return node;
+    const known = dangling.get(raw);
+    if (known !== undefined) return known;
+    taken ??= new Set(ids);
+    let candidate = isSafeId(raw) && !taken.has(raw) ? raw : '';
+    if (candidate === '') {
+      const hash = sha256Hex(raw).slice(0, 24);
+      candidate = `gcr-ref-${hash}`;
+      for (let bump = 1; taken.has(candidate); bump++) candidate = `gcr-ref-${hash}-${bump}`;
+    }
+    taken.add(candidate);
+    dangling.set(raw, candidate);
+    return candidate;
+  };
+}
+
 /** Turns what the raw-text pre-pass found (duplicate keys that JSON.parse hid) into warnings, completeness reasons and body hashes. */
 function reportScanFindings(scan: ElementScan, resolveId: (raw: string) => string, st: ConvState): void {
   for (const dupKey of scan.duplicateMappingKeys) {
     st.wc.add('DUPLICATE_NODE_ID', 'A node id occurs more than once in the mapping; like JSON.parse, the LAST body was kept (all bodies are hashed in rawMetadata._gcr.duplicateNodeBodySha256).', resolveId(dupKey));
   }
   if (scan.duplicateMappingKeys.length > 0) st.reasons.push('duplicate_node_id');
+  // A repeated mapping / current_node / parent / children / message key means the file itself names two different trees (or
+  // active branches); JSON.parse's "last wins" is a reading, not a fact, so the conversation cannot claim a complete tree.
+  if (scan.structuralKeyDuplicates.length > 0) st.reasons.push('duplicate_structural_key');
   const message = 'An object contains the same key more than once; like JSON.parse, the LAST value was kept.';
   if (scan.conversationKeyDuplicates > 0) st.wc.add('DUPLICATE_KEY', message, st.conversationId, '', scan.conversationKeyDuplicates);
   for (const [nodeKey, count] of scan.nodeKeyDuplicates) st.wc.add('DUPLICATE_KEY', message, resolveId(nodeKey), '', count);
@@ -1625,6 +1770,7 @@ function reportScanFindings(scan: ElementScan, resolveId: (raw: string) => strin
     }
     setOwn(st.gcrExtra, 'duplicateNodeBodySha256', entries);
   }
+  if (scan.duplicateBodiesNotHashed > 0) setOwn(st.gcrExtra, 'duplicateNodeBodiesNotHashed', scan.duplicateBodiesNotHashed);
 }
 
 interface BuiltNodes {
@@ -1665,7 +1811,7 @@ function readDeclaredChildren(nodeObj: JsonObject | null, id: string, st: ConvSt
 }
 
 /** Phase A: one draft (record without edges yet) per kept node, in file order. */
-function buildDrafts(mapping: JsonObject | null, keys: readonly string[], ids: readonly string[], st: ConvState, assets: AssetIndex | null): BuiltNodes {
+function buildDrafts(mapping: JsonObject | null, keys: readonly string[], ids: readonly string[], st: ConvState, assets: AssetLookup): BuiltNodes {
   const out: BuiltNodes = { drafts: [], idxByKey: new Map(), roleCounts: new Map(), anyNonEmptyDeclared: false, malformedParents: 0 };
   const seenMessageIds = new Map<string, string>();
   for (let k = 0; k < keys.length; k++) {
@@ -1701,7 +1847,7 @@ function buildNodeRecord(
   seenMessageIds: Map<string, string>,
   roleCounts: Map<string, number>,
   st: ConvState,
-  assets: AssetIndex | null,
+  assets: AssetLookup,
 ): MessageRecord {
   const messageVal = nodeObj === null ? undefined : own(nodeObj, 'message');
   const base = { id: at.id, conversationId: st.conversationId, ordinal: at.ordinal };
@@ -1727,7 +1873,7 @@ function buildNodeRecord(
 }
 
 /** Phase B: resolve every parent pointer to an index (root / dangling / node), set parentId, and census cycles and dangling parents. */
-function linkParents(nodes: BuiltNodes, st: ConvState): { cycleNodes: number; dangling: number; edges: number } {
+function linkParents(nodes: BuiltNodes, resolveId: (raw: string) => string, st: ConvState): { cycleNodes: number; dangling: number; edges: number } {
   const { drafts, idxByKey } = nodes;
   const parentIdx = new Int32Array(drafts.length);
   for (let k = 0; k < drafts.length; k++) {
@@ -1739,7 +1885,7 @@ function linkParents(nodes: BuiltNodes, st: ConvState): { cycleNodes: number; da
     } else {
       const pi = idxByKey.get(d.parentRaw);
       d.parentIdx = pi === undefined ? PARENT_DANGLING : pi;
-      d.record.parentId = pi === undefined ? sanitizeRef(d.parentRaw) : (drafts[pi] as NodeDraft).id;
+      d.record.parentId = pi === undefined ? resolveId(d.parentRaw) : (drafts[pi] as NodeDraft).id;
     }
     parentIdx[k] = d.parentIdx;
   }
@@ -1811,7 +1957,7 @@ function declaredChildIds(d: NodeDraft, idxByKey: Map<string, number>, resolveId
 }
 
 /** The active-branch pointer counts only if it is a real key of the mapping; anything else is null plus a reason (never a guess). */
-function resolveCurrentNode(conv: JsonObject, nodes: BuiltNodes, hasChild: Uint8Array, st: ConvState): string | null {
+function resolveCurrentNode(conv: JsonObject, nodes: BuiltNodes, hasChild: Uint8Array, resolveId: (raw: string) => string, st: ConvState): string | null {
   const cnVal = own(conv, 'current_node');
   if (cnVal === undefined || cnVal === null) {
     st.wc.add('NO_CURRENT_NODE', 'The source gives no current_node; the active branch is unknown and is not guessed.', st.conversationId);
@@ -1820,7 +1966,7 @@ function resolveCurrentNode(conv: JsonObject, nodes: BuiltNodes, hasChild: Uint8
   }
   const ci = typeof cnVal === 'string' ? nodes.idxByKey.get(cnVal) : undefined;
   if (ci === undefined) {
-    st.wc.add('INVALID_CURRENT_NODE', 'current_node does not name a node of this conversation; the active branch is unknown and is not guessed.', typeof cnVal === 'string' ? sanitizeRef(cnVal) : st.conversationId);
+    st.wc.add('INVALID_CURRENT_NODE', 'current_node does not name a node of this conversation; the active branch is unknown and is not guessed.', typeof cnVal === 'string' ? resolveId(cnVal) : st.conversationId);
     st.reasons.push('invalid_current_node');
     return null;
   }
@@ -1860,12 +2006,20 @@ function enforceNestingLimit(messages: MessageRecord[], rawMetadata: JsonObject,
   return r.value as JsonObject;
 }
 
-/** Every conversation key except `mapping`, plus `_gcr` provenance. A source key named `_gcr` is kept as `_gcr_original`, so it cannot spoof the hash. */
+/**
+ * Every conversation key except `mapping`, plus `_gcr` provenance. A source key named `_gcr` is kept under `_gcr_original` (or, if
+ * the source has that key too, `_gcr_original_`, ...), so it can neither spoof the hash nor overwrite another source value.
+ */
 function buildRawMetadata(conv: JsonObject, sha: string, gcrExtra: JsonObject): JsonObject {
   const rawMetadata: JsonObject = {};
   for (const key of Object.keys(conv)) {
-    if (key === 'mapping') continue;
-    setOwn(rawMetadata, key === '_gcr' ? '_gcr_original' : key, conv[key]);
+    if (key === 'mapping' || key === '_gcr') continue;
+    setOwn(rawMetadata, key, conv[key]);
+  }
+  if (Object.hasOwn(conv, '_gcr')) {
+    let home = '_gcr_original';
+    while (Object.hasOwn(rawMetadata, home)) home += '_';
+    setOwn(rawMetadata, home, conv['_gcr']);
   }
   const gcr: JsonObject = { sourceElementSha256: sha };
   for (const k of Object.keys(gcrExtra)) setOwn(gcr, k, gcrExtra[k]);
@@ -1957,13 +2111,15 @@ export class ChatGPTExportAdapter implements ConversationSourceAdapter {
     const scan = this.scan(text);
     const located = locateNodes(conv, scan, st);
     const { ids, idByKey } = assignNodeIds(located.keys, wc);
-    const resolveId = (raw: string): string => idByKey.get(raw) ?? sanitizeRef(raw);
+    const resolveId = makePointerResolver(ids, idByKey);
     reportScanFindings(scan, resolveId, st);
 
-    const nodes = buildDrafts(located.mapping, located.keys, ids, st, getAssetIndex(ctx.availableAssetNames));
-    const census = linkParents(nodes, st);
+    let assetIndex: AssetIndex | null | undefined; // resolved at most once per conversation, and only if some attachment has an id
+    const assets: AssetLookup = () => (assetIndex === undefined ? (assetIndex = getAssetIndex(ctx.availableAssetNames)) : assetIndex);
+    const nodes = buildDrafts(located.mapping, located.keys, ids, st, assets);
+    const census = linkParents(nodes, resolveId, st);
     const hasChild = assignChildren(nodes, census, resolveId, st);
-    const currentNodeId = resolveCurrentNode(conv, nodes, hasChild, st);
+    const currentNodeId = resolveCurrentNode(conv, nodes, hasChild, resolveId, st);
     st.obs.hasCurrentNode = currentNodeId !== null;
     st.obs.roleCounts = Object.fromEntries(nodes.roleCounts);
 

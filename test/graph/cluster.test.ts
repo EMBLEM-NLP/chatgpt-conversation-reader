@@ -202,6 +202,23 @@ describe('clusterGraph (database writer)', () => {
     assert.equal(db.prepare('SELECT count(*) AS n FROM graph_communities').get()?.['n'], 0);
   });
 
+  it('a community name that has to be cut never ends in half a surrogate pair', () => {
+    const { db } = openDatabase(':memory:');
+    const node = db.prepare("INSERT INTO graph_nodes (node_id, kind, label, weight) VALUES (?, 'entity', ?, 1)");
+    const edge = db.prepare("INSERT INTO graph_edges (src, dst, kind, weight) VALUES (?, ?, 'co_occurs', 1)");
+    // The first label is 161 UTF-16 units long: a plain slice(0, 160) would leave the high surrogate of the emoji behind.
+    node.run('ent:keyword:a1', `${'a'.repeat(159)}\u{1F600}`);
+    node.run('ent:keyword:a2', 'b');
+    node.run('ent:keyword:a3', 'c');
+    edge.run('ent:keyword:a1', 'ent:keyword:a2');
+    edge.run('ent:keyword:a1', 'ent:keyword:a3');
+    edge.run('ent:keyword:a2', 'ent:keyword:a3');
+    clusterGraph(db);
+    const label = String(db.prepare('SELECT label FROM graph_communities').get()?.['label']);
+    assert.equal(label.length, 159);
+    assert.doesNotThrow(() => encodeURIComponent(label), 'encodeURIComponent throws on a lone surrogate');
+  });
+
   it('an empty graph clusters to nothing', () => {
     const { db } = openDatabase(':memory:');
     assert.deepEqual(clusterGraph(db), { communities: 0, iterations: 1, converged: true, assignedNodes: 0 });

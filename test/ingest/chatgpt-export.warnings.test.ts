@@ -101,7 +101,7 @@ const CASES: Record<ChatGPTAdapterWarningCode, Case> = {
   },
   KEY_ORDER_FALLBACK: {
     positive: () => {
-      const wrong: ElementScan = { mappingKeys: [], duplicateMappingKeys: [], duplicateBodySha256: new Map(), nodeKeyDuplicates: new Map(), conversationKeyDuplicates: 0, maxDepth: 1 };
+      const wrong: ElementScan = { mappingKeys: [], duplicateMappingKeys: [], duplicateBodySha256: new Map(), duplicateBodiesNotHashed: 0, nodeKeyDuplicates: new Map(), conversationKeyDuplicates: 0, structuralKeyDuplicates: [], maxDepth: 1 };
       return norm(convRaw(ordered([['a', node('a', null, [])]])), tiny({ scanner: () => wrong }));
     },
     negative: () => norm(convRaw(ordered([['a', node('a', null, [])]]))),

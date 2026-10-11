@@ -479,8 +479,20 @@ async function finish(a: FinishArgs): Promise<Discovery> {
     for (const f of c.conv) a.pool.charge((f.size ?? 0) * a.passes);
   }
 
-  const sorted = [...c.conv].sort((x, y) => compareConversationFiles({ suffix: x.suffix, name: x.displayName }, { suffix: y.suffix, name: y.displayName }));
-  const files: DiscoveredFile[] = sorted.map((f, order) => ({ name: f.displayName, order, open: f.open, sizeHint: f.size }));
+  // Total order: (plain first, integer suffix, display name, inner name). The last key only matters for the contrived archive
+  // that holds both a nested "x.zip" and a literal entry named "x.zip!/<inner>": without it their order (and so the batch
+  // identity and the duplicate rule) would follow the entry order of the archive.
+  const sorted = [...c.conv].sort(
+    (x, y) => compareConversationFiles({ suffix: x.suffix, name: x.displayName }, { suffix: y.suffix, name: y.displayName }) || cmp(x.innerName, y.innerName),
+  );
+  // Names are the identity of a file in digests, reports and warning ids, so they must be unique within one discovery.
+  const used = new Set<string>();
+  const files: DiscoveredFile[] = sorted.map((f, order) => {
+    let name = f.displayName;
+    for (let n = 2; used.has(name); n++) name = `${f.displayName}~${n}`;
+    used.add(name);
+    return { name, order, open: f.open, sizeHint: f.size };
+  });
   const warnings: Warning[] = [...c.warnings];
 
   // ---- manifest ---------------------------------------------------------------------------------------------
@@ -619,9 +631,17 @@ async function readSmallFile(abs: string, label: string, cap: number): Promise<B
   return Buffer.concat(chunks, total);
 }
 
+/**
+ * C1 controls, line/paragraph separators and bidi overrides/isolates: invisible or spoofable in logs and terminals. ZIP names
+ * containing them are refused by SafeZipReader (FORBIDDEN_NAME_CHARS); folder names get the same rule so that a name echoed
+ * in a report (`files[].name`, warning ids, `presentInExportAs`) is as clean for a folder as for an archive.
+ * Built with RegExp(...) from escaped text so that no invisible character lives in this source file.
+ */
+const FORBIDDEN_FS_NAME_CHARS = new RegExp('[\\u0080-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]');
+
 function safeFsName(name: string): boolean {
   // eslint-disable-next-line no-control-regex
-  return name.length > 0 && Buffer.byteLength(name, 'utf8') <= MAX_NAME_BYTES && !/[\u0000-\u001f\u007f\\]/.test(name);
+  return name.length > 0 && Buffer.byteLength(name, 'utf8') <= MAX_NAME_BYTES && !/[\u0000-\u001f\u007f\\]/.test(name) && !FORBIDDEN_FS_NAME_CHARS.test(name);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -848,7 +868,12 @@ function rewrapZipOpenError(e: unknown, label: string): unknown {
 
 async function discoverStream(src: { stream: AsyncIterable<Buffer | Uint8Array>; label: string }, limits: ImportLimits, passes: number): Promise<Discovery> {
   const cap = limits.maxElementBytes * STDIN_BUFFER_FACTOR;
-  const chunks: Buffer[] = [];
+  // The bytes are COPIED into one growing buffer (never held as a list of the producer's chunks):
+  //  - a producer is free to reuse ONE buffer for every chunk (the usual read loop), so keeping references would make every
+  //    chunk alias the last bytes read;
+  //  - a list costs ~100 bytes of heap per chunk, so a stream of 1-byte chunks would defeat the "maxElementBytes x 4" memory
+  //    bound by two orders of magnitude. The buffer never grows beyond `cap`.
+  let buf = Buffer.allocUnsafe(Math.max(1, Math.min(Math.ceil(cap), READ_CHUNK_BYTES)));
   let total = 0;
   const iterator = src.stream[Symbol.asyncIterator]();
   try {
@@ -860,21 +885,25 @@ async function discoverStream(src: { stream: AsyncIterable<Buffer | Uint8Array>;
       if (Buffer.isBuffer(raw)) chunk = raw;
       else if (raw instanceof Uint8Array) chunk = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
       else throw new GcrError('INVALID_ARGUMENT', 'The input stream must yield Buffer or Uint8Array chunks.', { details: { reason: 'BAD_CHUNK_TYPE' } });
-      total += chunk.length;
-      if (total > cap) {
+      if (total + chunk.length > cap) {
         throw new GcrError('IMPORT_LIMIT_EXCEEDED', 'The data read from standard input is larger than the buffering limit (maxElementBytes x 4).', {
           remedy: 'Save the data to a file and import the file instead, or raise maxElementBytes only if you trust the data.',
           details: { reason: 'STDIN_TOO_LARGE', limit: 'maxElementBytes', max: cap },
         });
       }
-      chunks.push(chunk);
+      if (total + chunk.length > buf.length) {
+        const grown = Buffer.allocUnsafe(Math.min(Math.ceil(cap), Math.max(buf.length * 2, total + chunk.length)));
+        buf.copy(grown, 0, 0, total);
+        buf = grown;
+      }
+      chunk.copy(buf, total);
+      total += chunk.length;
     }
   } catch (e) {
     await iterator.return?.().catch(() => undefined);
     throw e;
   }
-  const data = Buffer.concat(chunks, total);
-  chunks.length = 0;
+  const data = buf.subarray(0, total);
   const kind = classifyHead(data.subarray(0, HEAD_BYTES));
   if (kind === 'utf16') throw utf16Error();
   if (kind === 'zip') {

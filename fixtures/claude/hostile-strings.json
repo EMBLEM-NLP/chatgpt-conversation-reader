@@ -1,7 +1,7 @@
 [
   {
     "uuid": "00000000-0000-4000-8000-00000000000b",
-    "name": "GCR-SYNTHETIC-FIXTURE <script>alert('title')</script> ‮ bidi \u0000 nul",
+    "name": "GCR-SYNTHETIC-FIXTURE <script>alert('title')</script> \u202e bidi \u0000 nul",
     "summary": "synthetic summary with a lone surrogate \ud800 inside",
     "created_at": "2025-09-10T11:12:13.000000Z",
     "updated_at": "2025-09-10T11:12:13.000000Z",
@@ -21,7 +21,7 @@
       },
       {
         "uuid": "constructor",
-        "text": "nul:\u0000:end lone-high:\ud800:end lone-low:\udfff:end line-sep: :end bidi:‮:end zwj:👩‍💻:end private-use::end",
+        "text": "nul:\u0000:end lone-high:\ud800:end lone-low:\udfff:end line-sep:\u2028:end bidi:\u202e:end zwj:👩\u200d💻:end private-use:\ue200:end",
         "content": [
           { "type": "text", "text": "block nul:\u0000:end block lone:\ud83d:end" }
         ],

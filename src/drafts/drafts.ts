@@ -8,9 +8,9 @@
  *
  * What this module deliberately is NOT
  *  - It transmits nothing, imports no network or process-spawning module (a source-level test enforces this) and has
- *    no notion of a message being "sent": the `status` column only admits 'draft' and 'archived' (CHECK constraint) and
- *    no method of LocalStore accepts a status. The `manualContinuation` field of a draft is TEXT for a human to open
- *    in their own browser; GCR never opens, resolves or requests it.
+ *    no notion of a draft having left this machine: the `status` column only admits the two values `draft` and
+ *    `archived` (CHECK constraint) and no method of LocalStore accepts a status. The `manualContinuation` field of a
+ *    draft is TEXT for a human to open in their own browser; GCR never opens, resolves or requests it.
  *
  * Identity
  *  - Drafts and annotations are anchored by (provider, account_label, conversation_id[, message_id]) and NOT by source
@@ -64,7 +64,7 @@ export const MANUAL_CONTINUATION_NOTE = 'GCR never sends messages; open this lin
 
 /** Who made a change; stored in `created_via` and in every audit row. */
 export type LocalActor = 'cli' | 'mcp' | 'sdk';
-/** There is deliberately no 'sent': GCR cannot send anything (AGENTS.md). */
+/** Exactly two states. There is deliberately no state meaning "delivered": GCR cannot deliver anything (AGENTS.md). */
 export type DraftStatus = 'draft' | 'archived';
 
 export interface LocalStoreOptions {
@@ -188,9 +188,28 @@ const MAX_OFFSET = 10_000_000;
  * while bounding the work an absurd argument can cause.
  */
 const PRE_STRIP_FACTOR = 16;
+/** Work bound for titles before NUL stripping (UTF-16 code units); see titleOf. */
+const MAX_TITLE_UNITS_BEFORE_STRIP = 65_536;
 /** A lone high or low surrogate (no `u` flag on purpose: the pattern works on UTF-16 code units). */
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const AUDIT_HASH_PREFIX_CHARS = 12;
+
+// --- The complete vocabulary of assembled SQL text (see LocalStore.page). Values are NEVER part of it. ---------------
+type PagedTable = 'local_drafts' | 'local_annotations';
+const PAGED_TABLES: ReadonlySet<string> = new Set<PagedTable>(['local_drafts', 'local_annotations']);
+/** WHERE fragments, each with exactly the bound parameters its callers push (or none for IS NULL). */
+const PAGE_CONDITIONS: ReadonlySet<string> = new Set([
+  'conversation_id = ?',
+  'provider = ?',
+  'account_label = ?',
+  'namespace = ?',
+  'status = ?',
+  'kind = ?',
+  'message_id = ?',
+  'message_id IS NULL',
+]);
+/** Newest first; rowid (insertion order) breaks ties between equal timestamps deterministically. */
+const PAGE_ORDER = 'ORDER BY created_at DESC, rowid DESC';
 
 function badArg(field: string, why: string, extra: Record<string, unknown> = {}): GcrError {
   return new GcrError('INVALID_ARGUMENT', `Invalid value for "${field}": ${why}.`, { details: { field, ...extra } });
@@ -200,7 +219,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** An object whose keys are all in `allowed`. Unknown keys are refused (a stray `status: 'sent'` must not be silently ignored). */
+/** An object whose keys are all in `allowed`. Unknown keys are refused (a stray `status` field must not be silently ignored). */
 function checkObject(field: string, v: unknown, allowed: readonly string[]): Record<string, unknown> {
   if (!isPlainObject(v)) throw badArg(field, 'expected an object');
   for (const k of Object.keys(v)) {
@@ -258,7 +277,9 @@ function cleanText(field: string, v: unknown, minBytes: number, maxBytes: number
 function titleOf(v: unknown): string | null {
   if (v === undefined || v === null) return null;
   if (typeof v !== 'string') throw badArg('title', 'expected a string or null');
-  if (v.length > MAX_DRAFT_TITLE_CHARS * 2 + 64) throw badArg('title', `longer than ${MAX_DRAFT_TITLE_CHARS} characters`, { maxChars: MAX_DRAFT_TITLE_CHARS });
+  // Only a work bound: the real limit (200 characters AFTER NUL stripping) is enforced below. The bound must not be tight,
+  // otherwise a valid title padded with NUL bytes (which are stripped, SPEC) would be refused for the wrong reason.
+  if (v.length > MAX_TITLE_UNITS_BEFORE_STRIP) throw badArg('title', `longer than ${MAX_DRAFT_TITLE_CHARS} characters`, { maxChars: MAX_DRAFT_TITLE_CHARS });
   const stripped = v.includes('\0') ? v.replaceAll('\0', '') : v;
   if (LONE_SURROGATE_RE.test(stripped)) throw badArg('title', 'is not valid Unicode text');
   // Count code points, not UTF-16 units: an emoji is one character to the person typing the title.
@@ -526,7 +547,7 @@ export class LocalStore {
       params.push(f['status']);
     }
     // Newest first; rowid (insertion order) breaks ties between equal timestamps deterministically.
-    return this.page('local_drafts', conds, params, 'ORDER BY created_at DESC, rowid DESC', limit, offset, draftFromRow);
+    return this.page('local_drafts', conds, params, limit, offset, draftFromRow);
   }
 
   /** Idempotent: archiving an already archived draft changes nothing and writes no audit row. */
@@ -537,7 +558,7 @@ export class LocalStore {
       const current = this.loadDraft(draftId);
       if (current.status === 'archived') return current;
       const ts = this.now();
-      this.db.prepare("UPDATE local_drafts SET status = 'archived', updated_at = ? WHERE draft_id = ?").run(ts, draftId);
+      expectOneRowChanged(this.db.prepare("UPDATE local_drafts SET status = 'archived', updated_at = ? WHERE draft_id = ?").run(ts, draftId));
       this.audit(ts, 'draft.archive', 'draft', draftId, {
         namespace: current.namespace,
         provider: current.provider,
@@ -552,6 +573,10 @@ export class LocalStore {
    * Markdown view of a draft. The body goes into a fenced block whose fence is longer than any backtick run inside it,
    * so the body cannot close the block; everything else in the header is a single-line code span. Nothing is
    * HTML-escaped or interpreted: inside a fence the text is data. The continuation link is a code span, not a markdown link.
+   *
+   * Fidelity: the content of a CommonMark code block always ends with a line ending, so a body that does not end with
+   * "\n" and the same body plus one "\n" render identically; every other character is carried exactly. The header's byte
+   * count and sha256 describe the stored body precisely, so the view never hides which exact text a draft holds.
    */
   renderDraftMarkdown(id: string): string {
     const d = this.getDraft(id);
@@ -634,15 +659,14 @@ export class LocalStore {
     const conds: string[] = [];
     const params: SQLInputValue[] = [];
     if (f['conversationRef'] !== undefined) addConversationConds(parseRef('conversationRef', f['conversationRef']), conds, params);
-    if (f['messageId'] !== undefined) {
-      // A message id is only meaningful inside one conversation; without a conversation it would match across accounts.
+    if (f['messageId'] === null) {
+      // "Conversation-level only" is meaningful across all conversations, so it needs no conversationRef.
+      conds.push('message_id IS NULL');
+    } else if (f['messageId'] !== undefined) {
+      // A concrete message id is only meaningful inside one conversation; without one it would match across accounts.
       if (f['conversationRef'] === undefined) throw badArg('messageId', 'requires conversationRef');
-      if (f['messageId'] === null) {
-        conds.push('message_id IS NULL');
-      } else {
-        conds.push('message_id = ?');
-        params.push(idText('messageId', f['messageId'], MAX_REF_CHARS));
-      }
+      conds.push('message_id = ?');
+      params.push(idText('messageId', f['messageId'], MAX_REF_CHARS));
     }
     if (f['namespace'] !== undefined) {
       conds.push('namespace = ?');
@@ -652,7 +676,7 @@ export class LocalStore {
       conds.push('kind = ?');
       params.push(kindOf('kind', f['kind']));
     }
-    return this.page('local_annotations', conds, params, 'ORDER BY created_at DESC, rowid DESC', limit, offset, annotationFromRow);
+    return this.page('local_annotations', conds, params, limit, offset, annotationFromRow);
   }
 
   /**
@@ -677,9 +701,11 @@ export class LocalStore {
         });
       }
       const ts = this.now();
-      this.db
-        .prepare('UPDATE local_annotations SET body = ?, version = version + 1, updated_at = ? WHERE annotation_id = ? AND version = ?')
-        .run(body, ts, annotationId, expected);
+      expectOneRowChanged(
+        this.db
+          .prepare('UPDATE local_annotations SET body = ?, version = version + 1, updated_at = ? WHERE annotation_id = ? AND version = ?')
+          .run(body, ts, annotationId, expected),
+      );
       this.audit(ts, 'annotation.update', 'annotation', annotationId, {
         namespace: current.namespace,
         fromVersion: expected,
@@ -835,20 +861,35 @@ export class LocalStore {
   }
 
   /**
-   * Shared pager. `table` is one of two literals chosen by the callers above and `order` a fixed fragment; `conds` hold
-   * fixed `column = ?` fragments only, with every value in `params`.
+   * Shared pager, the only place where SQL text is assembled. Everything interpolated into the statement comes from a
+   * fixed allow-list that is re-checked HERE at run time (the TypeScript types alone would not stop a future caller from
+   * passing a computed string): the table name, each WHERE fragment and the ORDER BY clause. Every VALUE travels in `params`.
    */
-  private page<T>(table: 'local_drafts' | 'local_annotations', conds: string[], params: SQLInputValue[], order: string, limit: number, offset: number, map: (r: Row) => T): Page<T> {
+  private page<T>(table: PagedTable, conds: readonly string[], params: SQLInputValue[], limit: number, offset: number, map: (r: Row) => T): Page<T> {
+    if (!PAGED_TABLES.has(table) || !conds.every((c) => PAGE_CONDITIONS.has(c))) {
+      throw new GcrError('INTERNAL_ERROR', 'A local listing was built from an unapproved SQL fragment and was refused.', { details: { reason: 'unapproved_sql_fragment' } });
+    }
     const where = conds.length === 0 ? '' : ` WHERE ${conds.join(' AND ')}`;
     return this.guard(() => {
       const total = rowNumber(this.db.prepare(`SELECT count(*) AS n FROM ${table}${where}`).get(...params) ?? {}, 'n');
       const items = this.db
-        .prepare(`SELECT * FROM ${table}${where} ${order} LIMIT ? OFFSET ?`)
+        .prepare(`SELECT * FROM ${table}${where} ${PAGE_ORDER} LIMIT ? OFFSET ?`)
         .all(...params, limit, offset)
         .map(map);
       const next = offset + items.length;
       return { items, limit, offset, total, nextOffset: next < total ? next : null };
     });
+  }
+}
+
+/**
+ * An UPDATE inside our own BEGIN IMMEDIATE transaction, after the row was just read, must change exactly one row. If it
+ * did not, something outside this module interfered (for example a schema trigger); failing closed rolls the transaction
+ * back, so the audit row that follows can never describe a change that did not happen.
+ */
+function expectOneRowChanged(res: { changes: number | bigint }): void {
+  if (Number(res.changes) !== 1) {
+    throw new GcrError('INTERNAL_ERROR', 'A local change did not apply to exactly one record and was rolled back.', { details: { reason: 'unexpected_change_count' } });
   }
 }
 

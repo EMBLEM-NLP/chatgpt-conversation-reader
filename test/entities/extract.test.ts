@@ -178,7 +178,7 @@ describe('urls: extraction and normalisation', () => {
 describe('secrets removed from urls never resurface as other entities', () => {
   it('a uuid, date or word inside a query string or fragment is not extracted', () => {
     const e = extractEntities({
-      text: 'Link https://x.example/a?u=123e4567-e89b-12d3-a456-426614174000&d=2025-01-02&word=zebraquartz#frag-secretword end',
+      text: 'Link https://x.example/a?u=00000000-0000-4000-8000-0000000000ab&d=2025-01-02&word=zebraquartz#frag-secretword end',
     });
     assert.deepEqual(normalizedOf(e, 'url'), ['x.example/a']);
     assert.deepEqual(of(e, 'uuid'), []);
@@ -189,8 +189,8 @@ describe('secrets removed from urls never resurface as other entities', () => {
   });
 
   it('a uuid in the url PATH is still extracted as a uuid', () => {
-    const e = extractEntities({ text: 'https://x.example/items/123e4567-e89b-12d3-a456-426614174000/view' });
-    assert.deepEqual(normalizedOf(e, 'uuid'), ['123e4567-e89b-12d3-a456-426614174000']);
+    const e = extractEntities({ text: 'https://x.example/items/00000000-0000-4000-8000-0000000000ab/view' });
+    assert.deepEqual(normalizedOf(e, 'uuid'), ['00000000-0000-4000-8000-0000000000ab']);
   });
 
   it('a rejected url-shaped run is blanked too', () => {
@@ -202,11 +202,11 @@ describe('secrets removed from urls never resurface as other entities', () => {
 
 describe('uuids', () => {
   it('extracts lower-cased 8-4-4-4-12 uuids and counts repeats', () => {
-    const e = extractEntities({ text: 'ids: 123E4567-E89B-12D3-A456-426614174000, again 123e4567-e89b-12d3-a456-426614174000; other 00000000-0000-4000-8000-000000000001' });
+    const e = extractEntities({ text: 'ids: 00000000-0000-4000-8000-0000000000AB, again 00000000-0000-4000-8000-0000000000ab; other 00000000-0000-4000-8000-000000000001' });
     assert.deepEqual(
       of(e, 'uuid').map((u) => [u.value, u.normalized, u.count]),
       [
-        ['123e4567-e89b-12d3-a456-426614174000', '123e4567-e89b-12d3-a456-426614174000', 2],
+        ['00000000-0000-4000-8000-0000000000ab', '00000000-0000-4000-8000-0000000000ab', 2],
         ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000001', 1],
       ],
     );
@@ -214,20 +214,20 @@ describe('uuids', () => {
 
   it('negative: wrong group sizes, non-hex digits and longer hex/alphanumeric runs are not uuids', () => {
     for (const text of [
-      '123e4567-e89b-12d3-a456-42661417400', // 11 in the last group
-      '123e4567-e89b-12d3-a456-4266141740000', // 13 in the last group
-      '123e4567-e89b-12d3-a456',
-      '123g4567-e89b-12d3-a456-426614174000', // g is not hex
-      'f123e4567-e89b-12d3-a456-426614174000', // 9 in the first group
-      '123e4567e89b12d3a456426614174000', // no hyphens
-      'x123e4567-e89b-12d3-a456-426614174000y',
+      '00000000-0000-4000-8000-0000000000a', // 11 in the last group
+      '00000000-0000-4000-8000-0000000000abc', // 13 in the last group
+      '00000000-0000-4000-8000',
+      '0000000g-0000-4000-8000-0000000000ab', // g is not hex
+      'f00000000-0000-4000-8000-0000000000ab', // 9 in the first group
+      '000000000000400080000000000000ab', // no hyphens
+      'x00000000-0000-4000-8000-0000000000aby',
     ]) {
       assert.deepEqual(of(extractEntities({ text }), 'uuid'), [], text);
     }
   });
 
   it('a uuid surrounded by punctuation or urn prefix is found', () => {
-    const e = extractEntities({ text: '(urn:uuid:123e4567-e89b-12d3-a456-426614174000)' });
+    const e = extractEntities({ text: '(urn:uuid:00000000-0000-4000-8000-0000000000ab)' });
     assert.equal(of(e, 'uuid').length, 1);
   });
 });
@@ -286,6 +286,17 @@ describe('timestamps', () => {
     ]) {
       assert.deepEqual(ts(text), [], text);
     }
+  });
+
+  it('negative: a token that continues with letters or digits is rejected whole, never cut down to a shorter timestamp', () => {
+    // Regression: the regex used to backtrack to "2025-01-15T10:30" for the first input (wrong value, lower precision).
+    for (const text of ['2025-01-15T10:30:00Zextra', '2025-01-15T10:30:00+02:00abc', '2025-01-15T10:30:00.1234567890Z', '2025-01-15T10:30:00Z1', '2025-01-15T10:30:00x']) {
+      assert.deepEqual(ts(text), [], text);
+    }
+    // Delimiters still end a timestamp normally, so punctuation around a complete token is fine.
+    assert.deepEqual(ts('(2025-01-15T10:30:00Z), "2025-01-15T10:30:00Z".'), [['2025-01-15T10:30:00Z', '2025-01-15T10:30:00Z']]);
+    assert.equal(of(extractEntities({ text: '(2025-01-15T10:30:00Z), "2025-01-15T10:30:00Z".' }), 'timestamp')[0]?.count, 2);
+    assert.deepEqual(ts('2025-01-15-extra'), [['2025-01-15', '2025-01-15']]);
   });
 
   it('a leap day is valid only in leap years', () => {
@@ -515,7 +526,8 @@ describe('personal data is not extracted', () => {
     for (const part of ['alice', 'smith', '@', 'bob', 'mail-server', 'carol', 'example.org', 'sub.mail']) {
       assert.equal(dump.includes(part), false, part);
     }
-    assert.deepEqual(normalizedOf(e, 'keyword'), ['about'].filter(() => false).concat(['contact', 'zebrawork']).sort());
+    // "about" is a stop word; everything that is left is plain prose (no e-mail part).
+    assert.deepEqual(normalizedOf(e, 'keyword'), ['contact', 'zebrawork']);
   });
 
   it('phone numbers and long digit strings never appear', () => {
@@ -603,14 +615,14 @@ describe('limits and options', () => {
 
   it('output order: kinds in fixed order, then count desc, then normalized asc', () => {
     const e = extractEntities({
-      text: 'zeta https://b.example/ https://a.example/ https://a.example/ 123e4567-e89b-12d3-a456-426614174000 2025-01-01',
+      text: 'zeta https://b.example/ https://a.example/ https://a.example/ 00000000-0000-4000-8000-0000000000ab 2025-01-01',
       recipient: 'python',
       blocks: [{ type: 'code', metadata: { language: 'go' } }],
       attachments: [attachment('f.txt')],
     });
     assert.deepEqual(
       e.map((x) => `${x.kind}:${x.normalized}`),
-      ['url:a.example/', 'url:b.example/', 'uuid:123e4567-e89b-12d3-a456-426614174000', 'timestamp:2025-01-01', 'tool:python', 'code_language:go', 'file_name:f.txt', 'keyword:zeta'],
+      ['url:a.example/', 'url:b.example/', 'uuid:00000000-0000-4000-8000-0000000000ab', 'timestamp:2025-01-01', 'tool:python', 'code_language:go', 'file_name:f.txt', 'keyword:zeta'],
     );
   });
 });

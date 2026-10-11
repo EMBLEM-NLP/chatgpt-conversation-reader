@@ -12,6 +12,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import fc from 'fast-check';
 import { analyzeTree } from '../../src/domain/branches.js';
@@ -19,10 +20,9 @@ import type { ConversationRecord, MessageRecord } from '../../src/domain/types.j
 import { UNIX_SECONDS_MAX, UNIX_SECONDS_MIN, validateConversationRecord } from '../../src/domain/validate.js';
 import { isGcrError } from '../../src/errors.js';
 import type { AdapterContext, AdapterOutcome } from '../../src/ingest/adapter.js';
-import { ChatGPTExportAdapter, chatGptExportAdapter } from '../../src/ingest/chatgpt-export.js';
+import { CHATGPT_ADAPTER_INFO_CODES, CHATGPT_ADAPTER_WARNING_CODES, ChatGPTExportAdapter, chatGptExportAdapter, scanConversationElement } from '../../src/ingest/chatgpt-export.js';
 import {
   ConversationBuilder,
-  SYNTHETIC_MARKER,
   adapterContext,
   contents,
   linearConversation,
@@ -283,6 +283,389 @@ describe('A5 numeric hygiene', () => {
     const size = rec(t).messages[0]?.attachments[0]?.sizeBytes;
     assert.ok(size !== undefined && size !== null);
     assert.equal(Object.is(size, 0), true, 'sizeBytes must be +0');
+  });
+});
+
+describe('A6 the provenance key `_gcr` never costs the source a value', () => {
+  it('a source "_gcr" and a source "_gcr_original" both survive, in either key order, and the real provenance stays intact', () => {
+    for (const body of ['"_gcr_original":1,"_gcr":2', '"_gcr":2,"_gcr_original":1']) {
+      const r = rec(`{"id":"c",${body},"mapping":{}}`);
+      const meta = r.rawMetadata as RawObject;
+      const kept = Object.entries(meta)
+        .filter(([k]) => k !== 'id' && k !== '_gcr')
+        .map(([, v]) => v)
+        .sort();
+      assert.deepEqual(kept, [1, 2], `both source values are kept (${body})`);
+      assert.deepEqual(Object.keys(meta['_gcr'] as RawObject), ['sourceElementSha256'], 'the provenance object is ours alone');
+    }
+  });
+
+  it('a source "_gcr" that is an object cannot forge sourceElementSha256', () => {
+    const forged = 'f'.repeat(64);
+    const t = `{"id":"c","_gcr":{"sourceElementSha256":"${forged}"},"mapping":{}}`;
+    const meta = rec(t).rawMetadata as RawObject;
+    assert.equal((meta['_gcr'] as RawObject)['sourceElementSha256'], sha256(t));
+    assert.deepEqual(meta['_gcr_original'], { sourceElementSha256: forged });
+  });
+});
+
+describe('A7 an empty default model slug is not a model', () => {
+  it('default_model_slug "" is null and the newer conversation model_slug is then used; "" everywhere is null', () => {
+    assert.equal(rec('{"id":"c","default_model_slug":"","mapping":{}}').defaultModelSlug, null);
+    assert.equal(rec('{"id":"c","default_model_slug":"","model_slug":"conv-model","mapping":{}}').defaultModelSlug, 'conv-model');
+    assert.equal(rec('{"id":"c","default_model_slug":"","model_slug":"","mapping":{}}').defaultModelSlug, null);
+    assert.equal(rec('{"id":"c","default_model_slug":"real","model_slug":"other","mapping":{}}').defaultModelSlug, 'real', 'default_model_slug keeps priority');
+  });
+});
+
+describe('A8 duplicate `message` keys and duplicate findings of a replaced mapping', () => {
+  it('a node that lists "message" twice is ambiguous: reported, last wins, completeness unknown', () => {
+    const dupMessage = MSG_NODE.replace('"message":{', '"message":{"id":"m","author":{"role":"user"},"content":{"content_type":"text","parts":["FIRST"]}},"message":{');
+    const r = rec(`{"id":"c1","mapping":{"r":${ROOT_NODE},"m":${dupMessage}},"current_node":"m"}`);
+    assert.equal(byId(r, 'm').text, 'x', 'JSON.parse semantics: the last message');
+    assert.ok(codes(r).includes('DUPLICATE_KEY'));
+    assert.equal(r.completeness, 'unknown');
+    assert.match(warn(r, 'COMPLETENESS_LOWERED')?.message ?? '', /duplicate_structural_key/);
+    assert.ok(!JSON.stringify(r.warnings).includes('FIRST'), 'the lost body is never echoed into warnings');
+  });
+
+  it('duplicates inside a mapping that a later "mapping" key REPLACES are not reported as findings about the record', () => {
+    const replaced = '{"a":{"id":"a","message":null,"parent":null,"children":[]},"a":{"id":"a","message":null,"parent":null,"children":[]}}';
+    const r = rec(`{"id":"c1","mapping":${replaced},"mapping":${GOOD_MAPPING},"current_node":"m"}`);
+    assert.deepEqual(r.messages.map((m) => m.id), ['r', 'm']);
+    assert.ok(!codes(r).includes('DUPLICATE_NODE_ID'), 'node "a" is not in the record, so a warning about it would be about nothing');
+    assert.equal((r.rawMetadata as RawObject)['_gcr'] !== undefined && 'duplicateNodeBodySha256' in ((r.rawMetadata as RawObject)['_gcr'] as RawObject), false);
+    assert.doesNotMatch(warn(r, 'COMPLETENESS_LOWERED')?.message ?? '', /duplicate_node_id/);
+    assert.match(warn(r, 'COMPLETENESS_LOWERED')?.message ?? '', /duplicate_structural_key/, 'the replaced tree itself is still reason enough');
+  });
+
+  it('a "mapping" replaced by a non-object leaves no stale findings either', () => {
+    const r = rec(`{"id":"c1","mapping":{"a":{"id":"a","parent":"x","parent":null,"children":[]},"a":{}},"mapping":null,"current_node":"a"}`);
+    assert.equal(r.messages.length, 0);
+    assert.ok(!codes(r).includes('DUPLICATE_NODE_ID'));
+    assert.ok(codes(r).includes('MAPPING_INVALID'));
+  });
+
+  it('scanner: structural duplicates are listed in the fixed vocabulary order, scoped to the mapping that survives', () => {
+    const dupParentAndChildren = '{"id":"m","parent":"a","parent":null,"children":[],"children":["z"],"message":null}';
+    const s = scanConversationElement(`{"current_node":"m","current_node":"m","mapping":{"m":${dupParentAndChildren}},"title":"t","title":"u"}`);
+    assert.deepEqual(s.structuralKeyDuplicates, ['current_node', 'parent', 'children']);
+    const none = scanConversationElement('{"title":"t","title":"u","mapping":{"m":{"k":1,"k":2,"message":{"parent":1,"parent":2}}}}');
+    assert.deepEqual(none.structuralKeyDuplicates, [], 'duplicates of non-structural keys, and of "parent" inside a nested message, do not count');
+    const replaced = scanConversationElement('{"mapping":{"m":{"parent":1,"parent":2}},"mapping":{"m":{"parent":null}}}');
+    assert.deepEqual(replaced.structuralKeyDuplicates, ['mapping'], 'the node-level duplicate belonged to the discarded mapping');
+  });
+});
+
+describe('A9 the warning list stays bounded and honest under hostile content types', () => {
+  it('a content_type spelled like the internal overflow marker cannot hijack the overflow summary', () => {
+    const entries: Array<[string, unknown]> = [['root', { id: 'root', message: null, parent: null, children: [] }]];
+    const types = ['\u0002overflow', ...Array.from({ length: 150 }, (_, i) => `t${i}`)];
+    types.forEach((t, i) => entries.push([`m${i}`, { id: `m${i}`, parent: 'root', children: [], message: { id: `m${i}`, author: { role: 'user' }, content: { content_type: t } } }]));
+    const r = rec(stringify({ id: 'c-spoof', mapping: ordered(entries), current_node: 'm1' }));
+    const unknown = r.warnings.filter((w) => w.code === 'UNKNOWN_CONTENT_TYPE');
+    const summary = unknown.filter((w) => /Further unknown content_type/.test(w.message));
+    assert.equal(summary.length, 1, 'exactly one overflow summary');
+    assert.match(summary[0]?.message ?? '', /\(51 occurrences\)$/, '151 types - 100 individually reported = 51 in the summary');
+    const own = unknown.filter((w) => w.message.includes('"?overflow"'));
+    assert.equal(own.length, 1, 'the hostile type has a warning of its own, with its own count of one');
+    assert.doesNotMatch(own[0]?.message ?? '', /occurrences/);
+    assert.equal(unknown.length, 101);
+  });
+
+  it('the single empty-string content_type is an ordinary unknown type (no special key), once', () => {
+    const b = new ConversationBuilder({ id: syntheticUuid(1) });
+    let p = b.root();
+    for (let i = 0; i < 3; i++) p = b.message(p, 'assistant', { content_type: '' });
+    const r = rec(b.text());
+    const w = r.warnings.filter((x) => x.code === 'UNKNOWN_CONTENT_TYPE');
+    assert.equal(w.length, 1);
+    assert.match(w[0]?.message ?? '', /\(3 occurrences\)$/);
+  });
+});
+
+describe('A10 pointers: distinct dangling pointers stay distinct and stay dangling', () => {
+  it('two different dangling parents whose spellings meet (an unusable pointer and the stand-in it maps to) get two different ids', () => {
+    const unsafe = 'gone\u0001a';
+    const standIn = `gcr-ref-${sha256(unsafe).slice(0, 24)}`;
+    const t = stringify({
+      id: 'c-two-dangling',
+      mapping: ordered([
+        ['n1', { id: 'n1', parent: unsafe, children: [], message: null }],
+        ['n2', { id: 'n2', parent: standIn, children: [], message: null }],
+      ]),
+      current_node: 'n1',
+    });
+    const r = rec(t);
+    const p1 = byId(r, 'n1').parentId;
+    const p2 = byId(r, 'n2').parentId;
+    assert.ok(p1 !== null && p2 !== null && p1 !== p2, 'two different missing parents must not be merged into one');
+    assert.ok(!r.messages.some((m) => m.id === p1 || m.id === p2), 'and neither names a node of the record');
+    assert.equal(analyzeTree(r.id, r.messages, r.currentNodeId).rootIds.length, 2);
+  });
+
+  it('a dangling current_node spelled like a stand-in id does not appear as the id of a real node in INVALID_CURRENT_NODE', () => {
+    const unsafe = 'ctl\u0001cur';
+    const t = stringify({ id: 'c-cur', mapping: ordered([[unsafe, { id: 'x', parent: null, children: [], message: null }]]), current_node: standInFor(unsafe) });
+    const r = rec(t);
+    assert.equal(r.currentNodeId, null, 'current_node names no key of the mapping');
+    const w = warn(r, 'INVALID_CURRENT_NODE');
+    assert.ok(w !== undefined && w.ids !== undefined && w.ids.length === 1);
+    assert.ok(!r.messages.some((m) => m.id === w.ids?.[0]), 'the warning must not point at an existing node');
+  });
+
+  it('one raw pointer is one id inside a conversation: the same dangling spelling in several places resolves identically', () => {
+    for (const ghost of ['ghost', 'gone\u0001a']) {
+      const t = stringify({
+        id: 'c-same-ghost',
+        mapping: ordered([
+          ['n1', { id: 'n1', parent: ghost, children: [ghost], message: null }],
+          ['n2', { id: 'n2', parent: ghost, children: [], message: null }],
+        ]),
+        current_node: ghost,
+      });
+      const r = rec(t);
+      const [p1, p2] = [byId(r, 'n1').parentId, byId(r, 'n2').parentId];
+      assert.ok(p1 !== null && p1 === p2, 'both nodes point at the same missing parent');
+      assert.deepEqual(byId(r, 'n1').childIds, [p1], 'the phantom child of n1 is that same missing id');
+      assert.deepEqual(warn(r, 'INVALID_CURRENT_NODE')?.ids, [p1]);
+      assert.deepEqual(warn(r, 'CHILD_NOT_FOUND')?.ids, [p1]);
+    }
+  });
+
+  it('pointers are resolved identically on every run (deterministic stand-ins)', () => {
+    const unsafe = 'gone\u0001a';
+    const t = stringify({ id: 'c-det', mapping: ordered([['n1', { id: 'n1', parent: unsafe, children: [unsafe, 'gcr-ref-x'], message: null }]]), current_node: 'n1' });
+    const a = JSON.stringify(rec(t));
+    for (let i = 0; i < 5; i++) assert.equal(JSON.stringify(rec(t)), a);
+  });
+});
+
+describe('A12 duplicate-key evidence is bounded: a hostile repeat count must not multiply memory', () => {
+  const gcrOf = (r: ConversationRecord): RawObject => (r.rawMetadata as RawObject)['_gcr'] as RawObject;
+
+  it('one node id repeated 300,000 times keeps 16 body hashes (the first 15 and the last), counts the rest, and stays small', () => {
+    const n = 300_000;
+    const body = (i: number): string => `{"id":"a","message":null,"parent":null,"children":[],"n":${i}}`;
+    const text = `{"id":"c","mapping":{${Array.from({ length: n }, (_, i) => `"a":${body(i)}`).join(',')}},"current_node":"a"}`;
+    const t0 = performance.now();
+    const r = rec(text);
+    const elapsed = performance.now() - t0;
+    const entries = gcrOf(r)['duplicateNodeBodySha256'] as Array<{ id: string; bodySha256: string[] }>;
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.id, 'a');
+    assert.equal(entries[0]?.bodySha256.length, 16);
+    assert.deepEqual(entries[0]?.bodySha256.slice(0, 15), Array.from({ length: 15 }, (_, i) => sha256(body(i))), 'the first 15 bodies, in file order');
+    assert.equal(entries[0]?.bodySha256[15], sha256(body(n - 1)), 'the last body is the one JSON.parse kept, and it is always hashed');
+    assert.equal(gcrOf(r)['duplicateNodeBodiesNotHashed'], n - 16, 'nothing is silently dropped: the remainder is counted');
+    assert.equal((byId(r, 'a').rawSource as RawObject)['n'], n - 1);
+    assert.equal(r.completeness, 'unknown');
+    assert.ok(JSON.stringify(r).length < 200_000, `the record must not grow with the repeat count (${JSON.stringify(r).length} bytes)`);
+    assert.ok(elapsed < 10_000, `took ${elapsed.toFixed(0)} ms`);
+  });
+
+  it('20,000 DIFFERENT duplicated ids: at most 1,000 are hashed, the others are counted, nothing throws', () => {
+    const keys = 20_000;
+    const parts: string[] = [];
+    for (let i = 0; i < keys; i++) parts.push(`"k${i}":{"id":"k${i}","message":null,"parent":null,"children":[]}`);
+    for (let i = 0; i < keys; i++) parts.push(`"k${i}":{"id":"k${i}","message":null,"parent":null,"children":[],"again":true}`);
+    const r = rec(`{"id":"c","mapping":{${parts.join(',')}},"current_node":"k0"}`);
+    const entries = gcrOf(r)['duplicateNodeBodySha256'] as Array<{ id: string; bodySha256: string[] }>;
+    assert.equal(entries.length, 1000);
+    assert.ok(entries.every((e) => e.bodySha256.length === 2));
+    assert.equal(gcrOf(r)['duplicateNodeBodiesNotHashed'], (keys - 1000) * 2);
+    assert.equal(r.messages.length, keys);
+    const w = warn(r, 'DUPLICATE_NODE_ID');
+    assert.ok(w !== undefined && (w.ids?.length ?? 0) <= 1000 && /\(20000 occurrences\)$/.test(w.message), 'every duplicated id is still counted in the warning');
+  });
+
+  it('small repeat counts keep the exact documented shape (no counter, every body hashed)', () => {
+    const r = rec(`{"id":"c","mapping":{"a":{"v":1},"a":{"v":2},"a":{"v":3}},"current_node":"a"}`);
+    assert.deepEqual(gcrOf(r)['duplicateNodeBodySha256'], [{ id: 'a', bodySha256: [sha256('{"v":1}'), sha256('{"v":2}'), sha256('{"v":3}')] }]);
+    assert.ok(!('duplicateNodeBodiesNotHashed' in gcrOf(r)));
+  });
+});
+
+describe('A13 every size cap says so: nothing is truncated silently', () => {
+  const small = new ChatGPTExportAdapter({ limits: { maxPartsPerMessage: 3 } });
+  const run = (text: string): ConversationRecord => {
+    const out = small.normalizeElementText(text, ctx, 0);
+    assert.equal(out.kind, 'record');
+    if (out.kind !== 'record') throw new Error('unreachable');
+    return validateConversationRecord(out.record);
+  };
+  const one = (message: RawObject): string =>
+    stringify({ id: 'c-caps', mapping: ordered([['m', { id: 'm', parent: null, children: [], message: { id: 'm', author: { role: 'assistant' }, ...message } }]]), current_node: 'm' });
+
+  it('thoughts items beyond the per-message cap: the extra items are not converted, and PARTS_TRUNCATED says so', () => {
+    const items = Array.from({ length: 5 }, (_, i) => ({ summary: `s${i}`, content: `c${i}` }));
+    const r = run(one({ content: { content_type: 'thoughts', thoughts: items } }));
+    assert.equal(r.messages[0]?.blocks.length, 3);
+    assert.equal(r.messages[0]?.text, 's0\nc0\ns1\nc1\ns2\nc2');
+    const w = r.warnings.filter((x) => x.code === 'PARTS_TRUNCATED');
+    assert.equal(w.length, 1);
+    assert.deepEqual(w[0]?.ids, ['m']);
+    assert.equal((r.messages[0]?.rawSource as RawObject)['content'] !== undefined, true, 'the full list is still in rawSource');
+    const exact = run(one({ content: { content_type: 'thoughts', thoughts: items.slice(0, 3) } }));
+    assert.ok(!codes(exact).includes('PARTS_TRUNCATED'), 'at the cap exactly: nothing is cut');
+  });
+
+  it('metadata.attachments beyond the per-message cap: PARTS_TRUNCATED, and the references kept are the first ones', () => {
+    const atts = Array.from({ length: 5 }, (_, i) => ({ id: `file-${i}` }));
+    const r = run(one({ content: { content_type: 'text', parts: ['x'] }, metadata: { attachments: atts } }));
+    assert.deepEqual(r.messages[0]?.attachments.map((a) => a.id), ['file-0', 'file-1', 'file-2']);
+    assert.equal(r.warnings.filter((x) => x.code === 'PARTS_TRUNCATED').length, 1);
+    const exact = run(one({ content: { content_type: 'text', parts: ['x'] }, metadata: { attachments: atts.slice(0, 3) } }));
+    assert.ok(!codes(exact).includes('PARTS_TRUNCATED'));
+  });
+
+  it('a real-time part with 1,500 frame pointers: 1,000 are recorded as attachment references, PARTS_TRUNCATED says so', () => {
+    const frames = Array.from({ length: 1500 }, (_, i) => ({ content_type: 'image_asset_pointer', asset_pointer: `sediment://file_${String(i).padStart(32, '0')}`, size_bytes: 1 }));
+    const part = { content_type: 'real_time_user_audio_video_asset_pointer', frames_asset_pointers: frames };
+    const r = rec(one({ content: { content_type: 'multimodal_text', parts: [part] } }));
+    assert.equal(r.messages[0]?.attachments.length, 1000);
+    assert.equal(r.warnings.filter((x) => x.code === 'PARTS_TRUNCATED').length, 1);
+    const ok = rec(one({ content: { content_type: 'multimodal_text', parts: [{ ...part, frames_asset_pointers: frames.slice(0, 1000) }] } }));
+    assert.equal(ok.messages[0]?.attachments.length, 1000);
+    assert.ok(!codes(ok).includes('PARTS_TRUNCATED'));
+  });
+
+  it('the truncation warnings of different fields are separate entries (each says which kind of list was cut)', () => {
+    const atts = Array.from({ length: 5 }, (_, i) => ({ id: `file-${i}` }));
+    const items = Array.from({ length: 5 }, (_, i) => ({ summary: `s${i}` }));
+    const r = run(one({ content: { content_type: 'thoughts', thoughts: items }, metadata: { attachments: atts } }));
+    assert.equal(r.warnings.filter((x) => x.code === 'PARTS_TRUNCATED').length, 2);
+  });
+});
+
+describe('A14 a thoughts JSON string is only expanded when it is small enough to parse safely', () => {
+  const thoughtsString = (total: number): string => {
+    const prefix = '[{"summary":"';
+    const suffix = '"}]';
+    return prefix + 'x'.repeat(total - prefix.length - suffix.length) + suffix;
+  };
+  const run = (s: string): ConversationRecord => {
+    const b = new ConversationBuilder({ id: syntheticUuid(1) });
+    b.message(b.root(), 'assistant', { content_type: 'thoughts', thoughts: s }, { id: 't' });
+    return rec(b.text());
+  };
+
+  it('exactly 8 MiB of characters is parsed; one more character is kept raw, unexpanded, with a shape warning and no text', () => {
+    const cap = 8 * 1024 * 1024;
+    const ok = run(thoughtsString(cap));
+    assert.equal(byId(ok, 't').text.length, cap - '[{"summary":"'.length - '"}]'.length);
+    assert.ok(!codes(ok).includes('CONTENT_SHAPE_UNEXPECTED'));
+    const big = run(thoughtsString(cap + 1));
+    assert.equal(byId(big, 't').text, '', 'an over-long thoughts string is never promoted to text');
+    assert.ok(codes(big).includes('CONTENT_SHAPE_UNEXPECTED'));
+    assert.equal(byId(big, 't').hidden, true);
+    assert.equal((byId(big, 't').blocks[0]?.metadata as RawObject)['rawThoughts'], null, 'the over-long string is not duplicated into block metadata (it stays in rawSource)');
+  });
+});
+
+describe('A15 docs/IMPORT_FORMAT.md describes the code that exists (drift guard)', () => {
+  // Resolved from the compiled test location (<out>/test/ingest/) up to the repository root, like the fixture tests do.
+  const root = new URL('../../../', import.meta.url);
+  const doc = readFileSync(new URL('docs/IMPORT_FORMAT.md', root), 'utf8');
+  const source = readFileSync(new URL('src/ingest/chatgpt-export.ts', root), 'utf8');
+  const rows = new Map<string, string>(); // warning code -> the whole table row
+  for (const line of doc.split('\n')) {
+    const m = /^\| `([A-Z][A-Z_]+)` \| (warning|info) \|/.exec(line);
+    if (m !== null) rows.set(m[1] as string, line);
+  }
+
+  it('every warning code the adapter can emit has a row in the warning table, with the right level', () => {
+    for (const code of CHATGPT_ADAPTER_WARNING_CODES) {
+      const row = rows.get(code);
+      assert.ok(row !== undefined, `${code} is missing from the warning table`);
+      const level = CHATGPT_ADAPTER_INFO_CODES.has(code) ? 'info' : 'warning';
+      assert.match(row ?? '', new RegExp(`^\\| \`${code}\` \\| ${level} \\|`), `${code} must be level ${level}`);
+    }
+  });
+
+  it('the table lists no code the adapter does not have', () => {
+    const known = new Set<string>(CHATGPT_ADAPTER_WARNING_CODES);
+    assert.deepEqual([...rows.keys()].filter((c) => !known.has(c)), []);
+  });
+
+  it('every reason COMPLETENESS_LOWERED can give is listed in its row', () => {
+    const reasons = [...source.matchAll(/reasons\.push\('([a-z_]+)'\)/g)].map((m) => m[1] as string);
+    assert.ok(reasons.length >= 10, `found ${reasons.length} reasons in the source`);
+    const row = rows.get('COMPLETENESS_LOWERED') ?? '';
+    for (const reason of new Set(reasons)) assert.ok(row.includes(`\`${reason}\``), `reason ${reason} is not documented`);
+  });
+
+  it('the documented hard limits are the ones in the code', () => {
+    assert.match(doc, /500,000 nodes per conversation/);
+    assert.match(doc, /50,000 `parts`/);
+    assert.match(doc, /64 MiB of text per message/);
+    assert.match(doc, /256 levels of nesting/);
+    assert.match(source, /maxNodesPerConversation: 500_000/);
+    assert.match(source, /maxPartsPerMessage: 50_000/);
+    assert.match(source, /export const MAX_RAW_NESTING_DEPTH = 256/);
+    assert.match(source, /const MAX_DISTINCT_UNKNOWN_CONTENT_TYPES = 100/);
+    assert.match(doc, /At most 100 distinct types/);
+    assert.match(source, /const MAX_DUP_KEYS_HASHED = 1000/);
+    assert.match(source, /const MAX_DUP_BODIES_PER_KEY = 16/);
+    assert.match(doc, /at most 1,000 duplicated node ids, the first 15 bodies and the last one/);
+  });
+});
+
+describe('A11 the asset lookup is validated against the live container, and only when it is needed', () => {
+  const withAttachment = (id: string, extra = ''): string =>
+    `{"id":"c","mapping":{"m":{"id":"m","parent":null,"children":[],"message":{"id":"m","author":{"role":"user"},"content":{"content_type":"text","parts":["x"]},"metadata":{"attachments":[{"id":"${id}"${extra}}]}}}},"current_node":"m"}`;
+
+  it('a name swapped for another of the same length in a live Set is neither claimed nor missed', () => {
+    const names = new Set(['file-AAAA.png', 'file-ZZZZ.png']);
+    const c = adapterContext({ availableAssetNames: names });
+    const at = (id: string): string | null => rec(withAttachment(id), 0, c).messages[0]?.attachments[0]?.presentInExportAs ?? null;
+    assert.equal(at('file-AAAA'), 'file-AAAA.png');
+    names.delete('file-AAAA.png');
+    names.add('file-BBBB.png');
+    assert.equal(at('file-AAAA'), null);
+    assert.equal(at('file-BBBB'), 'file-BBBB.png');
+    assert.equal(at('file-ZZZZ'), 'file-ZZZZ.png');
+  });
+
+  /** A Set whose iterations are counted: the adapter may walk the container's names at most once per conversation. */
+  function countingSet(values: Iterable<string>): { set: ReadonlySet<string>; iterations: () => number; reads: () => number } {
+    let iterations = 0;
+    let reads = 0;
+    const target = new Set(values);
+    const set = new Proxy(target, {
+      get(t, prop) {
+        reads++;
+        if (prop === Symbol.iterator) iterations++;
+        const v = Reflect.get(t, prop, t) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+    return { set, iterations: () => iterations, reads: () => reads };
+  }
+
+  it('a conversation without attachment ids (none at all, or only anonymous ones) never reads the container set', () => {
+    const spy = countingSet(['file-A.png']);
+    const c = adapterContext({ availableAssetNames: spy.set });
+    rec(linearConversationText(5), 0, c);
+    rec(withAttachment('x').replace('{"id":"x"}', '{"name":"anonymous.png"},{}'), 0, c);
+    assert.equal(spy.reads(), 0, 'no attachment id, no lookup');
+    rec(withAttachment('file-A'), 0, c);
+    assert.ok(spy.reads() > 0);
+  });
+
+  it('10,000 attachments in one message walk the 50,000-name container at most once, however many lookups there are', () => {
+    const spy = countingSet(Array.from({ length: 50_000 }, (_, i) => `user-x/file-${i}-img.png`));
+    const atts = Array.from({ length: 10_000 }, (_, i) => `{"id":"file-${i * 5}"}`).join(',');
+    const t = `{"id":"c","mapping":{"m":{"id":"m","parent":null,"children":[],"message":{"id":"m","author":{"role":"user"},"content":{"content_type":"text","parts":["x"]},"metadata":{"attachments":[${atts}]}}}},"current_node":"m"}`;
+    const r = rec(t, 0, adapterContext({ availableAssetNames: spy.set }));
+    const a = r.messages[0]?.attachments ?? [];
+    assert.equal(a.length, 10_000);
+    assert.equal(a[3]?.presentInExportAs, 'user-x/file-15-img.png');
+    assert.equal(a[9_999]?.presentInExportAs, 'user-x/file-49995-img.png');
+    assert.ok(spy.iterations() <= 1, `the container was walked ${spy.iterations()} times`);
+    // a second conversation re-validates the same Set once (it may have changed), not once per attachment
+    rec(t, 1, adapterContext({ availableAssetNames: spy.set }));
+    assert.ok(spy.iterations() <= 2, `the container was walked ${spy.iterations()} times for two conversations`);
   });
 });
 
@@ -812,7 +1195,7 @@ describe('property: pointer resolution agrees with an independent reference mode
         const ids = new Set(r.messages.map((m) => m.id));
         assert.equal(ids.size, keys.length, 'record ids are unique');
         const idOfKey = new Map(keys.map((k, i) => [k, r.messages[i]?.id as string]));
-        keys.forEach((k, i) => {
+        keys.forEach((_k, i) => {
           const m = r.messages[i] as MessageRecord;
           assert.equal(m.ordinal, i, 'ordinal is the file position');
           const n = nodes[i] as { parent: string | null; children: string[] };
@@ -832,6 +1215,70 @@ describe('property: pointer resolution agrees with an independent reference mode
         else assert.equal(r.currentNodeId, null);
       }),
       400,
+    );
+  });
+});
+
+describe('property: the scanner reports structural duplicates exactly like a model that knows what was emitted', () => {
+  const ROOT_KEYS = ['id', 'title', 'current_node', 'mapping', 'extra'] as const;
+  const NODE_KEYS = ['id', 'parent', 'children', 'message', 'other'] as const;
+  type NodeSpec = { keys: Array<(typeof NODE_KEYS)[number]>; nestedParentTwice: boolean };
+  type MappingSpec = { kind: 'object'; nodes: NodeSpec[]; nodeIdTwice: boolean } | { kind: 'null' } | { kind: 'array' };
+  const nodeArb: fc.Arbitrary<NodeSpec> = fc.record({ keys: fc.array(fc.constantFrom(...NODE_KEYS), { maxLength: 8 }), nestedParentTwice: fc.boolean() });
+  const mappingArb: fc.Arbitrary<MappingSpec> = fc.oneof(
+    fc.record({ kind: fc.constant('object' as const), nodes: fc.array(nodeArb, { maxLength: 3 }), nodeIdTwice: fc.boolean() }),
+    fc.constant({ kind: 'null' as const }),
+    fc.constant({ kind: 'array' as const }),
+  );
+  const docArb = fc.record({
+    // the order of root entries; every 'mapping' entry consumes the next mapping spec
+    rootKeys: fc.array(fc.constantFrom(...ROOT_KEYS), { maxLength: 9 }),
+    mappings: fc.array(mappingArb, { minLength: 3, maxLength: 3 }),
+  });
+
+  const nodeValue = (n: NodeSpec): unknown =>
+    ordered(
+      n.keys.map((k): [string, unknown] => {
+        if (k === 'message') return [k, ordered(n.nestedParentTwice ? [['parent', 1], ['parent', 2]] : [['parent', 1]])];
+        if (k === 'children') return [k, []];
+        return [k, null];
+      }),
+    );
+  const mappingValue = (m: MappingSpec): unknown => {
+    if (m.kind === 'null') return null;
+    if (m.kind === 'array') return [];
+    const entries: Array<[string, unknown]> = m.nodes.map((n, i) => [`n${i}`, nodeValue(n)]);
+    if (m.nodeIdTwice && m.nodes[0] !== undefined) entries.push(['n0', nodeValue(m.nodes[0])]);
+    return ordered(entries);
+  };
+  const count = (xs: readonly string[], x: string): number => xs.filter((y) => y === x).length;
+
+  it('current_node / mapping repeats on the root, parent / children / message repeats inside the nodes of the LAST mapping only', () => {
+    runProperty(
+      fc.property(docArb, ({ rootKeys, mappings }) => {
+        let used = 0;
+        const entries: Array<[string, unknown]> = rootKeys.map((k) => [k, k === 'mapping' ? mappingValue(mappings[used++ % mappings.length] as MappingSpec) : null]);
+        const text = stringify(ordered(entries));
+        const got = scanConversationElement(text).structuralKeyDuplicates;
+
+        const expected = new Set<string>();
+        for (const k of ['mapping', 'current_node']) if (count(rootKeys, k) > 1) expected.add(k);
+        const nMappings = count(rootKeys, 'mapping');
+        if (nMappings > 0) {
+          const last = mappings[(nMappings - 1) % mappings.length] as MappingSpec;
+          if (last.kind === 'object') {
+            const dupNode = (n: NodeSpec): void => {
+              for (const k of ['parent', 'children', 'message'] as const) if (count(n.keys, k) > 1) expected.add(k);
+            };
+            // the duplicated node id repeats the body of node 0 as a second node object: its keys are judged on their own
+            last.nodes.forEach(dupNode);
+            if (last.nodeIdTwice && last.nodes[0] !== undefined) dupNode(last.nodes[0]);
+          }
+        }
+        assert.deepEqual(got, ['mapping', 'current_node', 'parent', 'children', 'message'].filter((k) => expected.has(k)), text);
+        assert.equal(JSON.stringify(JSON.parse(text)).length > 0, true, 'the generated text is valid JSON');
+      }),
+      600,
     );
   });
 });

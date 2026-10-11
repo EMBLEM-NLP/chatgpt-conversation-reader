@@ -13,7 +13,10 @@
  * LIMITATIONS (stated so nobody over-trusts this test):
  *  - It covers first-party src/ only. The MCP SDK dependency itself contains network code in node_modules
  *    (HTTP/SSE/WebSocket transports, OAuth); that is why importing the SDK is restricted to an allow-list of
- *    stdio/in-memory subpaths, and why the dependency allow-list is asserted. Transitive code is not scanned.
+ *    stdio/in-memory subpaths, and why the dependency allow-list is asserted. The relative-import closure of
+ *    those subpaths inside the installed SDK is scanned for forbidden modules and for packages outside a reviewed
+ *    set (SDK_REACHABLE_EXTERNALS); the third-party packages it names (ajv, zod, ...) and any other transitive
+ *    code are not scanned.
  *  - It is a tripwire against accidents and lazy shortcuts, not a sandbox. Determined obfuscation (reading code
  *    from disk and evaluating it, strings assembled from computed pieces, base64, ...) can only be partly
  *    anticipated. The runtime guarantee comes from there being no network code to call, plus code review of this
@@ -24,6 +27,13 @@
  *  - Sources are read as UTF-8 only (a BOM is fine). UTF-16 files, invalid UTF-8 and NUL bytes fail the scan,
  *    because the TypeScript compiler decodes UTF-16 and a UTF-8 text scan would not see what it emits.
  *  - A relative import must stay inside src/: whatever it reaches outside is code this scan never read.
+ *  - A source file larger than 2 MiB fails the scan (the tokenizer keeps one object per token, ~140x the file size).
+ *  - Known gaps, all deliberate obfuscation rather than accident: a Function constructor held in a variable
+ *    (`const F = (() => {}).constructor`), `class X extends Function`, a marker or specifier assembled by
+ *    `.concat()`, `.join()`, template substitutions of constants or any other computed piece, and a computed key
+ *    in a destructuring of process (`const { [k]: f } = process`).
+ *  - Fixing a finding by renaming is intended: the rules flag declarations as well as uses where the two cannot
+ *    be told apart without a parser (a method or property named fetch, a method named import, a binding named global).
  *
  * All sources analysed here are synthetic strings. Strings that name private endpoints or cookie names are
  * assembled from fragments at runtime so this file never contains them literally (they would otherwise trip
@@ -89,6 +99,13 @@ const PUNCTUATORS: readonly string[] = [
 
 /** ECMAScript LineTerminator: a `//` comment and a hashbang end at any of these, and a regex literal cannot contain one. */
 const isLineTerminator = (ch: string | undefined): boolean => ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029';
+
+/**
+ * Whitespace as the TypeScript compiler (the tool that produces what runs) reads it. That is a JavaScript `\s` plus
+ * U+0085 (NEL) and U+200B (zero width space): tsc accepts both between tokens and prints the module again without them,
+ * so `import​('node:http')` becomes a plain dynamic import. Neither is a line terminator.
+ */
+const isWhitespace = (ch: string): boolean => /\s/.test(ch) || ch === '\u0085' || ch === '​';
 
 const ID_START = /[\p{ID_Start}$_]/u;
 const ID_PART = /[\p{ID_Continue}$\u200c\u200d]/u;
@@ -407,7 +424,7 @@ class Lexer {
         this.i++;
         continue;
       }
-      if (/\s/.test(c)) {
+      if (isWhitespace(c)) {
         this.i++;
         continue;
       }
@@ -576,6 +593,7 @@ const FORBIDDEN_BUILTINS: ReadonlyMap<string, string> = new Map([
   ['child_process', 'process spawning (allowed only as { execFile } under src/devtools)'],
   ['repl', 'interactive evaluation'],
   ['module', 'createRequire / computed-name module loading bypasses this scan'],
+  ['test', 'node:test run() spawns node subprocesses'],
 ]);
 
 /** Third-party packages whose only purpose is network or browser automation. */
@@ -648,7 +666,16 @@ const COMPUTED_FORBIDDEN_NAMES: ReadonlySet<string> = new Set([
   'loadExtension', 'enableLoadExtension', 'eval', 'Function', '_load',
 ]);
 /** Identifiers that, however they are reached (destructuring, aliases, named imports), load native code or process internals. */
-const NATIVE_LOADER_NAMES: ReadonlySet<string> = new Set(['dlopen', '_linkedBinding', 'mainModule', 'loadExtension', 'enableLoadExtension', 'allowExtension']);
+const NATIVE_LOADER_NAMES: ReadonlySet<string> = new Set([
+  'dlopen', '_linkedBinding', 'mainModule', 'loadExtension', 'enableLoadExtension', 'allowExtension',
+  'execve', // process.execve (Node >= 22.15) replaces the process image with any program: spawning without child_process
+  'setEngine', // crypto.setEngine(path) loads an OpenSSL engine, i.e. a native library, like dlopen
+]);
+/** Names flagged wherever they appear as identifiers (see NATIVE_LOADER_NAMES and the switch in scanSource); a quoted key spelling them is flagged as well. */
+const QUOTED_KEY_FORBIDDEN_NAMES: ReadonlySet<string> = new Set([
+  'WebSocket', 'XMLHttpRequest', 'EventSource', 'sendBeacon', 'createRequire', 'getBuiltinModule',
+  'dlopen', '_linkedBinding', 'mainModule', 'loadExtension', 'enableLoadExtension', 'allowExtension', 'execve', 'setEngine',
+]);
 /** A binding of these words declares a new name, so a following/preceding occurrence is not a use of the global object. */
 const DECLARATION_WORDS: ReadonlySet<string> = new Set(['const', 'let', 'var', 'function', 'class', 'interface', 'type', 'enum', 'namespace', 'import', 'as', 'typeof', 'declare']);
 
@@ -882,8 +909,18 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
               add('forbidden-global', t.line, 'module.constructor is the CommonJS loader');
             }
             const chained = recvTok !== undefined && recvTok.kind === 'ident' && recvTok.text === 'constructor' && recvTok.afterDot;
-            const onExpression = isPunct(next, '(') && recvTok !== undefined && recvTok.kind === 'punct' && recvTok.text === ')';
-            if (chained || onExpression) add('forbidden-global', t.line, 'the Function constructor reached through .constructor defeats static analysis');
+            // `x.constructor('code')`, `x.constructor?.('code')` and `x.constructor.call/apply/bind(...)`: on a function value that is the
+            // Function constructor (`Object.constructor`, `fn.constructor`, `[].map.constructor`).
+            const after = toks[k + 2];
+            const called =
+              isPunct(next, '(') ||
+              (isPunct(next, '?.') && isPunct(after, '(')) ||
+              (isPunct(next, '.') && after !== undefined && after.kind === 'ident' && (after.text === 'call' || after.text === 'apply' || after.text === 'bind'));
+            // `new this.constructor(...)` and `new a.b.constructor(...)` build a subclass-aware copy: not a call of the constructor as a function.
+            let head = k - 2;
+            while (head >= 2 && toks[head]?.kind === 'ident' && (isPunct(toks[head - 1], '.') || isPunct(toks[head - 1], '?.')) && toks[head - 2]?.kind === 'ident') head -= 2;
+            const underNew = recvTok !== undefined && recvTok.kind === 'ident' && toks[head - 1]?.kind === 'ident' && toks[head - 1]?.text === 'new';
+            if (chained || (called && !underNew)) add('forbidden-global', t.line, 'the Function constructor reached through .constructor defeats static analysis');
           }
           break;
         case 'eval':
@@ -923,6 +960,18 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
         isPunct(toks[j], ':') && value !== undefined && value.kind === 'ident' && value.text === 'false' && (isPunct(after, ',') || isPunct(after, '}'));
       if (!literalFalse) add('child-process-usage', t.line, 'a `shell` option other than the literal `shell: false`');
     }
+    // A forbidden member named by a quoted key: `p['binding']` on an alias of process, `const { 'binding': b } = process`,
+    // `{ ['dlopen']: d } = process`. The identifier spellings are flagged wherever they appear, so the quoted ones are too.
+    if (t.kind === 'str' && (QUOTED_KEY_FORBIDDEN_NAMES.has(t.text) || (t.text === 'binding' && mentionsProcess))) {
+      const open = toks[k - 1];
+      const beforeOpen = toks[k - 2];
+      const subscript =
+        isPunct(open, '[') && isPunct(next, ']') && beforeOpen !== undefined &&
+        ((beforeOpen.kind === 'ident' && !REGEX_PRECEDING_WORDS.has(beforeOpen.text)) || isPunct(beforeOpen, ')') || isPunct(beforeOpen, ']'));
+      const computedKey = isPunct(open, '[') && isPunct(next, ']') && (isPunct(beforeOpen, '{') || isPunct(beforeOpen, ',')) && isPunct(toks[k + 2], ':');
+      const quotedKey = (isPunct(open, '{') || isPunct(open, ',')) && isPunct(next, ':');
+      if (subscript || computedKey || quotedKey) add('forbidden-global', t.line, `forbidden member ${show(t.text)} named by a quoted key`);
+    }
     // x['name'] on global-ish receivers: a non-literal or forbidden name is a dynamic lookup of a forbidden member.
     if (isPunct(t, '[')) {
       const recvTok = toks[k - 1];
@@ -938,35 +987,53 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
 
   // --- string literals: private endpoint / cookie markers --------------------------------------
   // Adjacent literals joined by '+' are folded first, so splitting a marker across two strings does not help.
+  // A server decodes percent-escapes in a path (and a proxy may decode twice), so `/%62ackend-api` names the same endpoint: check the
+  // literal as written and after one and two lenient decoding passes.
+  const percentDecode = (s: string): string => s.replace(/%([0-9a-f]{2})/gi, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
   const checkLiteralText = (text: string, line: number): void => {
-    const lower = text.toLowerCase();
-    for (const needle of FORBIDDEN_LITERALS) {
-      if (lower.includes(needle.toLowerCase())) {
+    const forms = text.includes('%') ? [text, percentDecode(text), percentDecode(percentDecode(text))] : [text];
+    for (const form of forms) {
+      const lower = form.toLowerCase();
+      const needle = FORBIDDEN_LITERALS.find((n) => lower.includes(n.toLowerCase()));
+      if (needle !== undefined) {
         add('forbidden-literal', line, `string literal contains a forbidden marker (${needle.length} chars, starts ${show(needle.slice(0, 6))})`);
-        break;
+        return;
       }
     }
   };
+  // Literals added together are folded before the check, so splitting a marker over `'a' + 'b'`, `('a') + ('b')` or a
+  // `+` followed by a template chunk does not help. Parentheses are transparent; anything else ends the run.
   let run: { text: string; line: number } | null = null;
+  let plus = false; // a '+' (possibly followed by parentheses) separates the next literal from `run`
   const flush = (): void => {
     if (run !== null) checkLiteralText(run.text, run.line);
     run = null;
+    plus = false;
   };
   for (let k = 0; k < toks.length; k++) {
     const t = toks[k];
     if (t === undefined) continue;
-    const before = toks[k - 1];
-    const joinable = t.kind === 'str' || (t.kind === 'tmpl' && t.head && !t.subst);
+    const joined = run !== null && plus;
+    // A string, a template without substitution, or the last chunk of a template (its start is dynamic, its end is not).
+    const joinable = t.kind === 'str' || (t.kind === 'tmpl' && !t.subst);
     if (joinable) {
-      if (run !== null && before !== undefined && before.kind === 'punct' && before.text === '+') run.text += t.text;
-      else {
+      if (run !== null && joined) {
+        run.text += t.text;
+        plus = false;
+      } else {
         flush();
         run = { text: t.text, line: t.line };
       }
     } else if (t.kind === 'tmpl') {
+      // A chunk followed by a substitution: the head can still be the right-hand side of a `+`.
+      if (run !== null && joined && t.head) run.text += t.text;
+      else checkLiteralText(t.text, t.line);
       flush();
-      checkLiteralText(t.text, t.line);
-    } else if (!(t.kind === 'punct' && t.text === '+' && run !== null)) {
+    } else if (run !== null && t.kind === 'punct' && t.text === '+') {
+      plus = true;
+    } else if (run !== null && t.kind === 'punct' && (t.text === '(' || t.text === ')')) {
+      // transparent
+    } else {
       flush();
     }
   }
@@ -992,8 +1059,12 @@ function scanSource(src: string, ctx: ScanContext): SourceScan {
 const SCANNED_EXTENSIONS: ReadonlySet<string> = new Set(['.ts', '.mts', '.cts', '.js', '.mjs', '.cjs']);
 /** The tokenizer has no JSX grammar: refuse such files rather than mis-scan them. */
 const UNSUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set(['.tsx', '.jsx']);
-/** Real source files are far smaller; a bigger one cannot be audited within bounded memory, so it fails the scan instead of being read. */
-const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+/**
+ * Real source files are far smaller (the largest in src/ is a few hundred KiB); a bigger one fails the scan instead of being read.
+ * The cap is what bounds memory: the tokenizer holds one object per token, ~140x the file size for dense code (a 16 MiB file
+ * of `a;a;...` took ~11 s and ~2.2 GB).
+ */
+const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 /** Native or wasm binaries would be code the text scan cannot see. */
 const OPAQUE_EXTENSIONS: ReadonlySet<string> = new Set(['.node', '.wasm']);
 
@@ -2105,6 +2176,289 @@ describe('adversarial: package.json overrides cannot swap an allow-listed depend
   it('allows version-only overrides (security pins) and absent overrides', () => {
     assert.deepEqual(runtimeDependencyProblems({ ...base, overrides: { qs: '6.13.0', express: { 'path-to-regexp': '^8.2.0' } } }), []);
     assert.deepEqual(runtimeDependencyProblems(base), []);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// 6. Second adversarial pass. Found by differential testing (tsc 7 emission for every BMP code point; the
+//    TypeScript 6 and acorn token streams over ~23,000 real .ts/.js files, which agree with this tokenizer apart
+//    from CRLF folding inside template text) and by attack on the rules.
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * The 23 code points tsc 7 accepts as whitespace: obtained by compiling `import<cp>("node:http")` for every BMP code
+ * point and keeping those whose emit is still a clean dynamic import. A JavaScript `\s` knows 21 of them. U+0085 (NEL)
+ * and U+200B (zero width space) are the two it does not, and the compiler prints the module again without them, so
+ * `import​('node:http')` compiles to a plain dynamic import while a `\s`-based tokenizer sees a stray symbol.
+ */
+const TSC_WHITESPACE: readonly string[] = [
+  0x0009, 0x000b, 0x000c, 0x0020, 0x0085, 0x00a0, 0x1680,
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x200b,
+  0x202f, 0x205f, 0x3000, 0xfeff,
+].map((cp) => String.fromCharCode(cp));
+const cpLabel = (ch: string): string => `U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+
+describe('adversarial: whitespace the TypeScript compiler accepts is whitespace here too', () => {
+  for (const ch of TSC_WHITESPACE) {
+    it(`${cpLabel(ch)} separates tokens`, () => {
+      assert.deepEqual(sig(`a${ch}b`), ['i:a', 'i:b']);
+    });
+    it(`${cpLabel(ch)} between import and ( does not hide a dynamic import`, () => {
+      assert.ok(rulesOf(`export const m = import${ch}('node:http');`).includes('forbidden-module'));
+      assert.ok(rulesOf(`export const m = import${ch}(name);`).includes('dynamic-specifier'));
+    });
+    it(`${cpLabel(ch)} between from and the specifier does not hide a static import or re-export`, () => {
+      assert.ok(rulesOf(`import x from${ch}'node:http';`).includes('forbidden-module'));
+      assert.ok(rulesOf(`export *${ch}from${ch}'node:net';`).includes('forbidden-module'));
+    });
+    it(`${cpLabel(ch)} before ( does not hide require, Function or eval calls`, () => {
+      assert.ok(rulesOf(`const m = require${ch}('node:http');`).includes('forbidden-module'));
+      assert.ok(rulesOf(`const f = Function${ch}('return 1');`).includes('forbidden-global'));
+      assert.ok(rulesOf(`eval${ch}('1');`).includes('forbidden-global'));
+    });
+  }
+  it('whitespace in any of the gaps of a violation never hides it (property)', () => {
+    runProperty(
+      fc.property(fc.array(fc.constantFrom(...TSC_WHITESPACE), { minLength: 4, maxLength: 4 }), (ws) => {
+        const src = `export const m = import${ws[0]}(${ws[1]}'node:http'${ws[2]})${ws[3]};`;
+        assert.ok(rulesOf(src).includes('forbidden-module'), JSON.stringify(src));
+      }),
+    );
+  });
+  it('U+0085 and U+200B are not line terminators: a // comment runs past them (the compiler agrees), line numbers do not move', () => {
+    assert.deepEqual(rulesOf("// note\u0085import x from 'node:http';"), []);
+    assert.deepEqual(rulesOf("// note​import x from 'node:http';"), []);
+    const found = scanSource("export const a = 1;\u0085​\nimport x from 'node:http';", NO_CP).findings;
+    assert.deepEqual(found.map((f) => [f.rule, f.line]), [['forbidden-module', 2]]);
+  });
+});
+
+describe('adversarial: a private-endpoint marker split across parenthesised literals is still one literal', () => {
+  const head = PATH_MARKER.slice(0, 5);
+  const tail = PATH_MARKER.slice(5);
+  const positives: ReadonlyArray<readonly [string, string]> = [
+    ['both halves parenthesised', `const p = ('${head}') + ('${tail}');`],
+    ['second half parenthesised', `const p = '${head}' + ('${tail}');`],
+    ['first half parenthesised', `const p = ('${head}') + '${tail}';`],
+    ['doubly parenthesised', `const p = (('${head}')) + (('${tail}'));`],
+    ['whole sum parenthesised', `const p = ('${head}' + '${tail}');`],
+    ['line breaks and comments between', `const p = ( '${head}' ) /* x */ +\n  ( // y\n '${tail}' );`],
+    ['template chunk with a substitution after the plus', `const p = '${head}' + \`${tail}\${suffix}\`;`],
+    ['three parts, the middle one parenthesised', `const p = 'a' + ('${head}') + '${tail}';`],
+  ];
+  for (const [name, src] of positives) {
+    it(`detects: ${name}`, () => {
+      assert.ok(rulesOf(src).includes('forbidden-literal'), `expected forbidden-literal for: ${src}`);
+    });
+  }
+  const negatives: ReadonlyArray<readonly [string, string]> = [
+    ['two separate statements', `log('${head}'); log('${tail}');`],
+    ['array elements', `const l = ['${head}', '${tail}'];`],
+    ['call arguments', `f('${head}', '${tail}');`],
+    ['two calls added together', `const q = g('${head}') + h('${tail}');`],
+    ['a number between', `const q = '${head}' + 1 + '${tail}';`],
+  ];
+  for (const [name, src] of negatives) {
+    it(`ignores: ${name}`, () => {
+      assert.deepEqual(rulesOf(src), []);
+    });
+  }
+});
+
+describe('adversarial: percent-encoded private-endpoint markers', () => {
+  const encodedB = PATH_MARKER.replace('b', '%62');
+  const encodedSlash = `host${PATH_MARKER.replace('/', '%2F')}`;
+  const doubleEncoded = PATH_MARKER.replace('b', '%2562');
+  for (const [name, text] of [
+    ['one letter encoded', `${encodedB}/`],
+    ['the slash encoded, upper-case hex', encodedSlash],
+    ['lower-case hex', PATH_MARKER.replace('/', '%2f')],
+    ['double encoded', `${doubleEncoded}/`],
+    ['the whole segment encoded', `/${[...PATH_MARKER.slice(1)].map((c) => `%${c.charCodeAt(0).toString(16)}`).join('')}/`],
+  ] as const) {
+    it(`detects: ${name}`, () => {
+      assert.ok(rulesOf(`const p = '${text}';`).includes('forbidden-literal'), text);
+    });
+  }
+  it('an ordinary percent sign or encoded text is not a marker', () => {
+    assert.deepEqual(rulesOf("const a = '100%'; const b = '%41%42'; const c = '50%25 off'; const d = '/a%2Fb';"), []);
+  });
+});
+
+describe('adversarial: the Function constructor reached through .constructor on a named function', () => {
+  const positives: ReadonlyArray<readonly [string, string]> = [
+    ['Object.constructor(...)', "Object.constructor('return fetch')()(u);"],
+    ['a function value .constructor(...)', "fn.constructor('return 1')();"],
+    ['a member chain', "[].map.constructor('return 1')();"],
+    ['.constructor.call', "Math.max.constructor.call(null, 'return 1')();"],
+    ['.constructor.apply', "Object.constructor.apply(null, ['return 1'])();"],
+    ['.constructor.bind', "Object.constructor.bind(null)('return 1')();"],
+    ['this.constructor(...) called without new', "this.constructor('return 1');"],
+    ['optional call', "fn?.constructor?.('return 1');"],
+  ];
+  for (const [name, src] of positives) {
+    it(`flags: ${name}`, () => {
+      assert.ok(rulesOf(src).includes('forbidden-global'), `expected forbidden-global for: ${src}`);
+    });
+  }
+  const negatives: ReadonlyArray<readonly [string, string]> = [
+    ['new this.constructor(...)', 'class A { clone() { return new this.constructor(1); } }'],
+    ['new on a longer chain', 'const c = new a.b.constructor(1, 2);'],
+    ['constructor.name', 'const n = err.constructor.name; const m = Object.getPrototypeOf(x).constructor.name;'],
+    ['comparison', 'if (x.constructor === Object || y.constructor !== Array) {}'],
+    ['constructor declaration and super call', 'class B extends A { constructor() { super(); } }'],
+  ];
+  for (const [name, src] of negatives) {
+    it(`ignores: ${name}`, () => {
+      assert.deepEqual(scanSource(src, NO_CP).findings, []);
+    });
+  }
+});
+
+describe('adversarial: process replacement, the test runner and OpenSSL engines run or load programs without child_process or dlopen', () => {
+  for (const [name, src] of [
+    ['process.execve', "process.execve('/usr/bin/curl', ['curl', u]);"],
+    ['process.execve through an alias', "const p = process; p.execve('/usr/bin/curl', [], {});"],
+    ['destructured execve', 'const { execve } = process;'],
+    ['node:test run()', "import { run } from 'node:test';"],
+    ['node:test through a dynamic import', "const t = await import('node:test');"],
+    ['node:test sub-path', "import 'node:test/reporters';"],
+    ['node:test via require', "const t = require('node:test');"],
+    ['crypto.setEngine', "import { setEngine } from 'node:crypto'; setEngine('/tmp/engine.so', 0);"],
+    ['quoted setEngine', "const e = crypto['setEngine'];"],
+  ] as const) {
+    it(`flags: ${name}`, () => {
+      assert.ok(rulesOf(src).length > 0, `expected a finding for: ${src}`);
+    });
+  }
+  it('the words in comments and strings are fine', () => {
+    assert.deepEqual(rulesOf("// process.execve, node:test, setEngine\nconst s = 'execve node:test setEngine';"), []);
+  });
+});
+
+describe('adversarial: forbidden members named by a quoted key', () => {
+  const positives: ReadonlyArray<readonly [string, string]> = [
+    ['destructuring process with a quoted key', "const { 'binding': b } = process; b('tcp_wrap');"],
+    ['quoted key on an alias of process', "const p = process; p['binding']('tcp_wrap');"],
+    ['computed literal key in a pattern', "const { ['dlopen']: d } = process;"],
+    ['quoted key getBuiltinModule', "const g = loader['getBuiltinModule']('node:http');"],
+    ['quoted key WebSocket', "const W = host['WebSocket'];"],
+    ['quoted key in an object literal', "const o = { 'createRequire': make };"],
+    ['quoted execve', "const x = proc['execve'];"],
+  ];
+  for (const [name, src] of positives) {
+    it(`flags: ${name}`, () => {
+      assert.ok(rulesOf(src).includes('forbidden-global'), `expected forbidden-global for: ${src}`);
+    });
+  }
+  const negatives: ReadonlyArray<readonly [string, string]> = [
+    ['an unrelated quoted key', "const o = { 'content-type': 1 }; const b = o['name'];"],
+    ['binding as a quoted key in a file that never mentions process', "const o = { 'binding': 1 }; const b = o['binding'];"],
+    ['a longer word', "const n = row['WebSocketCount'] + row['fetchedAt'];"],
+    ['a plain string that is not a key', "const kind = 'WebSocket'; const label = 'dlopen';"],
+    ['a quoted fetch key on a first-party object (member fetch is allowed too)', "const f = repo['fetch'];"],
+  ];
+  for (const [name, src] of negatives) {
+    it(`ignores: ${name}`, () => {
+      assert.deepEqual(scanSource(src, NO_CP).findings, []);
+    });
+  }
+});
+
+describe('adversarial: the source size cap bounds the scanner memory', () => {
+  // A 16 MiB file of `a;a;a;...` needed ~11 s and ~2.2 GB of resident memory (one token object per two bytes) before the cap was lowered.
+  it('refuses a source just over the cap even though it is valid text (it is not read into memory)', async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, 'big.ts'), Buffer.alloc(2 * 1024 * 1024 + 1, 0x61));
+      assert.deepEqual(summarizeFiles(await scanTree(dir)), ['big.ts:0:scanner']);
+    });
+  });
+  it('accepts a 2 MiB source (the cap is inclusive)', async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, 'edge.ts'), `// ${'a'.repeat(2 * 1024 * 1024 - 4)}\n`);
+      assert.deepEqual((await scanTree(dir)).findings, []);
+    });
+  });
+});
+
+/** Packages and builtins the allowed SDK subpaths may import (checked against the installed SDK below). Anything else is a decision to review. */
+const SDK_REACHABLE_EXTERNALS: ReadonlySet<string> = new Set(['ajv', 'ajv-formats', 'zod', 'zod-to-json-schema', 'node:process']);
+
+/** Follows relative imports from the entry file of each allowed SDK subpath and returns the files read and the non-relative specifiers met. */
+async function sdkImportClosure(sdkRoot: string): Promise<{ files: string[]; externals: Map<string, string>; problems: string[] }> {
+  const pkg = JSON.parse(await readFile(join(sdkRoot, 'package.json'), 'utf8')) as { exports?: Record<string, { import?: string }> };
+  const entryOf = (sub: string): string | undefined => {
+    const exact = pkg.exports?.[sub === '' ? '.' : `./${sub}`]?.import;
+    return exact ?? pkg.exports?.['./*']?.import?.replace('*', `${sub}.js`);
+  };
+  const files = new Set<string>();
+  const externals = new Map<string, string>();
+  const problems: string[] = [];
+  const visit = async (abs: string, via: string): Promise<void> => {
+    if (files.has(abs)) return;
+    files.add(abs);
+    let text: string;
+    try {
+      text = await readFile(abs, 'utf8');
+    } catch {
+      problems.push(`${via}: ${abs} cannot be read`);
+      return;
+    }
+    const scan = scanSource(text, NO_CP);
+    for (const f of scan.findings) {
+      if (f.rule === 'scanner' || f.rule === 'dynamic-specifier') problems.push(`${abs.slice(sdkRoot.length)}:${f.line} [${f.rule}] ${f.detail}`);
+    }
+    for (const { spec } of scan.specifiers) {
+      if (spec.startsWith('.')) await visit(join(dirname(abs), spec), abs.slice(sdkRoot.length));
+      else if (!externals.has(spec)) externals.set(spec, abs.slice(sdkRoot.length));
+    }
+  };
+  for (const sub of MCP_SDK_ALLOWED_SUBPATHS) {
+    const target = entryOf(sub);
+    const abs = target === undefined ? undefined : join(sdkRoot, target);
+    // The package root is listed but the installed SDK ships no dist/esm/index.js: importing it fails, so there is nothing to follow.
+    if (abs === undefined || (sub === '' && !existsSync(abs))) continue;
+    await visit(abs, `allowed subpath ${show(sub)}`);
+  }
+  return { files: [...files], externals, problems };
+}
+
+describe('repository: the allowed MCP SDK subpaths reach no network code (allow-list soundness)', () => {
+  const sdkRoot = join(findRepoRoot(), 'node_modules', '@modelcontextprotocol', 'sdk');
+  let closure: Awaited<ReturnType<typeof sdkImportClosure>>;
+  before(async () => {
+    closure = await sdkImportClosure(sdkRoot);
+  });
+
+  it('actually followed the SDK (guards against a vacuous pass)', () => {
+    assert.ok(closure.files.length >= 15, `only ${closure.files.length} SDK files followed`);
+    assert.ok(closure.files.some((f) => f.endsWith('/server/mcp.js')), 'server/mcp.js must be among them');
+  });
+  it('every file followed is readable and every import in it is a literal', () => {
+    assert.deepEqual(closure.problems, []);
+  });
+  it('imports no network, process-spawning or code-loading module, nor any package outside the reviewed set', () => {
+    const bad: string[] = [];
+    for (const [spec, file] of closure.externals) {
+      const verdict = checkSpecifier(spec, NO_CP);
+      const pkg = spec.startsWith('node:') ? spec : packageNameOf(spec);
+      if (verdict !== null && verdict.rule === 'forbidden-module') bad.push(`${file} imports ${show(spec)}: ${verdict.detail}`);
+      else if (!SDK_REACHABLE_EXTERNALS.has(pkg)) bad.push(`${file} imports ${show(spec)}: not in SDK_REACHABLE_EXTERNALS, review it and extend the set deliberately`);
+    }
+    assert.deepEqual(bad, []);
+  });
+  it('the check can fail: a network-capable SDK subpath reaches a forbidden module', async () => {
+    // The HTTP transport is exactly what the allow-list keeps out; following it must surface node:http (or a forbidden package).
+    const probe = await withTempDir(async (dir) => {
+      await mkdir(join(dir, 'dist', 'esm', 'server'), { recursive: true });
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ exports: { './*': { import: './dist/esm/*' } } }));
+      await writeFile(join(dir, 'dist', 'esm', 'server', 'index.js'), "import './transport.js';\n");
+      await writeFile(join(dir, 'dist', 'esm', 'server', 'transport.js'), "import http from 'node:http';\nexport const s = http;\n");
+      await writeFile(join(dir, 'dist', 'esm', 'server', 'mcp.js'), "export const m = 1;\n");
+      return sdkImportClosure(dir);
+    });
+    assert.ok(probe.externals.has('node:http'));
+    assert.equal(checkSpecifier('node:http', NO_CP)?.rule, 'forbidden-module');
   });
 });
 

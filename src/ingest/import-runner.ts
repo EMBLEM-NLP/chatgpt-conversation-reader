@@ -128,6 +128,10 @@ export interface ElementPeek {
   updateMs: number | null;
   hasMapping: boolean;
   conversationsIsArray: boolean;
+  /** Index (in the element text) of the `[` that opens the LAST `conversations` value when that value is an array, else -1. */
+  conversationsAt: number;
+  /** `chat_messages` is an array: the marker of a Claude conversation. */
+  chatMessagesIsArray: boolean;
   /** The scan met something that is not well-formed JSON structure; identity fields read so far are still reported. */
   malformed: boolean;
 }
@@ -216,7 +220,18 @@ function decodeJsonString(t: string, start: number, end: number, maxChars: numbe
 const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function blankPeek(kind: ElementPeek['kind']): ElementPeek {
-  return { kind, conversationId: null, id: null, uuid: null, updateMs: null, hasMapping: false, conversationsIsArray: false, malformed: false };
+  return {
+    kind,
+    conversationId: null,
+    id: null,
+    uuid: null,
+    updateMs: null,
+    hasMapping: false,
+    conversationsIsArray: false,
+    conversationsAt: -1,
+    chatMessagesIsArray: false,
+    malformed: false,
+  };
 }
 
 /**
@@ -274,6 +289,10 @@ export function peekElement(text: string): ElementPeek {
         break;
       case 'conversations':
         out.conversationsIsArray = first === CH_LBRACKET;
+        out.conversationsAt = first === CH_LBRACKET ? vs : -1;
+        break;
+      case 'chat_messages':
+        out.chatMessagesIsArray = first === CH_LBRACKET;
         break;
       default:
         break;
@@ -303,9 +322,20 @@ function isUsableId(s: string): boolean {
   return s.length > 0 && s.length <= MAX_ID_CHARS && !/[\u0000-\u001f\u007f]/.test(s) && !LONE_SURROGATE_RE.test(s);
 }
 
-/** conversation_id ?? id ?? uuid, canonicalized like the adapters (UUIDs lower-cased). null = no usable id (never a duplicate). */
+/**
+ * The duplicate-resolution key of an element, or null when the element does not take part in it. Only objects the adapters
+ * would accept as CONVERSATIONS can be duplicates of each other, and the key is read exactly like the adapter of that shape
+ * reads its id (UUIDs lower-cased like the adapters do):
+ *  - ChatGPT shape (an own `mapping` key and no `conversations` array): conversation_id ?? id;
+ *  - Claude shape (`chat_messages` is an array): uuid.
+ * A stray object that merely carries the same id (newer, larger, but not a conversation) must never displace the real
+ * conversation, and a ChatGPT element must not be keyed by a `uuid` its adapter never reads.
+ */
 function conversationKeyOf(p: ElementPeek): string | null {
-  for (const v of [p.conversationId, p.id, p.uuid]) {
+  const candidates: Array<string | null> = [];
+  if (p.hasMapping && !p.conversationsIsArray) candidates.push(p.conversationId, p.id);
+  if (p.chatMessagesIsArray) candidates.push(p.uuid);
+  for (const v of candidates) {
     if (v !== null && isUsableId(v)) return isUuid(v) ? v.toLowerCase() : v;
   }
   return null;
@@ -315,34 +345,38 @@ function conversationKeyOf(p: ElementPeek): string | null {
 // Wrapper objects: {"conversations": [...]} without "mapping"
 // ---------------------------------------------------------------------------------------------------------------
 
-/** Placeholder text for a wrapper member that cannot be re-serialized: it fails normalization (counted) instead of vanishing. */
-const UNSERIALIZABLE_MEMBER = '{';
-
 /**
- * Members of a wrapper object, re-serialized with JSON.stringify. NOTE: re-serialization changes number spellings,
- * duplicate keys and key order, so the element hash and raw preservation are weaker for wrapper members (documented).
- * Returns null when the element does not parse as such a wrapper; the caller then treats it as an ordinary element.
+ * Spans [start, end) of the members of the JSON array that opens at `start`, found with the same linear, allocation-free
+ * helpers as the identity peek (no JSON.parse, no copy). The generator RETURNS true when the whole list was well-formed
+ * enough to split (members separated by single commas, closing bracket present), false otherwise. Member contents are not
+ * validated here: a member that is not valid JSON fails on its own later (ELEMENT_PARSE_FAILED) instead of taking its
+ * siblings down, which is what parsing the wrapper as a whole did (NaN in ONE member lost the whole file).
  */
-function expandWrapper(text: string): Array<{ text: string; bytes: number }> | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
-  const members: unknown = Object.hasOwn(parsed, 'conversations') ? (parsed as Record<string, unknown>)['conversations'] : undefined;
-  if (!Array.isArray(members)) return null;
-  return members.map((m: unknown) => {
-    let s: string | undefined;
-    try {
-      s = JSON.stringify(m);
-    } catch {
-      s = undefined; // e.g. RangeError on pathological depth
+function* memberSpans(t: string, start: number): Generator<readonly [number, number], boolean, undefined> {
+  const n = t.length;
+  let i = skipWs(t, start + 1, n);
+  if (t.charCodeAt(i) === CH_RBRACKET) return true;
+  for (;;) {
+    const end = skipValue(t, i, n);
+    if (end < 0) return false;
+    yield [i, end] as const;
+    i = skipWs(t, end, n);
+    const c = t.charCodeAt(i);
+    if (c === CH_COMMA) {
+      i = skipWs(t, i + 1, n);
+      continue;
     }
-    const t = s ?? UNSERIALIZABLE_MEMBER;
-    return { text: t, bytes: Buffer.byteLength(t, 'utf8') };
-  });
+    return c === CH_RBRACKET;
+  }
+}
+
+/** true when the `conversations` array at `at` can be split into members (a first, allocation-free validation pass). */
+function wrapperIsSplittable(text: string, at: number): boolean {
+  if (at < 0) return false;
+  const it = memberSpans(text, at);
+  let step = it.next();
+  while (step.done !== true) step = it.next();
+  return step.value;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -443,12 +477,26 @@ interface Item {
   bytes: number;
   /** Pass 1 only, and only for non-wrapper-member items. */
   peek: ElementPeek | undefined;
+  /** The element's source bytes were not valid UTF-8 (the decoder replaced them by U+FFFD). Pass 1 reports it. */
+  invalidUtf8: boolean;
+}
+
+/**
+ * true when decoding replaced invalid UTF-8 bytes. `text` was decoded WITH replacement, so a text without U+FFFD is
+ * certainly clean; a text with one is clean only if the source really contained U+FFFD (EF BF BD), which re-encodes to
+ * exactly the source length, whereas every replaced byte sequence of a different length (the usual case: a stray
+ * continuation byte, a truncated sequence) makes the re-encoded length differ. (A damaged 3-byte sequence replaced by
+ * exactly one U+FFFD keeps the length and is not detected: the warning is best effort and only ever under-reports.)
+ */
+function hadInvalidUtf8(text: string, sourceBytes: number): boolean {
+  return text.includes('\ufffd') && Buffer.byteLength(text, 'utf8') !== sourceBytes;
 }
 
 /**
  * Yields the conversation elements of one file. `wrapperOrdinals === null` (pass 1) detects wrappers by peeking and
  * records their raw ordinals in `found`; pass 2 passes that set back so no element has to be peeked twice. A wrapper
- * that does not parse is yielded as an ordinary element in BOTH passes, so indexes agree.
+ * whose member list cannot be split is yielded as an ordinary element in BOTH passes, so indexes agree. Wrapper members
+ * are slices of the wrapper's own text (nothing is parsed or re-serialized), produced lazily one at a time.
  */
 async function* iterateElements(
   source: HashedSource,
@@ -462,22 +510,24 @@ async function* iterateElements(
   let index = 0;
   for await (const el of elements) {
     let peek: ElementPeek | undefined;
-    let wrapper: boolean;
+    let wrapperAt = -1;
     if (wrapperOrdinals === null) {
       peek = peekElement(el.text);
-      wrapper = peek.kind === 'object' && peek.conversationsIsArray && !peek.hasMapping;
-    } else {
-      wrapper = wrapperOrdinals.has(el.index);
+      if (peek.kind === 'object' && peek.conversationsIsArray && !peek.hasMapping && wrapperIsSplittable(el.text, peek.conversationsAt)) wrapperAt = peek.conversationsAt;
+    } else if (wrapperOrdinals.has(el.index)) {
+      wrapperAt = peekElement(el.text).conversationsAt;
     }
-    if (wrapper) {
-      const members = expandWrapper(el.text);
-      if (members !== null) {
-        found.add(el.index);
-        for (const m of members) yield { index: index++, text: m.text, bytes: m.bytes, peek: undefined };
-        continue;
+    const invalid = wrapperOrdinals === null && hadInvalidUtf8(el.text, el.byteLength); // reported by pass 1 only
+    if (wrapperAt >= 0) {
+      found.add(el.index);
+      const spans = memberSpans(el.text, wrapperAt);
+      for (let step = spans.next(); step.done !== true; step = spans.next()) {
+        const text = el.text.slice(step.value[0], step.value[1]);
+        yield { index: index++, text, bytes: Buffer.byteLength(text, 'utf8'), peek: undefined, invalidUtf8: invalid && text.includes('\ufffd') };
       }
+      continue;
     }
-    yield { index: index++, text: el.text, bytes: el.byteLength, peek };
+    yield { index: index++, text: el.text, bytes: el.byteLength, peek, invalidUtf8: invalid };
   }
 }
 
@@ -577,6 +627,9 @@ interface FileScan {
   failure: GcrError | null;
   /** Expanded indexes that lost duplicate resolution. */
   losers: Set<number>;
+  /** Elements whose source bytes were not valid UTF-8, and where (first few). */
+  invalidUtf8: number;
+  invalidUtf8Where: string[];
 }
 
 function isFramingError(e: unknown): e is GcrError {
@@ -585,6 +638,26 @@ function isFramingError(e: unknown): e is GcrError {
   if (!(e instanceof GcrError) || e.code !== 'IMPORT_PARSE_ERROR') return false;
   const reason = e.details?.['reason'];
   return typeof reason === 'string' && (JSON_PARSE_REASONS as readonly string[]).includes(reason);
+}
+
+/**
+ * The error to throw for a file whose framing failed and that cannot be skipped (nothing else could be read, or --strict).
+ * A top-level JSON scalar (text, number, true/false/null) is not a damaged export but a different KIND of file (research
+ * EC-16): it is reported as IMPORT_UNSUPPORTED_FORMAT with a remedy instead of a byte-offset parse error.
+ */
+function fileFailureError(failure: GcrError, fileName: string): GcrError {
+  if (failure.details?.['reason'] === 'TOP_LEVEL_NOT_ARRAY') {
+    return new GcrError('IMPORT_UNSUPPORTED_FORMAT', 'A conversation file holds a single JSON value of another type instead of a list of conversations.', {
+      remedy: 'GCR expects conversations.json to be a JSON array of conversations (or one conversation object). Check that this is the official file, or obtain a fresh export.',
+      details: { reason: 'TOP_LEVEL_NOT_ARRAY', file: fileName, ...(failure.details['byteOffset'] === undefined ? {} : { byteOffset: failure.details['byteOffset'] }) },
+    });
+  }
+  return failure;
+}
+
+/** Two framing errors are "the same" when they name the same reason at the same byte offset (pass 2 must reproduce pass 1). */
+function sameFailure(a: GcrError, b: GcrError): boolean {
+  return a.details?.['reason'] === b.details?.['reason'] && a.details?.['byteOffset'] === b.details?.['byteOffset'];
 }
 
 async function scanAttempt(
@@ -601,12 +674,18 @@ async function scanAttempt(
   let detectAttempts = 0;
   let provider: AdapterId | null = null;
   let failure: GcrError | null = null;
+  let invalidUtf8 = 0;
+  const invalidUtf8Where: string[] = [];
   try {
     try {
       for await (const item of iterateElements(hashed, framing, limits.maxElementBytes, null, wrappers)) {
         const peek = item.peek ?? peekElement(item.text);
         cands.push({ key: conversationKeyOf(peek), idx: item.index, updateMs: peek.updateMs, bytes: item.bytes });
         expanded++;
+        if (item.invalidUtf8) {
+          invalidUtf8++;
+          if (invalidUtf8Where.length < SAMPLE_IDS) invalidUtf8Where.push(`${file.name}#${item.index}`);
+        }
         if (peek.kind === 'object') {
           objectElements++;
           // Registry sniffing costs one JSON.parse; it stops at the first recognizable element of the file.
@@ -637,6 +716,8 @@ async function scanAttempt(
     provider,
     failure,
     losers: new Set<number>(),
+    invalidUtf8,
+    invalidUtf8Where,
   };
   return { scan, cands, firstSignificant: hashed.firstSignificant };
 }
@@ -784,12 +865,25 @@ async function runWithDiscovery(repo: Repository, opts: ImportOptions, discovery
 
   // A file whose framing failed keeps the elements before the break; if NOTHING at all could be read the import fails loudly.
   const failedFiles = scans.filter((s) => s.failure !== null);
-  if (failedFiles.length > 0 && totalExpanded === 0) throw failedFiles[0]?.failure as GcrError;
+  if (failedFiles.length > 0 && totalExpanded === 0) {
+    const first = failedFiles[0] as FileScan;
+    throw fileFailureError(first.failure as GcrError, first.file.name);
+  }
   for (const s of failedFiles) {
     agg.add('FILE_PARSE_FAILED', 'A conversation file is not well-formed JSON from some point on; the elements before that point were kept and the rest of the file was not imported.', [s.file.name]);
   }
+  for (const s of scans) {
+    if (s.invalidUtf8 > 0) {
+      agg.add(
+        'INVALID_UTF8',
+        'Some elements contained bytes that are not valid UTF-8; the decoder replaced them by U+FFFD (the file hash still covers the original bytes).',
+        s.invalidUtf8Where,
+        s.invalidUtf8,
+      );
+    }
+  }
   if (wrapperCount > 0) {
-    agg.add('WRAPPER_OBJECT_FORMAT', '[info] Some elements were wrapper objects with a "conversations" array; their members were imported (members are re-serialized, so raw byte-exactness is lost for them).', [], wrapperCount);
+    agg.add('WRAPPER_OBJECT_FORMAT', '[info] Some elements were wrapper objects with a "conversations" array; their members were imported.', [], wrapperCount);
   }
 
   // ---- provider ---------------------------------------------------------------------------------------------
@@ -812,7 +906,7 @@ async function runWithDiscovery(repo: Repository, opts: ImportOptions, discovery
   // ---- strict: everything known before any adapter ran ----------------------------------------------------------
   if (strict) {
     const f = failedFiles[0];
-    if (f?.failure) throw f.failure;
+    if (f?.failure) throw fileFailureError(f.failure, f.file.name);
     for (const code of ['MANIFEST_INVALID', 'MANIFEST_SHARD_MISSING', 'SHARD_NOT_IN_MANIFEST', 'MANIFEST_COUNT_MISMATCH']) {
       if (agg.count(code) > 0) throw strictAbort('IMPORT_UNSUPPORTED_FORMAT', code, 'The export does not match its export_manifest.json.');
     }
@@ -925,8 +1019,11 @@ async function runWithDiscovery(repo: Repository, opts: ImportOptions, discovery
             if (stats.records % PROGRESS_EVERY === 0) progress('import', s.file.name, stats.records);
           }
         } catch (e) {
-          if (!(isFramingError(e) && s.failure !== null)) throw e;
-          // The same framing error pass 1 saw: expected. Read the rest (hash only) to verify the whole file below.
+          if (!isFramingError(e)) throw e;
+          // Only the SAME framing error pass 1 saw is expected (a file that was damaged to begin with). Anything else - an
+          // error in a file that was fine, or a different error - means the input changed between the passes.
+          if (s.failure === null || !sameFailure(e, s.failure)) throw changed(s.file.name);
+          // Read the rest (hash only) to verify the whole file below.
           await hashed.drain();
         }
         if (!hashed.ended) await hashed.drain();
@@ -951,8 +1048,11 @@ async function runWithDiscovery(repo: Repository, opts: ImportOptions, discovery
   const summaries = agg.toSummaries();
   const inBatchDuplicates = stats.records - result.conversations.stored;
   if (inBatchDuplicates > 0) {
-    // Two winners normalized to the same record id although their raw ids differed (the repository kept the first).
-    summaries.push({ code: 'DUPLICATE_CONVERSATION_IN_BATCH', count: inBatchDuplicates, sampleIds: [] });
+    // Two winners normalized to the same record id although their raw ids differed (the repository kept the first). The
+    // repository wrote its own warning (with the ids) into the batch row; an idempotent report restores THAT, so take the
+    // ids from the same place and the two reports agree.
+    const own = repo.getBatch(result.batchId)?.warnings.find((w) => w.code === 'DUPLICATE_CONVERSATION_IN_BATCH');
+    summaries.push({ code: 'DUPLICATE_CONVERSATION_IN_BATCH', count: inBatchDuplicates, sampleIds: (own?.ids ?? []).slice(0, SAMPLE_IDS) });
     summaries.sort((a, b) => cmp(a.code, b.code));
   }
   const failed = stats.failed + failedFiles.length;

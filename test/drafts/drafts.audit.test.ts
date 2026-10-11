@@ -22,7 +22,7 @@ import { linearConversation } from '../helpers/records.js';
 import { withTempDir } from '../helpers/tmp.js';
 
 const SEED = 20261010;
-const CONV = 'f00dfeed-0000-4000-8000-0000000000a1';
+const CONV = '00000000-0000-4000-8000-0000000000a1';
 
 const META: ImportBatchMeta = {
   provider: 'chatgpt',
@@ -345,6 +345,27 @@ describe('audit log: same transaction as the change', () => {
     assert.throws(() => store.archiveDraft(d.draftId), code('DB_ERROR'));
     assert.equal(store.getDraft(d.draftId).status, 'draft');
     assert.equal(auditRows(db).length, 1);
+  });
+
+  it('a change that silently applies to ZERO rows (RAISE(IGNORE) in a trigger) is refused: nothing is claimed in the log', async () => {
+    const { db, store } = await memEnv();
+    const d = store.createDraft({ conversationRef: { conversationId: CONV }, body: 'x' });
+    const a = store.createAnnotation({ conversationRef: { conversationId: CONV }, body: 'y' });
+    const before = JSON.stringify(auditRows(db));
+    db.exec('CREATE TEMP TRIGGER swallow_draft_update BEFORE UPDATE ON local_drafts BEGIN SELECT RAISE(IGNORE); END');
+    db.exec('CREATE TEMP TRIGGER swallow_annotation_update BEFORE UPDATE ON local_annotations BEGIN SELECT RAISE(IGNORE); END');
+    // The UPDATE "succeeds" but touches no row. Without a check, the audit row would describe a change that never happened.
+    assert.throws(() => store.archiveDraft(d.draftId), code('INTERNAL_ERROR'));
+    assert.throws(() => store.updateAnnotation(a.annotationId, { body: 'z', expectedVersion: 1 }), code('INTERNAL_ERROR'));
+    assert.equal(db.isTransaction, false);
+    assert.equal(JSON.stringify(auditRows(db)), before, 'no audit row for a change that did not happen');
+    db.exec('DROP TRIGGER swallow_draft_update');
+    db.exec('DROP TRIGGER swallow_annotation_update');
+    assert.equal(store.getDraft(d.draftId).status, 'draft');
+    assert.deepEqual(store.getAnnotation(a.annotationId), a);
+    assert.equal(store.archiveDraft(d.draftId).status, 'archived', 'the store works again once the interference is gone');
+    assert.equal(store.updateAnnotation(a.annotationId, { body: 'z', expectedVersion: 1 }).version, 2);
+    assert.deepEqual(verifyAuditLog(db), { rows: 4, ok: true });
   });
 
   it('the change and its audit row become visible to another connection together, and not before commit', async () => {

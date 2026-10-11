@@ -72,7 +72,10 @@ const BSD3_BODY = bsdBody(HOLDERS, BSD3_ENDORSEMENT);
 /** The advertising clause makes it 4-clause BSD: a different (GPL-incompatible) license, and deliberately not "obvious". */
 const BSD4_BODY = bsdBody(HOLDERS, 'All advertising materials mentioning features or use of this software must display the following acknowledgement: This product includes software developed by Example Holder.');
 
-/** Apache-2.0 is ~1,400 words. A stub with the genuine fixed header, section markers and a plausible size exercises the header match without embedding the full text. */
+/**
+ * A stub with the genuine fixed header, section markers and a plausible size. Apache-2.0 is recognised only when the whole published
+ * text matches (see licenses.adversarial.test.ts, which embeds it), so a stub must never classify; the cases below keep it as a near miss.
+ */
 function apacheStub(opts: { words?: number; tail?: string; header?: string } = {}): string {
   const filler = Array.from({ length: opts.words ?? 1400 }, (_, i) => `term${i % 97}`).join(' ');
   return [
@@ -129,10 +132,10 @@ describe('classifyLicenseText: obvious cases', () => {
     assert.equal(classifyLicenseText(author), 'BSD-2-Clause');
   });
 
-  it('Apache-2.0 by fixed header, section markers and size; with or without the standard appendix', () => {
-    assert.equal(classifyLicenseText(apacheStub()), 'Apache-2.0');
-    assert.equal(classifyLicenseText(apacheStub({ tail: 'APPENDIX: How to apply the Apache License to your work.\n\nTo apply the Apache License to your work, attach the following boilerplate notice, with the fields enclosed by brackets "[]" replaced with your own identifying information.' })), 'Apache-2.0');
-    assert.equal(classifyLicenseText(apacheStub().replace(/\n/g, '\r\n')), 'Apache-2.0');
+  it('Apache-2.0 is not inferred from its header, section markers and size alone (the genuine text is required; see licenses.adversarial.test.ts)', () => {
+    assert.equal(classifyLicenseText(apacheStub()), null);
+    assert.equal(classifyLicenseText(apacheStub({ tail: 'APPENDIX: How to apply the Apache License to your work.\n\nTo apply the Apache License to your work, attach the following boilerplate notice, with the fields enclosed by brackets "[]" replaced with your own identifying information.' })), null);
+    assert.equal(classifyLicenseText(apacheStub().replace(/\n/g, '\r\n')), null);
   });
 });
 

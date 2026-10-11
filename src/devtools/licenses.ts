@@ -8,10 +8,12 @@
  * Principle (AGENTS.md, CODEX_TASK Phase 0): never assert rights by inference. A license is reported only when
  *  1. the installed package.json declares one (SPDX expressions are kept verbatim), or
  *  2. the package ships a LICENSE/LICENCE/COPYING file whose text matches a canonical MIT, ISC, Apache-2.0,
- *     BSD-2-Clause or BSD-3-Clause text apart from copyright lines and a few named-party slots.
+ *     BSD-2-Clause or BSD-3-Clause text apart from copyright lines and a few named-party slots (a slot holds a
+ *     name, never a condition; Apache-2.0 must match a published text word for word).
  * Everything else is "unknown", and unknown is never a statement that a package is unlicensed. The report is an
  * inventory to help a human decide; it is not legal advice.
  */
+import { createHash } from 'node:crypto';
 import { lstat, readFile, readdir, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { GcrError } from '../errors.js';
@@ -42,6 +44,8 @@ const UNKNOWN = 'unknown';
 const MAX_PACKAGE_JSON_BYTES = 4 * 1024 * 1024;
 /** Real license texts are < 20 KiB; a larger file is not an "obvious case". */
 const MAX_LICENSE_FILE_BYTES = 128 * 1024;
+/** Large monorepo lockfiles are a few tens of MiB; refuse anything bigger rather than parse hundreds of MiB (a string, then an object tree). */
+const MAX_LOCK_BYTES = 128 * 1024 * 1024;
 const CONCURRENCY = 16;
 
 /** Locale-independent ordering so output is identical on every machine. */
@@ -153,8 +157,9 @@ const PARTY_WORDS = '[a-z0-9]+(?: [a-z0-9]+){0,9}?';
 
 /**
  * Compiles a canonical license text into an anchored regex over normalized words. `@@NAME@@` marks a slot whose
- * pattern is looked up in `slots`; everything else must match exactly (modulo punctuation and line wrapping), so
- * an extra clause, a missing clause or a changed warranty paragraph makes the text "not obvious".
+ * pattern is looked up in `slots` and captured; everything else must match exactly (modulo punctuation and line
+ * wrapping), so an extra clause, a missing clause or a changed warranty paragraph makes the text "not obvious".
+ * A captured slot must also be a plain name (see isPlainParty): a free-text slot is otherwise a place to hide a condition.
  */
 function compileTemplate(text: string, slots: Readonly<Record<string, string>>): RegExp {
   const parts = text.split(/@@([A-Z]+)@@/);
@@ -164,10 +169,19 @@ function compileTemplate(text: string, slots: Readonly<Record<string, string>>):
       const words = normalizeWords(part);
       if (words !== '') pieces.push(escapeRegExp(words));
     } else {
-      pieces.push(slots[part] ?? '(?!)');
+      pieces.push(`(${slots[part] ?? '(?!)'})`);
     }
   });
   return new RegExp(`^${pieces.join(' ')}$`);
+}
+
+/**
+ * A slot may name a party ("the regents of the university of california", "xerox palo alto research center"); words that
+ * make a demand ("... but commercial use requires a paid license") are not a name, so the text stays "unknown".
+ * Institution words that RESTRICTIVE_NOTICE lists for copyright lines (research, academic) are ordinary in names.
+ */
+function isPlainParty(words: string): boolean {
+  return !RESTRICTIVE_NOTICE.test(words.replace(/\b(?:research|academic)\b/g, ' '));
 }
 
 const MIT_TEXT = `Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation
@@ -213,19 +227,50 @@ const TEMPLATES: ReadonlyArray<{ id: string; re: RegExp }> = [
 /** Bound on the text handed to the template regexes: a longer text cannot be one of these short licenses. */
 const MAX_TEMPLATE_WORDS_LENGTH = 4000;
 
-/** Apache-2.0 is too long to template; match its fixed header, its section markers and its size instead. */
+const APACHE_HEADER = 'apache license version 2 0 january 2004 http www apache org licenses';
+const APACHE_END = 'end of terms and conditions';
+
+/**
+ * SHA-256 of the normalized words (see normalizeWords) from the header through "END OF TERMS AND CONDITIONS" in the two
+ * published layouts of the Apache License 2.0: the Apache Software Foundation's text (byte-for-byte the same wording in 40
+ * of the 46 copies found on the machine where this was written) and the copy the TypeScript package ships, which is the same
+ * wording without the "(a)"-"(d)" list markers of section 4. The text is too long to template, and a size/marker check cannot
+ * tell a few added words ("Commercial use requires a paid license.") from the real thing, so the body must match exactly. A
+ * change to normalizeWords changes these digests: the genuine-text tests in licenses.adversarial.test.ts fail if it does.
+ */
+const APACHE_2_BODY_SHA256: ReadonlySet<string> = new Set([
+  'f45538b138cf9aea39fa205de037a0bede8305e68281650e7ab809a8b3ebb2f0',
+  '296a35b4f3b6a7e90a68c08362fc50009807cd0dfd4f78f36f4062bd4d202555',
+]);
+
+/** The standard appendix, with the copyright notice (the placeholder, a real notice, "Portions Copyright ..." lines) as the only free part. */
+const APACHE_APPENDIX_RE = compileTemplate(
+  `APPENDIX: How to apply the Apache License to your work.
+To apply the Apache License to your work, attach the following boilerplate notice, with the fields enclosed by brackets "[]" replaced with your
+own identifying information. (Don't include the brackets!) The text should be enclosed in the appropriate comment syntax for the file format.
+We also recommend that a file or class name and description of purpose be included on the same "printed page" as the copyright notice for
+easier identification within third-party archives.
+@@NOTICE@@
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
+You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions
+and limitations under the License.`,
+  { NOTICE: '(?:[a-z0-9]+ ){0,20}?copyright(?: [a-z0-9]+){0,30}?' },
+);
+
+/** Apache-2.0: the exact published body, optionally followed by exactly the standard appendix (nothing may follow it). */
 function isApache2(text: string): boolean {
   const words = normalizeWords(text);
-  if (!words.startsWith('apache license version 2 0 january 2004 http www apache org licenses')) return false;
-  if (!words.includes('terms and conditions for use reproduction and distribution')) return false;
-  const endMarker = 'end of terms and conditions';
-  const end = words.indexOf(endMarker);
+  if (!words.startsWith(APACHE_HEADER)) return false;
+  const end = words.indexOf(APACHE_END);
   if (end < 0) return false;
-  const bodyWordCount = words.slice(0, end + endMarker.length).split(' ').length;
-  // The unmodified body is ~1,420 words. Added conditions (e.g. a "Commons Clause") change this, so refuse them.
-  if (bodyWordCount < 1350 || bodyWordCount > 1500) return false;
-  const tail = words.slice(end + endMarker.length).trim();
-  return tail === '' || tail.startsWith('appendix how to apply the apache license');
+  const body = words.slice(0, end + APACHE_END.length);
+  if (!APACHE_2_BODY_SHA256.has(createHash('sha256').update(body).digest('hex'))) return false;
+  const tail = words.slice(end + APACHE_END.length).trim();
+  if (tail === '') return true;
+  const appendix = APACHE_APPENDIX_RE.exec(tail);
+  return appendix !== null && appendix.slice(1).every((slot) => slot === undefined || isPlainParty(slot));
 }
 
 /**
@@ -238,7 +283,8 @@ export function classifyLicenseText(text: string): string | null {
   const body = licenseBodyWords(text);
   if (body === '' || body.length > MAX_TEMPLATE_WORDS_LENGTH) return null;
   for (const { id, re } of TEMPLATES) {
-    if (re.test(body)) return id;
+    const match = re.exec(body);
+    if (match !== null && match.slice(1).every((slot) => slot === undefined || isPlainParty(slot))) return id;
   }
   return null;
 }
@@ -290,9 +336,9 @@ const FAMILY_BY_IDENTIFIER: ReadonlyArray<{ family: string; test: RegExp }> = [
   { family: 'BUSL', test: /^(?:busl|business[ _-]source)/i },
   { family: 'CC-BY-NC', test: /^cc[ _-]by[ _-]nc/i },
   { family: 'non-commercial', test: /non[ _-]?commercial/i },
-  { family: 'UNLICENSED', test: /^unlicensed$/i },
+  { family: 'UNLICENSED', test: /^unlicen[sc]ed$/i },
   { family: 'proprietary', test: /^(?:proprietary|commercial|private|closed[ _-]?source)$/i },
-  { family: 'custom license reference', test: /^licenseref-/i },
+  { family: 'custom license reference', test: /^(?:documentref-[a-z0-9.-]+:)?licenseref-/i },
 ];
 
 /** Matched against the whole string, for free-text license names that are not SPDX identifiers. */
@@ -314,7 +360,8 @@ function familyOfIdentifier(id: string): string | null {
   return null;
 }
 
-const SPDX_IDSTRING = /^[A-Za-z0-9.+:_-]+$/;
+/** An SPDX id: letters, digits, '.', '-' (and '_' leniently), one optional trailing '+' ("or later"), or a [DocumentRef-x:]LicenseRef-y. "MIT+GPL-3.0" and "MIT:GPL-3.0" are not ids. */
+const SPDX_IDSTRING = /^(?:[A-Za-z0-9._-]+\+?|(?:DocumentRef-[A-Za-z0-9._-]+:)?LicenseRef-[A-Za-z0-9._-]+)$/;
 
 type SpdxNode = { op: 'id'; id: string } | { op: 'and' | 'or'; items: SpdxNode[] };
 
@@ -336,8 +383,8 @@ function parseSpdx(input: string): SpdxNode | null {
       pos++;
       return inner;
     }
-    // An SPDX idstring is letters, digits, '.', '-' (and '+', ':' for LicenseRef/DocumentRef). A token such as
-    // "MIT/GPL-3.0" or "MIT,GPL-3.0" is two licenses glued together: not an expression, so it is checked word by word.
+    // A token that is not an SPDX id ("MIT/GPL-3.0", "MIT,GPL-3.0", "MIT+GPL-3.0", "MIT|GPL-3.0") is two licenses
+    // glued together: not an expression, so it is checked word by word.
     if (!SPDX_IDSTRING.test(t)) return null;
     pos++;
     if (isOp(tokens[pos], 'WITH')) {
@@ -388,7 +435,9 @@ export function nonPermissiveFamily(license: string): string | null {
   for (const { family, test } of FAMILY_BY_PHRASE) {
     if (test.test(text)) return family;
   }
-  for (const word of text.split(/[\s,;/()]+/)) {
+  // Split at everything that cannot be part of an SPDX identifier: "MIT|GPL-3.0", "MIT&GPL-3.0", '"GPL-3.0"', "[GPL-3.0]" and
+  // "MIT:GPL-3.0" are two licenses (or a license in quotes) written without SPDX syntax, and a stray quote or bar must not hide the second.
+  for (const word of text.split(/[^A-Za-z0-9._-]+/)) {
     const family = word === '' ? null : familyOfIdentifier(word);
     if (family !== null) return family;
   }
@@ -417,8 +466,15 @@ interface LockCandidate {
 async function loadLockPackages(root: string): Promise<Record<string, unknown>> {
   let text: string;
   try {
+    const info = await stat(join(root, 'package-lock.json'));
+    if (info.size > MAX_LOCK_BYTES) {
+      throw new GcrError('INVALID_ARGUMENT', 'package-lock.json is too large to inventory.', {
+        details: { file: 'package-lock.json', bytes: info.size, maxBytes: MAX_LOCK_BYTES },
+      });
+    }
     text = await readFile(join(root, 'package-lock.json'), 'utf8');
   } catch (cause) {
+    if (cause instanceof GcrError) throw cause;
     throw new GcrError('INVALID_ARGUMENT', 'package-lock.json was not found or could not be read in the project root.', {
       remedy: 'Run `npm install` to create it, or point the tool at the directory that contains it.',
       details: { file: 'package-lock.json' },
@@ -589,9 +645,13 @@ export function sanitizeForTerminal(text: string): string {
   return text.replace(UNSAFE_TEXT, ' ').trim();
 }
 
-/** Makes metadata safe to print (see sanitizeForTerminal) and neutralises markdown table syntax. */
+/**
+ * Makes metadata safe to print (see sanitizeForTerminal) and neutralises markdown: table syntax (| and the backslash), code spans,
+ * and the brackets and angle brackets that start links, images, reference definitions, autolinks and raw HTML. A report pasted into
+ * an issue or a pull request must not turn a package's license string or version into a clickable link or a tracking image.
+ */
 function cell(value: string, max = 120): string {
-  const clean = sanitizeForTerminal(value).replace(/[\\|`]/g, '\\$&');
+  const clean = sanitizeForTerminal(value).replace(/[\\|`[\]<>]/g, '\\$&');
   return clean.length > max ? `${clean.slice(0, max - 3)}...` : clean;
 }
 

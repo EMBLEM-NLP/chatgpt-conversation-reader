@@ -21,6 +21,8 @@ import { GcrError } from '../errors.js';
 
 export const DEFAULT_MAX_ITERATIONS = 50;
 const MAX_ITERATIONS_LIMIT = 1000;
+/** Sanity bound for labelPropagation (three typed arrays of this length are allocated). */
+const MAX_PROPAGATION_NODES = 20_000_000;
 const COMMUNITY_LABEL_PARTS = 3;
 const COMMUNITY_LABEL_MAX_CHARS = 160;
 
@@ -68,8 +70,18 @@ export function labelPropagation(
   edgeSrc: ArrayLike<number>,
   edgeDst: ArrayLike<number>,
   edgeWeight: ArrayLike<number>,
-  maxIterations: number,
+  maxIterationsIn: number,
 ): PropagationResult {
+  // Exported, so its scalar arguments are validated like every other public entry point: a negative or absurd node
+  // count would otherwise surface as a RangeError from the typed-array constructors, and a NaN / non-positive bound
+  // would silently skip the algorithm (an infinite bound could never terminate on an oscillating graph).
+  if (!Number.isInteger(nodeCount) || nodeCount < 0 || nodeCount > MAX_PROPAGATION_NODES) {
+    throw badArg('nodeCount', `expected an integer from 0 to ${MAX_PROPAGATION_NODES}`);
+  }
+  for (const [field, arr] of [['edgeSrc', edgeSrc], ['edgeDst', edgeDst], ['edgeWeight', edgeWeight]] as const) {
+    if (typeof arr !== 'object' || arr === null || typeof arr.length !== 'number') throw badArg(field, 'expected an array of numbers');
+  }
+  const maxIterations = resolveMaxIterations(maxIterationsIn);
   const n = nodeCount;
   const m = Math.min(edgeSrc.length, edgeDst.length, edgeWeight.length);
   // Compressed sparse row adjacency: offsets[i]..offsets[i+1] index into targets/weights.
@@ -255,7 +267,11 @@ function clusterInTransaction(db: DatabaseSync, maxIterations: number): ClusterR
     const pool = preferred.length > 0 ? preferred : list;
     const top = [...pool].sort((a, b) => (wdeg[b] as number) - (wdeg[a] as number) || a - b).slice(0, COMMUNITY_LABEL_PARTS);
     let label = top.map((i) => (nodes[i] as { label: string }).label).join(', ');
-    if (label.length > COMMUNITY_LABEL_MAX_CHARS) label = label.slice(0, COMMUNITY_LABEL_MAX_CHARS);
+    if (label.length > COMMUNITY_LABEL_MAX_CHARS) {
+      // Never cut between the two halves of a surrogate pair: a lone surrogate is not valid UTF-8 text for SQLite.
+      const last = label.charCodeAt(COMMUNITY_LABEL_MAX_CHARS - 1);
+      label = label.slice(0, last >= 0xd800 && last <= 0xdbff ? COMMUNITY_LABEL_MAX_CHARS - 1 : COMMUNITY_LABEL_MAX_CHARS);
+    }
     insertCommunity.run(communityId, list.length, label);
   }
   return { communities: communityId, iterations, converged, assignedNodes: assigned };

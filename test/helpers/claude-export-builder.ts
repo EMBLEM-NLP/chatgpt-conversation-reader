@@ -156,10 +156,124 @@ export function message(r: ConversationRecord, index: number): MessageRecord {
 
 // ---- static source inspection (used by the "no I/O" tests of openai-api.ts and registry.ts) ------------------------------
 
-/** Source text of a repo file with block comments and trailing/line comments removed, so prose cannot trip identifier scans. */
+/**
+ * `source` with comments removed. String-aware on purpose: a comment marker INSIDE a string, template literal or regular expression
+ * is code (`const a = "/*"; import x from "fs"; const b = "*" + "/";` must keep its import), and a quote inside a regular expression
+ * does not open a string. Handles '...' and "..." strings, template literals with nested `${ ... }` code, regex literals
+ * (told from a division by the previous significant token) and line/block comments (an unterminated block comment runs to the end).
+ * Used only by the static "no I/O" source checks, so it is built to fail CLOSED: when in doubt it keeps text.
+ */
+export function stripComments(source: string): string {
+  type Mode = { kind: 'code'; depth: number; inTemplate: boolean } | { kind: 'template' };
+  const n = source.length;
+  const out: string[] = [];
+  const modes: Mode[] = [{ kind: 'code', depth: 0, inTemplate: false }];
+  const REGEX_AFTER_WORDS = new Set(['return', 'typeof', 'case', 'delete', 'void', 'throw', 'in', 'of', 'new', 'else', 'do', 'yield', 'await', 'instanceof']);
+  let prev = ''; // last significant (non-whitespace) character of the code emitted so far
+  let word = ''; // identifier/number immediately before `prev` (to recognise `return /re/`)
+  let i = 0;
+
+  const regexAllowed = (): boolean => prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev) || (/[\w$]/.test(prev) && REGEX_AFTER_WORDS.has(word));
+  const note = (text: string): void => {
+    for (const ch of text) {
+      if (/\s/.test(ch)) continue;
+      word = /[\w$]/.test(ch) ? (/[\w$]/.test(prev) ? word + ch : ch) : '';
+      prev = ch;
+    }
+  };
+  const emit = (text: string): void => {
+    out.push(text);
+    note(text);
+  };
+
+  while (i < n) {
+    const top = modes[modes.length - 1] as Mode;
+    const c = source[i] as string;
+    const d = source[i + 1];
+    if (top.kind === 'template') {
+      if (c === '\\') {
+        out.push(source.slice(i, i + 2));
+        i += 2;
+      } else if (c === '`') {
+        out.push(c);
+        modes.pop();
+        prev = ')';
+        word = '';
+        i++;
+      } else if (c === '$' && d === '{') {
+        out.push('${');
+        modes.push({ kind: 'code', depth: 0, inTemplate: true });
+        prev = '';
+        word = '';
+        i += 2;
+      } else {
+        out.push(c);
+        i++;
+      }
+      continue;
+    }
+    if (c === '/' && d === '/') {
+      while (i < n && source[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      const end = source.indexOf('*/', i + 2);
+      i = end === -1 ? n : end + 2;
+      out.push(' ');
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < n && source[j] !== c && source[j] !== '\n') j += source[j] === '\\' ? 2 : 1;
+      emit(source.slice(i, Math.min(j + 1, n)));
+      i = Math.min(j + 1, n);
+      prev = ')';
+      word = '';
+      continue;
+    }
+    if (c === '`') {
+      out.push(c);
+      modes.push({ kind: 'template' });
+      i++;
+      continue;
+    }
+    if (c === '/' && regexAllowed()) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < n && source[j] !== '\n') {
+        const ch = source[j] as string;
+        if (ch === '\\') j++;
+        else if (ch === '[') inClass = true;
+        else if (ch === ']') inClass = false;
+        else if (ch === '/' && !inClass) break;
+        j++;
+      }
+      while (j + 1 < n && /[a-z]/i.test(source[j + 1] as string)) j++;
+      out.push(source.slice(i, j + 1));
+      i = j + 1;
+      prev = ')';
+      word = '';
+      continue;
+    }
+    if (c === '{') top.depth++;
+    if (c === '}') {
+      if (top.depth === 0 && top.inTemplate) {
+        out.push(c);
+        modes.pop();
+        i++;
+        continue;
+      }
+      if (top.depth > 0) top.depth--;
+    }
+    emit(c);
+    i++;
+  }
+  return out.join('');
+}
+
+/** Source text of a repo file with comments removed (string-aware, see stripComments), so prose cannot trip identifier scans. */
 export function codeOf(relativeToRepoRoot: string): string {
-  const source = readFileSync(new URL(`../../../${relativeToRepoRoot}`, import.meta.url), 'utf8');
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
+  return stripComments(readFileSync(new URL(`../../../${relativeToRepoRoot}`, import.meta.url), 'utf8'));
 }
 
 /** Every module specifier the code names: static imports/exports (`from '...'`), side-effect imports, dynamic import(), require(). */

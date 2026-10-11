@@ -286,7 +286,7 @@ describe('resolveNodeOrder', () => {
 
 describe('adapter: duplicates and ordering end to end', () => {
   it('KEY_ORDER_FALLBACK: an inconsistent scanner result falls back to the engine order and says so', () => {
-    const bad: ElementScan = { mappingKeys: ['b'], duplicateMappingKeys: [], duplicateBodySha256: new Map(), nodeKeyDuplicates: new Map(), conversationKeyDuplicates: 0, maxDepth: 1 };
+    const bad: ElementScan = { mappingKeys: ['b'], duplicateMappingKeys: [], duplicateBodySha256: new Map(), duplicateBodiesNotHashed: 0, nodeKeyDuplicates: new Map(), conversationKeyDuplicates: 0, structuralKeyDuplicates: [], maxDepth: 1 };
     const adapter = new ChatGPTExportAdapter({ scanner: () => bad });
     const text = '{"id":"c","mapping":{"b":{"id":"b","parent":null,"message":null},"1":{"id":"1","parent":null,"message":null}}}';
     const out = adapter.normalizeElementText(text, ctx, 0);

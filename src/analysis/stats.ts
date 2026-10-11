@@ -14,6 +14,8 @@
  *  - `conversations` is the number of DISTINCT (provider, account_label, conversation_id) triples - several snapshots of
  *    one conversation count once. `characters` is the number of Unicode code points of the normalized message text
  *    (SQLite `length()` on TEXT), not UTF-16 units and not bytes.
+ *  - For the "conversation" grouping the label is the title of the conversation's HEAD snapshot (id when untitled), also with
+ *    `allBatches`: a superseded snapshot never renames the conversation.
  *  - `firstAt` / `lastAt` are the earliest / latest message `created_at` of the group, always spelled with millisecond
  *    precision (`...:SS.mmmZ`) so that the two stored spellings (`Z` and `.000Z`) compare as instants.
  *
@@ -44,7 +46,8 @@ import type { Warning } from '../errors.js';
 // Public types
 // ---------------------------------------------------------------------------------------------------------------
 
-export const STATS_GROUP_BY = ['role', 'model', 'channel', 'day', 'conversation', 'provider', 'content_type'] as const;
+/** Frozen: this list is the groupBy allow-list; a run-time push from another module must not be able to extend it. */
+export const STATS_GROUP_BY = Object.freeze(['role', 'model', 'channel', 'day', 'conversation', 'provider', 'content_type'] as const);
 export type StatsGroupBy = (typeof STATS_GROUP_BY)[number];
 
 export interface StatsOptions {
@@ -238,12 +241,35 @@ const BLANK_CHARS =
 /** The source explicitly named a model on this message. NULL and blank slugs carry no identity, so they do not count. */
 const HAS_MODEL = `(m.model_slug IS NOT NULL AND trim(m.model_slug, ${BLANK_CHARS}) <> '')`;
 
+const TS_SECONDS_GLOB = "'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z'";
+const TS_MILLIS_GLOB = "'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'";
+
 /**
- * created_at in a fixed-width millisecond spelling. validate.ts allows `...SSZ` (20 chars) and `...SS.mmmZ` (24 chars);
- * padding the short form makes plain string comparison equal to instant comparison. `col` is a literal from this file.
+ * SQL predicate: `col` is a strict ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ` or `...SS.mmmZ`) that names a REAL instant,
+ * i.e. exactly the set validate.ts' parseIsoUtcToEpochMs accepts (a differential test pins the equivalence). NULL when `col`
+ * is NULL. WHY it exists: rows damaged outside GCR must not leak garbage into firstAt/lastAt or match a date bound by plain
+ * text comparison ("last tuesday" sorts after every year). `col` is a literal from this file.
+ *
+ * Cost matters (it runs per row, twice per aggregate): the shape is one GLOB chosen by length, the field ranges are cheap
+ * text comparisons (the digits are known at that point), and only days 29..31 - where the day can exceed the month's length -
+ * pay for strftime(), which ROLLS OVER an impossible day (Feb 30 -> Mar 2), so comparing its output with the input rejects it.
+ */
+function validTs(col: string): string {
+  return (
+    `(CASE length(${col}) WHEN 20 THEN ${col} GLOB ${TS_SECONDS_GLOB} WHEN 24 THEN ${col} GLOB ${TS_MILLIS_GLOB} ELSE 0 END ` +
+    `AND substr(${col}, 6, 2) BETWEEN '01' AND '12' AND substr(${col}, 9, 2) BETWEEN '01' AND '31' ` +
+    `AND substr(${col}, 12, 2) < '24' AND substr(${col}, 15, 2) < '60' AND substr(${col}, 18, 2) < '60' ` +
+    `AND (substr(${col}, 9, 2) < '29' OR strftime('%Y-%m-%d', substr(${col}, 1, 10)) = substr(${col}, 1, 10)))`
+  );
+}
+
+/**
+ * created_at in a fixed-width millisecond spelling, or NULL when it is NULL or not a usable instant (see validTs).
+ * validate.ts allows `...SSZ` (20 chars) and `...SS.mmmZ` (24 chars); padding the short form makes plain string comparison
+ * equal to instant comparison. `col` is a literal from this file.
  */
 function normTs(col: string): string {
-  return `(CASE WHEN length(${col}) = 20 THEN substr(${col}, 1, 19) || '.000Z' ELSE ${col} END)`;
+  return `(CASE WHEN ${validTs(col)} THEN (CASE WHEN length(${col}) = 20 THEN substr(${col}, 1, 19) || '.000Z' ELSE ${col} END) END)`;
 }
 
 function normalizeStoredTs(s: string): string {
@@ -256,9 +282,17 @@ const CONV_KEY = '(m.provider || char(31) || m.account_label || char(31) || m.co
 const HEAD_JOIN_M =
   'JOIN conversation_heads h ON h.provider = m.provider AND h.account_label = m.account_label ' +
   'AND h.conversation_id = m.conversation_id AND h.source_batch = m.source_batch ';
+/**
+ * The conversation row that names a message's conversation: ALWAYS the HEAD snapshot's, also when `allBatches` counts
+ * messages of superseded snapshots. Joining the message's own snapshot instead would let an old snapshot's title (the
+ * lexicographically greatest one, via max()) rename the conversation. LEFT joins: a conversation without a head row
+ * (impossible through the Repository) must not silently drop its messages from the grouping; it just has no title.
+ */
 const CONV_JOIN_M =
-  'JOIN conversations c ON c.provider = m.provider AND c.account_label = m.account_label ' +
-  'AND c.conversation_id = m.conversation_id AND c.source_batch = m.source_batch ';
+  'LEFT JOIN conversation_heads th ON th.provider = m.provider AND th.account_label = m.account_label ' +
+  'AND th.conversation_id = m.conversation_id ' +
+  'LEFT JOIN conversations c ON c.provider = th.provider AND c.account_label = th.account_label ' +
+  'AND c.conversation_id = th.conversation_id AND c.source_batch = th.source_batch ';
 const HEAD_JOIN_C =
   'JOIN conversation_heads h ON h.provider = c.provider AND h.account_label = c.account_label ' +
   'AND h.conversation_id = c.conversation_id AND h.source_batch = c.source_batch ';
@@ -352,8 +386,24 @@ function inReadSnapshot<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
-function resolveDb(h: DatabaseSync | Repository): DatabaseSync {
-  return 'db' in h ? h.db : h;
+/** A node:sqlite connection, recognised by behaviour (exec/prepare), not by class, so a closed one still passes and reports DB_ERROR later. */
+function isConnection(x: unknown): x is DatabaseSync {
+  if (typeof x !== 'object' || x === null) return false;
+  const c = x as { exec?: unknown; prepare?: unknown };
+  return typeof c.exec === 'function' && typeof c.prepare === 'function';
+}
+
+/**
+ * Accepts the raw connection or a Repository. Anything else (null, a string, `{}`...) is INVALID_ARGUMENT: a raw TypeError
+ * from the `in` operator, or a misleading DB_ERROR for an object that is no database, would break the GcrError contract.
+ */
+function resolveDb(h: unknown): DatabaseSync {
+  if (typeof h === 'object' && h !== null) {
+    const inner = (h as { db?: unknown }).db;
+    if (isConnection(inner)) return inner;
+    if (isConnection(h)) return h;
+  }
+  throw badArg('db', 'expected a DatabaseSync connection or a Repository');
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -633,11 +683,11 @@ function scopeWarnings(db: DatabaseSync, f: Filters, totalMessages: number): War
   }
 
   if (f.after !== undefined || f.before !== undefined) {
-    const undated = countRows(db, messageScope(f, { dates: false, extraWhere: 'AND m.created_at IS NULL ' }));
+    const undated = countRows(db, messageScope(f, { dates: false, extraWhere: `AND (m.created_at IS NULL OR ${normTs('m.created_at')} IS NULL) ` }));
     if (undated > 0) {
       warnings.push({
         code: 'UNDATED_MESSAGES_EXCLUDED',
-        message: `${undated} message(s) without a timestamp are excluded because a date bound was given; a message with unknown time never matches a bound.`,
+        message: `${undated} message(s) without a usable timestamp (missing or not a valid ISO-8601 UTC instant) are excluded because a date bound was given; a message with unknown time never matches a bound.`,
       });
     }
   }

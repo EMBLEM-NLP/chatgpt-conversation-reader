@@ -298,7 +298,7 @@ const PROGRAM = [
   '    adj.push([]);',
   '    degree.push(0);',
   '    lowerLabels.push(String(nodes[i].label).toLowerCase());',
-  '    haystack.push((String(nodes[i].label) + " " + String(nodes[i].id) + " " + String(nodes[i].kind) + " " + String(nodes[i].entityKind)).toLowerCase());',
+  '    haystack.push((String(nodes[i].label) + " " + String(nodes[i].id) + " " + String(nodes[i].kind) + " " + (nodes[i].entityKind === null ? "" : String(nodes[i].entityKind))).toLowerCase());',
   '  }',
   '  for (i = 0; i < edges.length; i++) {',
   '    adj[edges[i].s].push({ other: edges[i].t, edge: i, out: true });',
