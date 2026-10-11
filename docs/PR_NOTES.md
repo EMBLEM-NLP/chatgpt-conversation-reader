@@ -6,16 +6,17 @@ Written 2026-10-11 from the real git history of branch `claude/chatgpt-conversat
 ## 0. Read this first
 
 * **No pull request has been opened by the implementing agent** (ADR-0006). `gh pr create` is the operator's to run; the commands are in section 2. Nothing in this file was pushed.
-* **The history was not squashed and is mostly work-in-progress checkpoints.** The branch has 22 commits between 2026-10-10 22:13 UTC and 2026-10-11 12:51 UTC: 15 are checkpoints (`wip(m1)`, `wip(m2)`, `wip:`, `test: checkpoint 9`, and checkpoint 15 `2d81c65`) and 7 are
-  focused changes (`chore(m0)`, `fix(drafts)`, `chore(m3)`, `fix(db)` twice, `ci`, `fix(sdk)`). Checkpoints were taken when a session limit or a review boundary was reached, so a commit label (`m1`, `m2`) names the phase in progress, **not** the scope of the files in it.
+* **The history was not squashed and is mostly work-in-progress checkpoints.** The branch has 23 commits between 2026-10-10 22:13 UTC and 2026-10-11 13:13 UTC: 15 are checkpoints (`wip(m1)`, `wip(m2)`, `wip:`, `test: checkpoint 9`, and checkpoint 15 `2d81c65`) and 8 are
+  focused changes (`chore(m0)`, `fix(drafts)`, `chore(m3)`, `fix(db)` twice, `ci`, `fix(sdk)`, `fix(mcp)`). Checkpoints were taken when a session limit or a review boundary was reached, so a commit label (`m1`, `m2`) names the phase in progress, **not** the scope of the files in it.
   For example the graph, entity and draft modules (scope of M2 in the plan) first land inside commits labelled `wip(m1)`.
 * **The milestone heads are not all green.** Each head was extracted with `git archive` into a scratch folder and typechecked, built and tested (Node 22.22.0, same `package-lock.json`, `node_modules` of the working tree; see the evidence blocks). Findings:
   * `68c016d` (M0): typecheck and build green; **there are no tests yet**.
   * `bc6af53` (M1 head): **1 failing test** (`test/sdk/errors.test.ts`, a wrong expectation; fixed by a test edit in `8cfb1b2`).
   * `99cd600` (the last commit before checkpoint 15): **1 failing test file** (`test/mcp/limits.adversarial.test.ts` is killed with `SIGKILL` after 36 to 53 s, reproduced twice, including in isolation).
-  * `2d81c65` (checkpoint 15, the current `HEAD`): contains the MCP envelope rework and CLI edits that were uncommitted while `99cd600` was measured, plus early drafts of the scripts and documents. Its own result: @@M2B@@
-    The message of that commit says it is "NOT a milestone completion" and that the suite was not re-run for it.
-* **Early drafts of `README.md`, `CHANGELOG.md`, `docs/USER_GUIDE.md`, this file, `docs/SECURITY_AND_BOUNDARIES.md`, `scripts/ci-smoke.mjs`, `scripts/no-network-guard.cjs`, `scripts/perf-baseline.mjs` and `scripts/coverage-summary.mjs` were committed in checkpoint 15 (`2d81c65`)**; edits made after that commit (the final pass) are uncommitted at the time of writing, and some documents named in `SPEC.md` (`docs/ACCEPTANCE.md`, `docs/PARITY_MATRIX.md`, `docs/PERFORMANCE.md`, `docs/COVERAGE.md`) did not exist yet. The M3 and M4 descriptions assume the final pass is committed first; that final commit does not exist yet, so `<FINAL_SHA>` below is a placeholder.
+  * `2d81c65` (checkpoint 15): contains the MCP envelope rework and CLI edits that were uncommitted while `99cd600` was measured, plus early drafts of the scripts and documents. Its message says it is "NOT a milestone completion" and that the suite was not re-run for it. **Not measured as a commit** (its tree was never extracted for a run). A full run on Node 22.16.0 started at 13:04 UTC on the moving working tree had 4 failures that were not Node-specific: the repository's `dist/` had been rebuilt (by `npm run build` run by the author of this file at about 12:57) from in-flight sources that already said `destructiveHint: true` for `gcr_update_local_annotation`, while `docs/mcp-tool-schemas.json` and the smoke expectations still said `false` (two tests in `test/mcp/docs.consistency.test.ts` and two in `test/scripts/ci-smoke.pass.test.ts`). The next commit, `1341059`, reconciles them.
+  * `1341059` (the current `HEAD`, proposed M2 head): `fix(mcp)` sets `destructiveHint: true` on `gcr_update_local_annotation` (it overwrites the old text), regenerates `docs/mcp-tool-schemas.json`, and carries the CLI/MCP reviewers' fixes. Its own result: @@M2B@@
+    The commit message says the full suite was not re-run for it.
+* **Early drafts of `README.md`, `CHANGELOG.md`, `docs/USER_GUIDE.md`, this file, `docs/SECURITY_AND_BOUNDARIES.md`, `scripts/ci-smoke.mjs`, `scripts/no-network-guard.cjs`, `scripts/perf-baseline.mjs` and `scripts/coverage-summary.mjs` were committed in checkpoint 15 (`2d81c65`)**; `docs/PARITY_MATRIX.md` and `docs/PERFORMANCE.md` arrived in `1341059`. Edits made after that commit (the final pass of this file, the README, the changelog and the guide) are uncommitted at the time of writing, and `docs/ACCEPTANCE.md` and `docs/COVERAGE.md`, which `SPEC.md` and the task name, @@ACC_COV@@ The M3 and M4 descriptions assume the final pass is committed first; that final commit does not exist yet, so `<FINAL_SHA>` below is a placeholder.
 * **Evidence rule** (EXECUTION_PLAN): every result below names the command, the exit status or counts, the Node version and the date. "Not run" is stated where it applies. All data is synthetic. Nothing here shows that a real ChatGPT export imports correctly: none was ever available.
 * **Migration note for every PR: none.** SQLite schema v1 is created fresh (`PRAGMA user_version = 1`) in the user's own local file; nothing is migrated and no shared data exists.
 * **Rollback note for every PR:** before merge, delete the branch; after merge, `git revert -m 1 <merge commit>` (merge commits) or `git revert --no-commit <base>..<head>` followed by `git commit` (fast-forwarded ranges). Local data: delete the database file and its `-wal` and `-shm` files
@@ -48,17 +49,18 @@ Written 2026-10-11 from the real git history of branch `claude/chatgpt-conversat
 | 19 | `02b0644` | 10-11 07:05 | wip(m2): checkpoint 14 - MCP reviewer's adversarial limits test | M2 | adds the test that is killed at `99cd600` |
 | 20 | `3721e54` | 10-11 12:17 | fix(db): refuse newer-schema files before any write | M2 | verified: a copy with `user_version = 99` keeps its hash after a refused import |
 | 21 | `99cd600` | 10-11 12:18 | fix(sdk): accurate GRAPH_EMPTY warning | M2 | last commit before checkpoint 15; killed MCP test file |
-| 22 | `2d81c65` | 10-11 12:51 | wip: checkpoint 15 - CLI/MCP review edits, verification scripts and docs in progress | M2 (CLI/MCP edits) + M3 (scripts, documents) | current `HEAD`; "Checkpoint only; NOT a milestone completion" |
+| 22 | `2d81c65` | 10-11 12:51 | wip: checkpoint 15 - CLI/MCP review edits, verification scripts and docs in progress | M2 (CLI/MCP edits) + M3 (scripts, documents) | "Checkpoint only; NOT a milestone completion" |
+| 23 | `1341059` | 10-11 13:13 | fix(mcp): annotate gcr_update_local_annotation destructiveHint:true (it overwrites the old text) | M2 (+ M3 docs: parity matrix, performance) | current `HEAD`; also adds `docs/PARITY_MATRIX.md`, `docs/PERFORMANCE.md` and, per its message, 20 reviewer-reported CLI/MCP defects fixed |
 
 | Milestone | Commits | Contiguous range |
 |---|---|---|
 | M0 | 1 | `68c016d` |
 | M1 | 2 to 13 (12 commits; `1917348` is M3 content interleaved) | `68c016d..bc6af53` (git range notation: excludes `68c016d`, includes `c1b4854` ... `bc6af53`) |
-| M2 | 14 to 22 (9 commits; `148845b` is M3 content and `2d81c65` is mixed M2 / M3) | `bc6af53..2d81c65` (the entity, graph and draft modules and `12de7a9` are in the M1 range) |
-| M3 | `1917348`, `148845b`, the scripts and documents of `2d81c65`, plus the uncommitted final pass | not contiguous; finish with the final commit `<FINAL_SHA>` |
+| M2 | 14 to 23 (10 commits; `148845b` is M3 content, `2d81c65` and `1341059` are mixed M2 / M3) | `bc6af53..1341059` (the entity, graph and draft modules and `12de7a9` are in the M1 range) |
+| M3 | `1917348`, `148845b`, the scripts and documents of `2d81c65` and `1341059`, plus any uncommitted final pass | not contiguous; finish with the final commit `<FINAL_SHA>` (it may equal `1341059` if nothing else is committed) |
 | M4 | documentation only: `68c016d` (ADR-0010), `c1b4854` (`docs/BROWSER_GATE.md`), `1917348` (`test:browser`) | no unique commits; see PR M4 |
 
-Size (git diff, added lines): M0 3,139 in 23 files; `68c016d..bc6af53` 86,263 added in 213 files (38 `src` files, 142 test files, 6 docs; most added lines are tests and fixtures); `bc6af53..99cd600` 23,861 added in 92 files (37 `src`, 45 test, 5 docs); checkpoint 15 adds 7,277 lines in 36 files.
+Size (git diff, added lines): M0 3,139 in 23 files; `68c016d..bc6af53` 86,263 added in 213 files (38 `src` files, 142 test files, 6 docs; most added lines are tests and fixtures); `bc6af53..99cd600` 23,861 added in 92 files (37 `src`, 45 test, 5 docs); checkpoint 15 adds 7,277 lines in 36 files; `1341059` changes 17 files (+714, -61).
 
 ## 2. How to cut and open the PRs (operator)
 
@@ -73,7 +75,7 @@ git status --short                                   # anything listed here is N
 # 1. Stacked branches at the milestone heads (local only; `git branch` creates refs, it does not touch files)
 git branch pr/m0 68c016d
 git branch pr/m1 bc6af53
-git branch pr/m2 2d81c65            # the first commit that contains the MCP envelope fix (section 0); 99cd600 is red
+git branch pr/m2 1341059            # the first commit with consistent MCP code, schemas and tests (section 0); 99cd600 is red
 git branch pr/m3 <FINAL_SHA>        # after the final commit exists
 git push -u origin pr/m0 pr/m1 pr/m2 pr/m3
 
@@ -222,12 +224,13 @@ None. Schema v1 is created fresh in the user's own file (`PRAGMA user_version = 
 Adds the stable TypeScript SDK (`Gcr`), the `gcr` CLI (31 help pages), the local stdio MCP server (12 tools, read-only by default, approved import roots), the knowledge graph with an offline HTML export, and local drafts and annotations with an audit log.
 Nothing can send to ChatGPT; a draft has no "sent" state.
 
-### What changed (range `bc6af53..2d81c65`, 9 commits; `148845b` is the M3 CI definition and `2d81c65` also carries M3 scripts and documents; the entity, graph and draft modules came earlier)
+### What changed (range `bc6af53..1341059`, 10 commits; `148845b` is the M3 CI definition, `2d81c65` and `1341059` also carry M3 scripts and documents; the entity, graph and draft modules came earlier)
 
 * `src/sdk/*` (facade, resolver, error normalisation), `docs/SDK.md`.
 * `src/cli/*` (commands, option parser, routing, output, signal and EPIPE handling), `src/suppress-warnings.ts`, `docs/CLI_REFERENCE.md`, `docs/CLI_HELP.txt` (`scripts/capture-cli-help.mjs`).
 * `src/mcp/*` (tool table, envelope with size cap, approved roots, stdout guard, alias mechanism with an empty table per ADR-0002), `docs/MCP_TOOLS.md`, `docs/mcp-tool-schemas.json` (`scripts/dump-mcp-schemas.mjs`).
 * Fixes: `3721e54` (a database with a newer schema version is refused before any write), `99cd600` (accurate `GRAPH_EMPTY` warning).
+* `1341059`: `gcr_update_local_annotation` is annotated `destructiveHint: true` (the update overwrites the previous text); schemas regenerated; reviewers' fixes for MCP error results that bypassed the size cap and for unbounded serialization before the cap check (as stated in the commit message).
 * Checkpoint 15 (`2d81c65`, unreviewed by its own message): reworked MCP result-size handling (`src/mcp/envelope.ts`, `registry.ts`, `tools.ts`), CLI robustness (a failing write to stdout is reported as `INTERNAL_ERROR` with a reason; safer file creation for `graph export`; `src/cli/context.ts`, `route.ts`, `run.ts`), and new adversarial tests under `test/cli` and `test/mcp`.
 * Test additions: `test/cli`, `test/mcp` (real SDK client over an in-memory transport and over stdio child processes), `test/sdk`.
 
@@ -239,7 +242,7 @@ Measured on `git archive <commit>`, scratch folder, Node 22.22.0, 2026-10-11.
 |---|---|
 | At `99cd600`: `npm run typecheck`, `npm run build` | exit 0, exit 0 |
 | At `99cd600`: compiled suite | **6,565 tests, 6,561 pass, 1 fail, 3 skipped**, 379 s. The failure is a **killed test file**: `test/mcp/limits.adversarial.test.ts` ends with `signal: 'SIGKILL'` after 36 to 53 s; its other six sub-tests passed. Re-running that single file gave the same result (36 s). Cause **NOT VERIFIED** (memory pressure from a test case, or a defect that the then-uncommitted MCP edits address). |
-| At `2d81c65` (proposed M2 head) | @@M2B@@ |
+| At `1341059` (proposed M2 head; the working tree was clean, so the final runs below are its runs) | @@M2B@@ |
 | Working tree (HEAD + edits) at 12:24 UTC, before checkpoint 15 | 6,568 tests, 6,566 pass, 0 fail, 2 skipped, 262 s (the 2 skips are the root-permission tests) |
 | Final working-tree runs | Node 22.22.0: @@FINAL_2222_PR@@ ; Node 22.16.0: @@FINAL_2216_PR@@ |
 | `node dist/cli/main.js doctor` | `Status: OK`, modes A to E as in the README table |
@@ -261,7 +264,7 @@ None (schema v1; no new migration in this range). `3721e54` only makes opening a
 
 ### Rollback note
 
-`git revert --no-commit bc6af53..2d81c65 && git commit`. MCP clients that were pointed at `dist/mcp/entry.js` simply stop finding it. Local drafts and annotations live in the user's database (`local_drafts`, `local_annotations`, `local_audit_log`); deleting the database file removes them.
+`git revert --no-commit bc6af53..1341059 && git commit`. MCP clients that were pointed at `dist/mcp/entry.js` simply stop finding it. Local drafts and annotations live in the user's database (`local_drafts`, `local_annotations`, `local_audit_log`); deleting the database file removes them.
 
 ### Checklist (mirrors AGENTS.md)
 
@@ -270,7 +273,7 @@ None (schema v1; no new migration in this range). `3721e54` only makes opening a
 - [x] Imported text is untrusted data: results carry `untrustedContent`; tool metadata is static (test: `test/mcp/security.injection.test.ts`)
 - [x] No secrets, raw exports or real screenshots committed; synthetic ids only
 - [x] `docs/EXECUTION_PLAN.md` row for M2 exists
-- [ ] All tests green at the milestone head: see Evidence (`99cd600` is red; `2d81c65` as measured)
+- [ ] All tests green at the milestone head: see Evidence (`99cd600` is red; `1341059` as measured)
 - [ ] `node scripts/ci-smoke.mjs`: see Evidence
 - [ ] Real MCP clients (VS Code, Codex, Claude Desktop): **not tested**
 - [ ] Validated on Codex's own runner: **not done**
@@ -288,7 +291,7 @@ Makes the project reproducible and reviewable: committed lockfile and `npm ci`, 
 ### What changed
 
 * Already committed: `1917348` (npm scripts `build`, `typecheck`, `test`, `smoke`, `privacy-scan`, `licenses`, `test:browser`, `capture:cli-help`, `dump:mcp-schemas`; `scripts/test-browser-gated.mjs`), `148845b` (`.github/workflows/gcr-ci.yml`, `.devcontainer/devcontainer.json`), and from earlier checkpoints `src/devtools/*`, `scripts/privacy-scan.mjs`, `scripts/licenses.mjs`, `scripts/dump-mcp-schemas.mjs`, `scripts/capture-cli-help.mjs`.
-* Committed as early drafts in checkpoint 15 (`2d81c65`): `README.md`, `CHANGELOG.md`, `docs/USER_GUIDE.md`, `docs/PR_NOTES.md`, `docs/SECURITY_AND_BOUNDARIES.md`, `scripts/ci-smoke.mjs`, `scripts/no-network-guard.cjs`, `scripts/perf-baseline.mjs`, `scripts/coverage-summary.mjs` and their tests (`test/scripts`). Not committed when this was written (becomes `<FINAL_SHA>`): the final edits of those files and any document that did not exist yet.
+* Committed as early drafts in checkpoint 15 (`2d81c65`; later versions in `1341059`): `README.md`, `CHANGELOG.md`, `docs/USER_GUIDE.md`, `docs/PR_NOTES.md`, `docs/SECURITY_AND_BOUNDARIES.md`, `scripts/ci-smoke.mjs`, `scripts/no-network-guard.cjs`, `scripts/perf-baseline.mjs`, `scripts/coverage-summary.mjs` and their tests (`test/scripts`). Not committed when this was written (becomes `<FINAL_SHA>`): the final edits of those files and any document that did not exist yet.
 * Workflow facts: `permissions: contents: read`; `pull_request` (not `pull_request_target`); actions pinned to commit SHAs; matrix Node `22.16.0` and `22.x` (Node 24 deliberately absent); steps: `npm ci`, `npm audit --omit=dev --audit-level=high`, typecheck, build, test, smoke, privacy scan with history, license summary, `test:browser`.
 
 ### Evidence

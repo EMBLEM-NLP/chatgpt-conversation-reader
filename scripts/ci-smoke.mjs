@@ -6,6 +6,7 @@
  *   npm run smoke                       builds, then runs this script
  *   node scripts/ci-smoke.mjs           run against ./dist (npm run build first)
  *   node scripts/ci-smoke.mjs --dist <dir> [--fixtures <dir>] [--keep-temp]
+ *   GCR_DIST_DIR=<dir> node scripts/ci-smoke.mjs   (same as --dist; GCR_FIXTURES_DIR likewise)
  *
  * What it does, in a fresh temp directory that is removed in `finally`:
  *  1. zips the 13 fixtures/chatgpt/*.json files (every one must carry GCR-SYNTHETIC-FIXTURE) plus two auxiliary decoy files
@@ -95,7 +96,13 @@ const COMPLETENESS = ['exported_tree', 'rendered_active_view_only', 'partial_use
 // ------------------------------------------------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { dist: join(repoRoot, 'dist'), fixtures: join(repoRoot, 'fixtures', 'chatgpt'), keepTemp: false };
+  // GCR_DIST_DIR / GCR_FIXTURES_DIR name the build under test (mutation testing runs the smoke against sabotaged copies);
+  // an explicit --dist / --fixtures still wins.
+  const opts = {
+    dist: process.env.GCR_DIST_DIR ? resolve(process.env.GCR_DIST_DIR) : join(repoRoot, 'dist'),
+    fixtures: process.env.GCR_FIXTURES_DIR ? resolve(process.env.GCR_FIXTURES_DIR) : join(repoRoot, 'fixtures', 'chatgpt'),
+    keepTemp: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dist' && argv[i + 1] !== undefined) opts.dist = resolve(argv[++i]);
