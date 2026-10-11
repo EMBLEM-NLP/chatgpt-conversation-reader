@@ -1,22 +1,22 @@
 # PR notes: ready-to-paste pull request descriptions for milestones M0 to M4
 
-Written 2026-10-11 from the real git history of branch `claude/chatgpt-conversation-reader-rraexo` (read-only `git log`, `git show`, `git diff`, `git archive`). Milestones are those of
+Written 2026-10-11 from the real git history of branch `claude/chatgpt-conversation-reader-rraexo` (read-only `git log`, `git show`, `git diff`, `git archive`) and fact-checked a second time at about 14:00 to 14:40 UTC the same day (section 7). The history keeps growing while documents are written: re-run `git log --oneline` before you cut anything. Milestones are those of
 [EXECUTION_PLAN.md](EXECUTION_PLAN.md). Companion rules: [../AGENTS.md](../AGENTS.md), [DECISIONS.md](DECISIONS.md).
 
 ## 0. Read this first
 
-* **No pull request has been opened by the implementing agent** (ADR-0006). `gh pr create` is the operator's to run; the commands are in section 2. Nothing in this file was pushed.
-* **The history was not squashed and is mostly work-in-progress checkpoints.** The branch has 24 commits between 2026-10-10 22:13 UTC and 2026-10-11 13:27 UTC: 16 are checkpoints (`wip(m1)`, `wip(m2)`, `wip:`, `test: checkpoint 9`, and checkpoints 15 and 16, `2d81c65` and `91caaf2`) and 8 are
+* **No pull request has been opened by the implementing agent** (ADR-0006; whether anyone opened one on GitHub was not checked: no network). `gh pr create` is the operator's to run; the commands are in section 2. A local remote-tracking ref `origin/claude/chatgpt-conversation-reader-rraexo` exists and pointed at the same commit as the local branch (`1e27fa0`) when checked at 14:05 UTC on 2026-10-11, which means the branch has been pushed from this clone at least once; what GitHub holds was **not verified**. No `git push` was run by the author of this file or by the fact-checker.
+* **The history was not squashed and is mostly work-in-progress checkpoints.** The branch has 25 commits between 2026-10-10 22:13 UTC and 2026-10-11 14:04 UTC (`git rev-list --count HEAD` gave 25 at 14:05 UTC): 17 are checkpoints (`wip(m1)`, `wip(m2)`, `wip:`, `test: checkpoint 9`, and checkpoints 15, 16 and 17, `2d81c65`, `91caaf2` and `1e27fa0`) and 8 are
   focused changes (`chore(m0)`, `fix(drafts)`, `chore(m3)`, `fix(db)` twice, `ci`, `fix(sdk)`, `fix(mcp)`). Checkpoints were taken when a session limit or a review boundary was reached, so a commit label (`m1`, `m2`) names the phase in progress, **not** the scope of the files in it.
   For example the graph, entity and draft modules (scope of M2 in the plan) first land inside commits labelled `wip(m1)`.
 * **The milestone heads are not all green.** Each head was extracted with `git archive` into a scratch folder and typechecked, built and tested (Node 22.22.0, same `package-lock.json`, `node_modules` of the working tree; see the evidence blocks). Findings:
   * `68c016d` (M0): typecheck and build green; **there are no tests yet**.
-  * `bc6af53` (M1 head): **1 failing test** (`test/sdk/errors.test.ts`, a wrong expectation; fixed by a test edit in `8cfb1b2`).
-  * `99cd600` (the last commit before checkpoint 15): **1 failing test file** (`test/mcp/limits.adversarial.test.ts` is killed with `SIGKILL` after 36 to 53 s, reproduced twice, including in isolation).
+  * `bc6af53` (M1 head): **1 failing test** (`test/sdk/errors.test.ts`, a wrong expectation; fixed by a test edit in `8cfb1b2`). Reproduced on 2026-10-11 at 14:1x UTC on Node 22.22.0: 5,807 tests, 5,803 pass, 1 fail, 3 skipped.
+  * `99cd600` (the last commit before checkpoint 15): **1 failing test file** (`test/mcp/limits.adversarial.test.ts` is killed with `SIGKILL` after 36 to 53 s in the first author's runs; reproduced again on 2026-10-11 at 14:26 UTC: 28 s when run alone, and in the full suite).
   * `2d81c65` (checkpoint 15): contains the MCP envelope rework and CLI edits that were uncommitted while `99cd600` was measured, plus early drafts of the scripts and documents. Its message says it is "NOT a milestone completion" and that the suite was not re-run for it. **Not measured as a commit** (its tree was never extracted for a run). A full run on Node 22.16.0 started at 13:04 UTC on the moving working tree had 4 failures that were not Node-specific: the repository's `dist/` had been rebuilt (by `npm run build` run by the author of this file at about 12:57) from in-flight sources that already said `destructiveHint: true` for `gcr_update_local_annotation`, while `docs/mcp-tool-schemas.json` and the smoke expectations still said `false` (two tests in `test/mcp/docs.consistency.test.ts` and two in `test/scripts/ci-smoke.pass.test.ts`). The next commit, `1341059`, reconciles them.
   * `1341059` (proposed M2 head): `fix(mcp)` sets `destructiveHint: true` on `gcr_update_local_annotation` (it overwrites the old text), regenerates `docs/mcp-tool-schemas.json`, and carries the CLI/MCP reviewers' fixes. Its own result: **6,750 tests, 6,748 pass, 0 fail, 2 skipped** on Node 22.22.0 (343 s) and on Node 22.16.0 (453 s), compiled from the tree of `1341059` (only documentation files differed); both skips are the root-permission tests
     The commit message says the full suite was not re-run for it.
-* **Early drafts of `README.md`, `CHANGELOG.md`, `docs/USER_GUIDE.md`, this file, `docs/SECURITY_AND_BOUNDARIES.md`, `scripts/ci-smoke.mjs`, `scripts/no-network-guard.cjs`, `scripts/perf-baseline.mjs` and `scripts/coverage-summary.mjs` were committed in checkpoint 15 (`2d81c65`)**; `docs/PARITY_MATRIX.md` and `docs/PERFORMANCE.md` arrived in `1341059`. Edits made after that commit (the final pass of this file, the README, the changelog and the guide) are uncommitted at the time of writing, and the acceptance record that `SPEC.md` and the task name (ACCEPTANCE.md under docs/) was not present yet (`docs/COVERAGE.md` and `docs/WARNING_CODES.md` appeared in or after checkpoint 16, `91caaf2`). The M3 and M4 descriptions assume the final pass is committed first; that final commit does not exist yet, so `<FINAL_SHA>` below is a placeholder.
+* **Early drafts of `README.md`, `CHANGELOG.md`, `docs/USER_GUIDE.md`, this file, `docs/SECURITY_AND_BOUNDARIES.md`, `scripts/ci-smoke.mjs`, `scripts/no-network-guard.cjs`, `scripts/perf-baseline.mjs` and `scripts/coverage-summary.mjs` were committed in checkpoint 15 (`2d81c65`)**; `docs/PARITY_MATRIX.md` and `docs/PERFORMANCE.md` arrived in `1341059`, `docs/COVERAGE.md` in checkpoint 16 (`91caaf2`), and `docs/WARNING_CODES.md` plus `test/scripts/no-network-guard.adversarial.test.ts` in checkpoint 17 (`1e27fa0`, whose message says the tests were not re-run for it). Later versions of the four user-facing documents were committed in `1e27fa0`; the corrections from the second fact-check (section 7) are uncommitted at the time of writing. The acceptance record that `SPEC.md` and the task name (ACCEPTANCE.md under docs/) **does not exist** (`ls` at 14:09 UTC). The M3 and M4 descriptions assume the final pass is committed first; that final commit does not exist yet, so `<FINAL_SHA>` below is a placeholder.
 * **Evidence rule** (EXECUTION_PLAN): every result below names the command, the exit status or counts, the Node version and the date. "Not run" is stated where it applies. All data is synthetic. Nothing here shows that a real ChatGPT export imports correctly: none was ever available.
 * **Migration note for every PR: none.** SQLite schema v1 is created fresh (`PRAGMA user_version = 1`) in the user's own local file; nothing is migrated and no shared data exists.
 * **Rollback note for every PR:** before merge, delete the branch; after merge, `git revert -m 1 <merge commit>` (merge commits) or `git revert --no-commit <base>..<head>` followed by `git commit` (fast-forwarded ranges). Local data: delete the database file and its `-wal` and `-shm` files
@@ -47,25 +47,26 @@ Written 2026-10-11 from the real git history of branch `claude/chatgpt-conversat
 | 17 | `7e3deb1` | 10-11 06:36 | wip(m2): checkpoint 12 - SDK facade complete | M2 (+ M3) | `scripts/capture-cli-help.mjs` |
 | 18 | `ea0029a` | 10-11 07:05 | wip(m2): checkpoint 13 - CLI and MCP server built | M2 (+ M3 docs) | `docs/CLI_REFERENCE.md`, `docs/CLI_HELP.txt` |
 | 19 | `02b0644` | 10-11 07:05 | wip(m2): checkpoint 14 - MCP reviewer's adversarial limits test | M2 | adds the test that is killed at `99cd600` |
-| 20 | `3721e54` | 10-11 12:17 | fix(db): refuse newer-schema files before any write | M2 | verified: a copy with `user_version = 99` keeps its hash after a refused import |
+| 20 | `3721e54` | 10-11 12:17 | fix(db): refuse newer-schema files before any write | M2 | verified again on 2026-10-11: a copy with `user_version = 99` keeps the SHA-256 of its main file after a refused `list` and `import` (`-wal` and `-shm` files were created next to it by SQLite) |
 | 21 | `99cd600` | 10-11 12:18 | fix(sdk): accurate GRAPH_EMPTY warning | M2 | last commit before checkpoint 15; killed MCP test file |
 | 22 | `2d81c65` | 10-11 12:51 | wip: checkpoint 15 - CLI/MCP review edits, verification scripts and docs in progress | M2 (CLI/MCP edits) + M3 (scripts, documents) | "Checkpoint only; NOT a milestone completion" |
 | 23 | `1341059` | 10-11 13:13 | fix(mcp): annotate gcr_update_local_annotation destructiveHint:true (it overwrites the old text) | M2 (+ M3 docs: parity matrix, performance) | proposed M2 head; also adds `docs/PARITY_MATRIX.md`, `docs/PERFORMANCE.md` and, per its message, 20 reviewer-reported CLI/MCP defects fixed |
-| 24 | `91caaf2` | 10-11 13:27 | wip: checkpoint 16 - verification scripts and docs drafts in progress | M3 (documents, smoke script) | current `HEAD`; adds `docs/COVERAGE.md`; touches only documents and `scripts/ci-smoke.mjs` |
+| 24 | `91caaf2` | 10-11 13:27 | wip: checkpoint 16 - verification scripts and docs drafts in progress | M3 (documents, smoke script) | adds `docs/COVERAGE.md`; touches only documents and `scripts/ci-smoke.mjs` |
+| 25 | `1e27fa0` | 10-11 14:04 | wip: checkpoint 17 - verification scripts and docs still in progress | M3 (documents, scripts, one new test file) | `HEAD` when checked at 14:05 UTC; adds `docs/WARNING_CODES.md` and `test/scripts/no-network-guard.adversarial.test.ts`; changes ARCHITECTURE, DECISIONS (ADR-0013 to ADR-0021), PARITY_MATRIX, SECURITY_AND_BOUNDARIES, the four user-facing documents, `scripts/ci-smoke.mjs`, `scripts/no-network-guard.cjs` (12 files, +1,807 -364); message: "tests not re-run for this commit"; no `src/` change |
 
 | Milestone | Commits | Contiguous range |
 |---|---|---|
 | M0 | 1 | `68c016d` |
 | M1 | 2 to 13 (12 commits; `1917348` is M3 content interleaved) | `68c016d..bc6af53` (git range notation: excludes `68c016d`, includes `c1b4854` ... `bc6af53`) |
 | M2 | 14 to 23 (10 commits; `148845b` is M3 content, `2d81c65` and `1341059` are mixed M2 / M3) | `bc6af53..1341059` (the entity, graph and draft modules and `12de7a9` are in the M1 range) |
-| M3 | `1917348`, `148845b`, the scripts and documents of `2d81c65`, `1341059` and `91caaf2`, plus any uncommitted final pass | not contiguous; finish with the final commit `<FINAL_SHA>` (it may equal `91caaf2` if nothing else is committed) |
+| M3 | `1917348`, `148845b`, the scripts and documents of `2d81c65`, `1341059`, `91caaf2` and `1e27fa0`, plus any uncommitted final pass | not contiguous; finish with the final commit `<FINAL_SHA>` (it may equal `1e27fa0` if nothing else is committed) |
 | M4 | documentation only: `68c016d` (ADR-0010), `c1b4854` (`docs/BROWSER_GATE.md`), `1917348` (`test:browser`) | no unique commits; see PR M4 |
 
-Size (git diff, added lines): M0 3,139 in 23 files; `68c016d..bc6af53` 86,263 added in 213 files (38 `src` files, 142 test files, 6 docs; most added lines are tests and fixtures); `bc6af53..99cd600` 23,861 added in 92 files (37 `src`, 45 test, 5 docs); checkpoint 15 adds 7,277 lines in 36 files; `1341059` changes 17 files (+714, -61).
+Size (git diff, added lines): M0 3,139 in 23 files; `68c016d..bc6af53` 86,263 added in 213 files (38 `src` files, 142 test files, 6 docs; most added lines are tests and fixtures); `bc6af53..99cd600` 23,861 added in 92 files (37 `src`, 45 test, 5 docs); checkpoint 15 adds 7,277 lines in 36 files; `1341059` changes 17 files (+714, -61); `1e27fa0` changes 12 files (+1,807, -364). All figures re-read from `git diff --shortstat` on 2026-10-11.
 
 ## 2. How to cut and open the PRs (operator)
 
-`origin` is `https://github.com/EMBLEM-NLP/chatgpt-conversation-reader`. When this work began that repository was **empty** (no commits, no branches; ADR-0001); whether that is still so was **not checked** (no network). A pull request needs an existing base branch.
+`origin` is `https://github.com/EMBLEM-NLP/chatgpt-conversation-reader` (`git remote -v`). When this work began that repository was **empty** (no commits, no branches; ADR-0001). The local clone now has a remote-tracking ref `origin/claude/chatgpt-conversation-reader-rraexo` equal to the local branch head, so that one branch was pushed; whether `main` exists, and what GitHub holds, was **not checked** (no network). A pull request needs an existing base branch.
 If `main` does not exist yet, create it first, for example from an empty root commit (`git commit --allow-empty -m "chore: empty root"` on an orphan branch, then push it as `main`), or publish M0 as `main` and open M1 to M4 against it. The choice is the operator's.
 
 ```bash
@@ -93,7 +94,7 @@ gh pr create --base pr/m2 --head pr/m3 --title "M3: CI, security tooling, docume
 # M4 has no unique commits: paste /tmp/pr-M4.md as a comment on the M3 PR (or open it separately if you re-cut a docs-only branch)
 ```
 
-The `sed` extraction was tested on this file. `gh` itself was **not run** here. If you would rather have one PR with green CI at the end, open `pr/m3` against `main` directly and paste all five descriptions into it; the history is a sequence of checkpoints, and the per-milestone heads `bc6af53` and `99cd600` are red (section 0).
+The `sed` extraction was tested on this file (all five markers produce a non-empty description; re-run on 2026-10-11). `gh` itself was **not run** here. The workflow `.github/workflows/gcr-ci.yml` triggers on `pull_request` only for base branch `main` (and on `push` to `main` and manual dispatch): a stacked PR whose base is `pr/m0`, `pr/m1` or `pr/m2` **does not start CI** (read from the workflow file; never run on GitHub). If you would rather have one PR with green CI at the end, open `pr/m3` against `main` directly and paste all five descriptions into it; the history is a sequence of checkpoints, and the per-milestone heads `bc6af53` and `99cd600` are red (section 0).
 
 ---
 
@@ -108,7 +109,7 @@ Clean-room scaffold for GCR (EMBLEM-NLP ChatGPT Conversation Reader & Writer): t
 
 * Supplied documents kept verbatim: `SPEC.md`, `AGENTS.md`, `CODEX_TASK.md`, `docs/REPO_RUNBOOK.md`; plus `CODEX_START_HERE.md` and the skill `.agents/skills/gcr-implementation/SKILL.md`.
 * `docs/ARCHITECTURE.md` (layering, identity, SQLite schema v1 contract, domain rules), `docs/DECISIONS.md` (ADR-0001 to ADR-0011: clean-room, empty alias table, `node:sqlite`, no committed build output, snapshots and heads, no PR by the agent, CCR rules not applied, licensing, no guessed active branch, no browser code, accepted URL forms), `docs/EXECUTION_PLAN.md`.
-* TypeScript project (strict, NodeNext, ES2023), `package.json` (`private`, `UNLICENSED`, runtime dependencies `@modelcontextprotocol/sdk` 1.32.1 and `zod` 4.6.5 only), committed `package-lock.json`, `.gitignore` that keeps exports, databases and secrets out of Git.
+* TypeScript project (strict, NodeNext, ES2023), `package.json` (`private`; `engines.node` is `>=22.13` at this commit and becomes `>=22.16.0` in `bc6af53`; **no `license` field yet**, `"license": "UNLICENSED"` is added by `1917348`; runtime dependencies `@modelcontextprotocol/sdk` 1.32.1 and `zod` 4.6.5 only), committed `package-lock.json`, `.gitignore` that keeps exports, databases and secrets out of Git.
 * First code: `src/errors.ts` (28 error codes, exit codes), `src/logger.ts`, `src/version.ts`, `src/domain/types.ts` and `src/domain/results.ts` (shared types), test helpers (`records`, `tmp`, `zip-builder`).
 
 ### Evidence
@@ -179,7 +180,7 @@ Measured on `git archive bc6af53`, scratch folder, 2026-10-11, `node --test --te
 |---|---|
 | `npm run typecheck` | exit 0 |
 | `npm run build` | exit 0 |
-| Compiled suite, Node 22.22.0 | **5,807 tests, 5,803 pass, 1 fail, 3 skipped**, 115 s. The failure: `test/sdk/errors.test.ts` "a connection that was closed behind the facade's back" (expected `DB_ERROR`, got `IMPORT_INPUT_NOT_FOUND`: the test passed a nonexistent import path). A test-only edit in `8cfb1b2` fixes it. The 3 skips: two "running as root" permission tests and the privacy self-test ("not running inside a git checkout", an artefact of `git archive`). |
+| Compiled suite, Node 22.22.0 | **5,807 tests, 5,803 pass, 1 fail, 3 skipped**, 115 s (first measurement; the fact-check re-run on 2026-10-11 gave the same counts in 173 s on a busier machine). The failure: `test/sdk/errors.test.ts` "a connection that was closed behind the facade's back" (expected `DB_ERROR`, got `IMPORT_INPUT_NOT_FOUND`: the test passed a nonexistent import path). A test-only edit in `8cfb1b2` fixes it. The 3 skips: two "running as root" permission tests and the privacy self-test ("not running inside a git checkout", an artefact of `git archive`). |
 | Compiled suite, Node 22.16.0 | **5,807 tests, 5,803 pass, 1 fail, 3 skipped**, 237 s; the same failing test as on 22.22.0 (the declared minimum therefore shows the same result at this commit) |
 | FTS5 probe | Node 22.13.1: `gcr doctor` says "TOO OLD" and "FTS5 NOT available" (verified on the current tree with the real binary); ADR-0012 records the earlier runs on 22.13.1 to 22.21.1 |
 | `node scripts/ci-smoke.mjs` | script not present at this commit; not run |
@@ -232,7 +233,7 @@ Nothing can send to ChatGPT; a draft has no "sent" state.
 * `src/mcp/*` (tool table, envelope with size cap, approved roots, stdout guard, alias mechanism with an empty table per ADR-0002), `docs/MCP_TOOLS.md`, `docs/mcp-tool-schemas.json` (`scripts/dump-mcp-schemas.mjs`).
 * Fixes: `3721e54` (a database with a newer schema version is refused before any write), `99cd600` (accurate `GRAPH_EMPTY` warning).
 * `1341059`: `gcr_update_local_annotation` is annotated `destructiveHint: true` (the update overwrites the previous text); schemas regenerated; reviewers' fixes for MCP error results that bypassed the size cap and for unbounded serialization before the cap check (as stated in the commit message).
-* Checkpoint 15 (`2d81c65`, unreviewed by its own message): reworked MCP result-size handling (`src/mcp/envelope.ts`, `registry.ts`, `tools.ts`), CLI robustness (a failing write to stdout is reported as `INTERNAL_ERROR` with a reason; safer file creation for `graph export`; `src/cli/context.ts`, `route.ts`, `run.ts`), and new adversarial tests under `test/cli` and `test/mcp`.
+* Checkpoint 15 (`2d81c65`, unreviewed by its own message): reworked MCP result-size handling (`src/mcp/envelope.ts`, `registry.ts`, `tools.ts`), CLI error handling (a failing write to stdout is reported as `INTERNAL_ERROR` with a reason; safer file creation for `graph export`; `src/cli/context.ts`, `route.ts`, `run.ts`), and new adversarial tests under `test/cli` and `test/mcp`.
 * Test additions: `test/cli`, `test/mcp` (real SDK client over an in-memory transport and over stdio child processes), `test/sdk`.
 
 ### Evidence
@@ -242,14 +243,14 @@ Nothing can send to ChatGPT; a draft has no "sent" state.
 | Command | Result |
 |---|---|
 | At `99cd600`: `npm run typecheck`, `npm run build` | exit 0, exit 0 |
-| At `99cd600`: compiled suite | **6,565 tests, 6,561 pass, 1 fail, 3 skipped**, 379 s. The failure is a **killed test file**: `test/mcp/limits.adversarial.test.ts` ends with `signal: 'SIGKILL'` after 36 to 53 s; its other six sub-tests passed. Re-running that single file gave the same result (36 s). Cause **NOT VERIFIED** (memory pressure from a test case, or a defect that the then-uncommitted MCP edits address). |
-| At `1341059` (proposed M2 head; the working tree was clean apart from documentation files, so the final runs below are its runs) | **6,750 tests, 6,748 pass, 0 fail, 2 skipped** on Node 22.22.0 (343 s) and on Node 22.16.0 (453 s), compiled from the tree of `1341059` (only documentation files differed); both skips are the root-permission tests |
-| Working tree (HEAD + edits) at 12:24 UTC, before checkpoint 15 | 6,568 tests, 6,566 pass, 0 fail, 2 skipped, 262 s (the 2 skips are the root-permission tests) |
+| At `99cd600`: compiled suite | **6,565 tests, 6,561 pass, 1 fail, 3 skipped**, 379 s (the fact-check re-run on 2026-10-11 gave the same counts in 386 s). The failure is a **killed test file**: `test/mcp/limits.adversarial.test.ts` ends with `signal: 'SIGKILL'` after 36 to 53 s; its other six sub-tests passed. Re-running that single file gave the same result (36 s; 28 s in the fact-check re-run, 6 of 7 sub-tests passed). Cause **NOT VERIFIED** (memory pressure from a test case, or a defect that the then-uncommitted MCP edits address). |
+| At `1341059` (proposed M2 head) | **6,750 tests, 6,748 pass, 0 fail, 2 skipped**. First author: Node 22.22.0 in 343 s and Node 22.16.0 in 453 s (about 13:15 UTC, working tree clean apart from documentation files). Fact-check re-run on 2026-10-11, 14:01 to 14:18 UTC, compiled from a working tree whose `src/` and `test/` equal `1341059`: Node 22.22.0 in 390 s, Node 22.16.0 in 575 s, the same counts (905 suites); the test file `test/scripts/no-network-guard.adversarial.test.ts` of the later commit `1e27fa0` did not exist at compile time and is not counted. Both skips are the root-permission tests |
+| Working tree (HEAD + edits) at 12:24 UTC, before checkpoint 15 (first author's run; that tree no longer exists, so it was not reproduced) | 6,568 tests, 6,566 pass, 0 fail, 2 skipped, 262 s (the 2 skips are the root-permission tests) |
 | `node dist/cli/main.js doctor` | `Status: OK`, modes A to E as in the README table |
 | `gcr` by hand (import in six layouts, get by UUID and link, branches, thread, search, stats, audit, graph, drafts, annotations, 21 distinct error codes) | outputs in `docs/USER_GUIDE.md`; a battery of 37 commands was recorded four times and compared (section 6) |
-| MCP by hand (SDK client over stdio) | 12 tools listed; reads work; default mode answers `WRITE_FORBIDDEN` / `IMPORT_PATH_NOT_ALLOWED`; with `--allow-local-writes` and an approved root: import inside the root accepted, outside refused, draft and annotation created, stale version `ANNOTATION_CONFLICT` |
+| MCP by hand (SDK client over stdio) | 12 tools listed; read tools returned results; default mode answers `WRITE_FORBIDDEN` / `IMPORT_PATH_NOT_ALLOWED`; with `--allow-local-writes` and an approved root: import inside the root accepted, outside refused, draft and annotation created, stale version `ANNOTATION_CONFLICT` |
 | `node scripts/dump-mcp-schemas.mjs --check`, `node scripts/capture-cli-help.mjs --check` | both "up to date" |
-| `node scripts/ci-smoke.mjs` | `SMOKE OK (41 checks)`, exit 0, 9.6 s on Node 22.22.0 and 10.4 s on Node 22.16.0 (HEAD `91caaf2`); the smoke script's own tests (`test/scripts/ci-smoke.*.test`, 14 tests) pass |
+| `node scripts/ci-smoke.mjs` | Version of `91caaf2`: `SMOKE OK (41 checks)`, 12.1 s on Node 22.22.0 (re-run 2026-10-11 against the current `dist/`; the first author measured 9.6 s on 22.22.0 and 10.4 s on 22.16.0). Version of `1e27fa0`: 51 checks, `SMOKE OK (51 checks)` on Node 22.22.0 (1 run, 22.9 s). Working-tree version after it (modified 14:13 UTC): `SMOKE OK (51 checks)` on Node 22.16.0 (1 run, 22.7 s); on Node 22.22.0 **8 of 10 runs passed and 2 failed** (`SMOKE FAILED (1 of 51 checks failed)` and `(2 of 51 ...)`: the check `cli read: search (json, ...)` ended with exit 1 and no error code, and the check that no absolute repository path appears in any output); cause **NOT diagnosed**, machine load average 11 to 13. The smoke script's own tests (`test/scripts/ci-smoke.*.test`) are part of the suite counts |
 
 ### Risks
 
@@ -260,7 +261,7 @@ Nothing can send to ChatGPT; a draft has no "sent" state.
 
 ### Migration note
 
-None (schema v1; no new migration in this range). `3721e54` only makes opening a newer-schema file safer: verified, a copy with `PRAGMA user_version = 99` keeps its SHA-256 after `list` and `import` are refused.
+None (schema v1; no new migration in this range). `3721e54` only makes opening a newer-schema file safer: verified (again on 2026-10-11), a copy with `PRAGMA user_version = 99` keeps the SHA-256 of its main file after `list` and `import` are refused; SQLite still creates `-wal` and `-shm` files beside it.
 
 ### Rollback note
 
@@ -290,7 +291,7 @@ Makes the project reproducible and reviewable: committed lockfile and `npm ci`, 
 
 ### What changed
 
-* Already committed: `1917348` (npm scripts `build`, `typecheck`, `test`, `smoke`, `privacy-scan`, `licenses`, `test:browser`, `capture:cli-help`, `dump:mcp-schemas`; `scripts/test-browser-gated.mjs`), `148845b` (`.github/workflows/gcr-ci.yml`, `.devcontainer/devcontainer.json`), and from earlier checkpoints `src/devtools/*`, `scripts/privacy-scan.mjs`, `scripts/licenses.mjs`, `scripts/dump-mcp-schemas.mjs`, `scripts/capture-cli-help.mjs`.
+* Already committed: `1917348` (npm scripts `smoke`, `privacy-scan`, `privacy-scan:history`, `licenses`, `test:browser`, `capture:cli-help`, `dump:mcp-schemas`, `perf` and `--test-concurrency=2` for `test`; the `"license": "UNLICENSED"` and `files` fields of `package.json`; `scripts/test-browser-gated.mjs`; the `coverage-summary` script came later, with `scripts/coverage-summary.mjs`), `148845b` (`.github/workflows/gcr-ci.yml`, `.devcontainer/devcontainer.json`), and from earlier checkpoints `src/devtools/*`, `scripts/privacy-scan.mjs`, `scripts/licenses.mjs`, `scripts/dump-mcp-schemas.mjs`, `scripts/capture-cli-help.mjs`.
 * Committed as early drafts in checkpoint 15 (`2d81c65`; later versions in `1341059`): `README.md`, `CHANGELOG.md`, `docs/USER_GUIDE.md`, `docs/PR_NOTES.md`, `docs/SECURITY_AND_BOUNDARIES.md`, `scripts/ci-smoke.mjs`, `scripts/no-network-guard.cjs`, `scripts/perf-baseline.mjs`, `scripts/coverage-summary.mjs` and their tests (`test/scripts`). Not committed when this was written (becomes `<FINAL_SHA>`): the final edits of those files and any document that did not exist yet.
 * Workflow facts: `permissions: contents: read`; `pull_request` (not `pull_request_target`); actions pinned to commit SHAs; matrix Node `22.16.0` and `22.x` (Node 24 deliberately absent); steps: `npm ci`, `npm audit --omit=dev --audit-level=high`, typecheck, build, test, smoke, privacy scan with history, license summary, `test:browser`.
 
@@ -300,14 +301,14 @@ Working tree of 2026-10-11, Linux, running as root.
 
 | Command | Result |
 |---|---|
-| Compiled suite, Node 22.22.0 / 22.16.0 | **6,750 tests, 6,748 pass, 0 fail, 2 skipped**, 343 s / **6,750 tests, 6,748 pass, 0 fail, 2 skipped**, 453 s (tree of `1341059`; the later commit `91caaf2` changes documents and `scripts/ci-smoke.mjs` only, and the smoke tests were re-run against it: 14 of 14 pass) |
+| Compiled suite, Node 22.22.0 / 22.16.0 | **6,750 tests, 6,748 pass, 0 fail, 2 skipped** on each (390 s / 575 s in the fact-check re-run of 2026-10-11 14:01 to 14:18 UTC; 343 s / 453 s in the first author's run). `src/` and `test/` equal `1341059`; the later commits `91caaf2` and `1e27fa0` change documents and scripts, and add one test file (`test/scripts/no-network-guard.adversarial.test.ts`) that is **not** in these counts and whose message says it was not run |
 | `npm run typecheck`, `npm run build` | exit 0, exit 0 |
-| `node scripts/privacy-scan.mjs --root .` | `privacy-scan: clean; 338 file(s) scanned, skipped 0 large / 0 binary / 0 non-regular, 0 allow-listed`, exit 0 (working tree). **With `--history` (the CI step `privacy-scan:history`) the exit is 1**: one finding in old commit `c8533e4` (`test/drafts/drafts.test.ts:255`, a chatgpt.com URL with an invented id that does not match the strict synthetic pattern; the line was changed to a `00000000-...` id in `f164efd`) |
-| `npm audit --omit=dev --audit-level=high` | "found 0 vulnerabilities", exit 0 (contacts the npm registry) |
+| `node scripts/privacy-scan.mjs --root .` | `privacy-scan: clean; 339 file(s) scanned, skipped 0 large / 0 binary / 0 non-regular, 0 allow-listed`, exit 0 (working tree, 14:05 UTC; the first author saw 338 files before `docs/WARNING_CODES.md` and other files were added). **With `--history` (the CI step `privacy-scan:history`) the exit is 1** (re-run 14:05 UTC: `1 finding(s) ... history: 25 commit(s)`): one finding in old commit `c8533e4` (`test/drafts/drafts.test.ts:255`, a chatgpt.com URL with an invented id that does not match the strict synthetic pattern; the line was changed to a `00000000-...` id in `f164efd`) |
+| `npm audit --omit=dev --audit-level=high` | "found 0 vulnerabilities", exit 0 in the first author's run (it contacts the npm registry); **not re-run** by the fact-check (no network allowed) |
 | `node scripts/licenses.mjs` | 98 packages, 0 unknown, 0 non-permissive, release gate PASS |
-| `node scripts/ci-smoke.mjs` | `SMOKE OK (41 checks)`, exit 0, 9.6 s on Node 22.22.0 and 10.4 s on Node 22.16.0 (HEAD `91caaf2`); the smoke script's own tests (`test/scripts/ci-smoke.*.test`, 14 tests) pass |
+| `node scripts/ci-smoke.mjs` | Version of `91caaf2`: `SMOKE OK (41 checks)`, 12.1 s on Node 22.22.0 (re-run 2026-10-11 against the current `dist/`; the first author measured 9.6 s on 22.22.0 and 10.4 s on 22.16.0). Version of `1e27fa0` and the working tree after it: 51 checks; `SMOKE OK (51 checks)` on Node 22.16.0 (1 run, 22.7 s); on Node 22.22.0 **8 of 10 runs passed and 2 failed** (`SMOKE FAILED (1 of 51 checks failed)` and `(2 of 51 ...)`: the check `cli read: search (json, ...)` ended with exit 1 and no error code, and the check that no absolute repository path appears in any output); cause **NOT diagnosed**, machine load average 11 to 13. The smoke script's own tests (`test/scripts/ci-smoke.*.test`) are part of the suite counts |
 | `node scripts/test-browser-gated.mjs` | `NOT_RUN: no browser code exists in this build ...`, exit 0 |
-| The GitHub Actions workflow | **never run on GitHub**; each step was run locally by the commands above (`npm ci` itself was not re-run) |
+| The GitHub Actions workflow | **never run on GitHub**; each step except `npm ci` was run locally by the commands above, and the `npm audit` result is the first author's only |
 
 ### Risks
 
@@ -349,7 +350,7 @@ This milestone has **no unique commits**: its content is in `68c016d` (ADR-0010)
 
 ### What changed
 
-* `docs/BROWSER_GATE.md`: why the feature is gated (consumer URL is not an API resource; OpenAI terms **not verified**: every `*.openai.com` host was unreachable from the sandbox), what is allowed today (user logs in personally, official export, manual copy, local draft, manual paste), what GCR will not do, a 13-item human gate procedure (agents must not tick it), supported alternatives.
+* `docs/BROWSER_GATE.md`: why the feature is gated (consumer URL is not an API resource; OpenAI terms **not verified**: every `*.openai.com` host was unreachable from the sandbox), what is allowed today (user logs in personally, official export, manual copy, local draft, manual paste), what GCR will not do, a 14-item human gate procedure (agents must not tick it), supported alternatives.
 * `test/security/no-network.test.ts`: fails if any file under `src/` imports a network, browser-automation or process module (devtools may use `child_process` for git only).
 * `npm run test:browser` prints `NOT_RUN` (exit 0).
 
@@ -388,9 +389,9 @@ Nothing to roll back at run time (no code). Reverting removes the documentation 
 
 ---
 
-## 6. Re-verification at the end of the session
+## 6. Re-verification at the end of the session (first author)
 
-Everything in this section was re-run at the end of the session (2026-10-11, about 12:38 to 13:35 UTC, Linux, running as root, Node 22.22.0 unless stated) because other agents were still changing the CLI and MCP modules while the documents were written.
+Everything in this section was re-run by the first author at the end of the session (2026-10-11, about 12:38 to 13:35 UTC, Linux, running as root, Node 22.22.0 unless stated) because other agents were still changing the CLI and MCP modules while the documents were written.
 
 | Check | How | Result |
 |---|---|---|
@@ -405,3 +406,16 @@ Everything in this section was re-run at the end of the session (2026-10-11, abo
 
 Raw logs of these runs were kept in the author's scratch folder, not in the repository (they contain test output and temporary paths).
 
+## 7. Independent fact-check (second pass)
+
+Done on 2026-10-11 between about 14:00 and 14:45 UTC by a second reader who assumed the documents overclaim, Linux, running as `root`, no network, Node 22.22.0 unless stated. Corrections it made are in the documents themselves; this table says what it re-ran.
+
+| Check | How | Result |
+|---|---|---|
+| Quick-start and user-guide commands | re-ran the import of the four-fixture ZIP, `list`, `get` by UUID and by link, `branches`, `search`, `stats`, `audit`, `draft`, `graph build/god-nodes/path/explain/export`, `NOT_IN_LOCAL_EXPORT`; also five import layouts, re-import, two snapshots, account labels, branch policies, 21 distinct CLI error codes (and the two MCP-only ones, `WRITE_FORBIDDEN` and `IMPORT_PATH_NOT_ALLOWED`), manual copy, Cyrillic/Greek/CJK search | output matched the quoted shapes and numbers (batch id, 43 rows, 74 edges, 19 entities) |
+| MCP | the SDK client over stdio against `dist/mcp/entry.js`: default mode and `--allow-local-writes` with an approved root; a raw JSON-RPC pipe through `gcr mcp` | 12 tools; `WRITE_FORBIDDEN`, `IMPORT_PATH_NOT_ALLOWED`, `NOT_IN_LOCAL_EXPORT`, `ANNOTATION_CONFLICT` as documented; stderr empty |
+| Test suites | see M2 and M3 evidence | 6,750 / 6,748 / 0 / 2 on Node 22.22.0 and 22.16.0 |
+| Milestone heads | `git archive` of `68c016d`, `bc6af53`, `99cd600` | M0: typecheck and build exit 0, no test files; `bc6af53`: 5,807 tests, 1 fail (Node 22.22.0); `99cd600`: 6,565 tests, 1 fail (`SIGKILL` of `test/mcp/limits.adversarial.test.js`) |
+| Privacy scan | `--root .` and `--root . --history` | clean (339 files) and 1 finding in `c8533e4` (exit 1) |
+| Links | a script checked every relative Markdown link, every `#anchor` and every backticked repository path in the four user-facing documents | 0 broken; the only unresolved backticked names are example file names (`conversations.json`, `user.json`, ...) and the missing `ACCEPTANCE.md`, which the documents say does not exist |
+| Not re-run | `npm audit` (network), `npm ci` (network), anything on GitHub, the three MCP client products, a browser on the graph page, permission-denied paths (root) | **NOT VERIFIED** by this pass |

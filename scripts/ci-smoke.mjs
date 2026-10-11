@@ -15,8 +15,21 @@
  *     formats, the error contracts, drafts and annotations, graph build and export;
  *  3. drives the built MCP server (`dist/mcp/entry.js`) over REAL stdio with the SDK client (read-only default, then
  *     writes enabled on a COPY of the database) and with a raw pipe that validates every byte of stdout;
- *  4. proves that the canary appears nowhere (outputs, database, exported HTML) and that the network guard fired never
- *     and was active in every process that was started.
+ *  4. proves that the canary appears nowhere (outputs, database, exported HTML, any file the products left in the sandbox)
+ *     and that the network guard fired never and was active in every process that was started.
+ *
+ * Added after mutation testing (a sabotaged copy of dist/ is run through this script; see
+ * test/scripts/ci-smoke.adversarial.test.ts for the regressions each addition catches):
+ *  - a LEAK SCAN: whole message texts and titles of the fixtures must not appear in the output of import, doctor, stats,
+ *    audit, graph, drafts, errors or in MCP stderr (list/branches may show titles; only get/thread/search show texts);
+ *  - a FOOTPRINT check: HOME and TMPDIR stay empty and the working directory holds only the files the smoke asked for;
+ *  - a PATH scan: no output names the sandbox, the temp or home directory, the repository or the build;
+ *  - hidden messages are asserted through the CLI AND through MCP (the CLI renderer filters a second time and would mask a
+ *    regression of the SQL or SDK layer);
+ *  - exact stats groups, a schema probe (a draft's status can only be draft or archived), symlink and extension handling of
+ *    graph export, approved-root edge cases (sibling directory with the same prefix, symlink out of the root, import with
+ *    roots but without --allow-local-writes), and a second database with a hostile title and model name for the one-line
+ *    escaping of every format.
  *
  * Every product process runs with NODE_OPTIONS=--require=<scripts/no-network-guard.cjs>, GCR_NO_NETWORK_LOG set and
  * HTTP_PROXY/HTTPS_PROXY/ALL_PROXY pointing at an unroutable address, so any attempt to use the network throws and is
@@ -83,6 +96,15 @@ const EXPECTED = {
     ['synthetic-model-1', 14],
     ['synthetic-model-2', 3],
   ],
+  // The import report's warnings: code -> count. Every defect of the broken fixtures must stay visible (FR-09: nothing is dropped silently).
+  importWarnings: {
+    CHILDREN_ABSENT: 1, CHILD_NOT_FOUND: 1, COMPLETENESS_BELOW_BATCH_LEVEL: 9, COMPLETENESS_LOWERED: 9, CONTENT_MALFORMED: 2,
+    CURRENT_NODE_NOT_LEAF: 2, DUPLICATE_CONVERSATION: 2, DUPLICATE_KEY: 1, DUPLICATE_MESSAGE_ID: 1, DUPLICATE_NODE_ID: 1,
+    EMPTY_CONVERSATION_ENTRY: 1, ID_ALIAS_MISMATCH: 1, ID_CASE_NORMALIZED: 1, INVALID_CURRENT_NODE: 1, INVALID_NODE_ID: 1,
+    LONE_SURROGATE: 1, MANIFEST_ABSENT: 1, MAPPING_INVALID: 1, MESSAGE_ID_MISMATCH: 1, NODE_ID_MISMATCH: 1, NON_OBJECT_ENTRY: 4,
+    NO_CURRENT_NODE: 3, NUL_STRIPPED: 1, TIMESTAMP_FORMAT: 1, TIMESTAMP_OUT_OF_RANGE: 1, TIMESTAMP_UNPARSEABLE: 1,
+    UNEXPECTED_FIELD_TYPE: 1, UNKNOWN_CONTENT_TYPE: 1, UNKNOWN_PART_TYPE: 1, WRAPPER_OBJECT_FORMAT: 1,
+  },
   searchSynthetic: 91, // hits for "synthetic" (limit 200) without / with hidden messages
   searchSyntheticHidden: 97,
 };
@@ -507,6 +529,28 @@ function validate(format, r, what, leak) {
   return {};
 }
 
+/**
+ * The markdown and compact renderings must show what the JSON one shows: ids (list, branches, search) or message texts
+ * (get, thread). A renderer that drops the last message or a conversation passes every other check.
+ */
+function sameEverywhere(runs, { ids = [], texts = [], completeness }, what) {
+  must(ids.length + texts.length > 0, `${what}: nothing to compare across formats`);
+  for (const f of ['markdown', 'compact']) {
+    const out = runs[f].stdout;
+    const missing = [...ids, ...texts].filter((needle) => !out.includes(needle)).length;
+    must(missing === 0, `${what} (${f}): ${missing} of ${ids.length + texts.length} items of the JSON output are missing`);
+  }
+  if (completeness !== undefined) {
+    // markdown states anything but a complete tree in a visible NOTICE line (FR-09) and says nothing for a complete one
+    const notice = /^NOTICE: completeness is "([a-z_]+)"/m.exec(runs.markdown.stdout)?.[1] ?? 'exported_tree';
+    must(notice === completeness, `${what} (markdown): the completeness notice differs from the JSON output`);
+    const header = runs.compact.stdout.split('\n')[0] ?? '';
+    must(header.includes(` | ${completeness} |`) || header.endsWith(` | ${completeness}`), `${what} (compact): completeness differs from the JSON output`);
+  }
+}
+const printableTexts = (messages) => messages.map((m) => m.text).filter((t) => typeof t === 'string' && /^[\x20-\x7e]{8,}$/.test(t));
+const uuidLike = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
 /** Run one command in all four formats (two at a time) and hand the parsed results to `assertions`. */
 async function readCheck(label, args, leak, assertions) {
   const runs = {};
@@ -642,6 +686,7 @@ async function main() {
     same(d.messages.newlyInserted, EXPECTED.messagesStored, 'messages newly inserted');
     same(d.messages.structural, EXPECTED.messagesStructural, 'structural messages');
     must(Array.isArray(d.warnings) && d.warnings.length > 0, 'the broken fixtures produced no warnings');
+    deepSame(Object.fromEntries(d.warnings.map((w) => [w.code, w.count]).sort(([a], [b]) => (a < b ? -1 : 1))), EXPECTED.importWarnings, 'import warnings by code and count');
     same(statSync(st.db).mode & 0o777, 0o600, 'database file mode');
     // The same numbers, counted independently in the database file.
     same(countRows(st.db, 'messages'), EXPECTED.messagesStored, 'rows in messages');
@@ -672,6 +717,8 @@ async function main() {
     readCheck('list', ['list'], 'titles', (p, runs) => {
       const d = p.json.doc.data;
       must(countIn(st.titles, runs.json.stdout) >= 20, 'sensitivity of the leak scan: list shows fewer than 20 fixture titles');
+      same(p.json.doc.completeness, 'mixed', 'completeness of a list over complete and partial conversations');
+      sameEverywhere(runs, { ids: d.items.map((i) => i.conversationId).filter(uuidLike), completeness: 'mixed' }, 'list');
       same(d.total, EXPECTED.conversationsStored, 'total conversations');
       same(d.items.length, EXPECTED.conversationsStored, 'items on the page');
       same(new Set(d.items.map((i) => i.conversationId)).size, EXPECTED.conversationsStored, 'distinct ids');
@@ -688,6 +735,7 @@ async function main() {
       same(d.branchId, F01_MESSAGES[1], 'branch id');
       same(d.activeness, 'active', 'activeness');
       same(p.jsonl.rows.filter((r) => r.type === 'message').length, 2, 'jsonl messages');
+      sameEverywhere(runs, { texts: printableTexts(d.messages), completeness: 'exported_tree' }, 'get uuid');
     }));
 
   await check('cli read: get https://chatgpt.com/c/<uuid> returns the same thread as the bare uuid', async () => {
@@ -705,35 +753,40 @@ async function main() {
     }));
 
   await check('cli read: search (json, markdown, compact, jsonl)', () =>
-    readCheck('search', ['search', 'answer', '--conversation', IDS.linear], 'any', (p) => {
+    readCheck('search', ['search', 'answer', '--conversation', IDS.linear], 'any', (p, runs) => {
       const d = p.json.doc.data;
       same(d.items.length, 1, 'hits');
       same(d.items[0].messageId, F01_MESSAGES[1], 'hit message id');
       same(d.items[0].authorRole, 'assistant', 'hit role');
       same(p.jsonl.rows.filter((r) => r.type === 'hit').length, 1, 'jsonl hits');
+      sameEverywhere(runs, { ids: d.items.map((i) => i.messageId).filter(uuidLike), completeness: 'exported_tree' }, 'search');
     }));
 
   await check('cli read: branches (json, markdown, compact, jsonl)', () =>
-    readCheck('branches', ['branches', IDS.branching], 'titles', (p) => {
+    readCheck('branches', ['branches', IDS.branching], 'titles', (p, runs) => {
       const d = p.json.doc.data;
       same(d.branches.length, 3, 'branches');
       same(d.activeBranchId, F02_ACTIVE_BRANCH, 'active branch');
       same(d.branches.filter((b) => b.activeness === 'active').length, 1, 'active branches');
       same(p.jsonl.rows.filter((r) => r.type === 'branch').length, 3, 'jsonl branches');
+      sameEverywhere(runs, { ids: d.branches.map((b) => b.branchId).filter(uuidLike), completeness: 'exported_tree' }, 'branches');
     }));
 
   await check('cli read: thread (json, markdown, compact, jsonl)', () =>
-    readCheck('thread', ['thread', IDS.branching], 'any', (p) => {
+    readCheck('thread', ['thread', IDS.branching], 'any', (p, runs) => {
       const d = p.json.doc.data;
       same(d.branchId, F02_ACTIVE_BRANCH, 'branch id');
       same(d.messages.length, 4, 'messages');
       same(p.jsonl.rows.filter((r) => r.type === 'message').length, 4, 'jsonl messages');
+      sameEverywhere(runs, { texts: printableTexts(d.messages), completeness: 'exported_tree' }, 'thread');
     }));
 
   await check('cli read: stats --group-by model', () =>
     readCheck('stats model', ['stats', '--group-by', 'model'], 'none', (p) => {
       const d = p.json.doc.data;
       same(d.groupBy, 'model', 'groupBy');
+      same(p.json.doc.completeness, 'mixed', 'completeness');
+      must(p.json.doc.warnings.some((w) => w.code === 'HIDDEN_MESSAGES_EXCLUDED'), 'stats does not say that hidden messages were left out');
       same(d.totals.messages, EXPECTED.visibleMessages, 'total messages');
       same(sumRows(d.rows), EXPECTED.visibleMessages, 'sum of rows');
       must(d.rows.some((r) => r.key === null && r.label === 'unknown (not supplied by source)'), 'no explicit "unknown" model group');
@@ -763,6 +816,7 @@ async function main() {
   await check('cli read: audit', () =>
     readCheck('audit', ['audit'], 'none', (p) => {
       const d = p.json.doc.data;
+      same(p.json.doc.completeness, 'mixed', 'completeness');
       same(d.scanned.conversations, EXPECTED.conversationsStored, 'conversations scanned');
       same(d.scanned.messages, EXPECTED.auditedMessages, 'messages scanned');
       same(d.findings.length, 9, 'checks run');

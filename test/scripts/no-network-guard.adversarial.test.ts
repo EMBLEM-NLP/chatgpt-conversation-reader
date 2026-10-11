@@ -95,7 +95,7 @@ const CASES: readonly Case[] = [
   },
   { name: 'child_process.execFile of node with an options object that has no env', code: (p) => `require('child_process').execFileSync(process.execPath, ['-e', ${JSON.stringify(NODE_CONNECT(p))}], { stdio: 'ignore' })`, logs: 'net.connect' },
   // ---- network programs behind a wrapper, a symlink, or no name at all -------------------------------------------------------------
-  { name: 'env curl', needs: ['curl', 'env'], code: (p) => `require('child_process').spawnSync(${JSON.stringify(whichPath('env') ?? '')}, ['curl', '-s', 'http://127.0.0.1:${p}/'])`, logs: 'child_process.spawnSync' },
+  { name: 'env curl', needs: ['curl', 'env'], code: (p) => `require('child_process').spawnSync(${JSON.stringify(existsSync('/usr/bin/env') ? '/usr/bin/env' : (whichPath('env') ?? ''))}, ['curl', '-s', 'http://127.0.0.1:${p}/'])`, logs: 'child_process.spawnSync' },
   { name: 'xargs curl', needs: ['curl', 'xargs'], code: (p) => `require('child_process').spawnSync('xargs', ['curl', '-s'], { input: 'http://127.0.0.1:${p}/' })`, logs: 'child_process.spawnSync' },
   { name: 'bash with /dev/tcp (no curl involved)', needs: ['bash'], code: (p) => `require('child_process').spawnSync('bash', ['-c', 'exec 3<>/dev/tcp/127.0.0.1/${p}'])`, logs: 'child_process.spawnSync' },
   { name: 'python3 -c with a socket', needs: ['python3'], code: (p) => `require('child_process').spawnSync('python3', ['-c', 'import socket;socket.create_connection(("127.0.0.1",${p}))'])`, logs: 'child_process.spawnSync' },

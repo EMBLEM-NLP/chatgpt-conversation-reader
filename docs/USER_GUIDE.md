@@ -89,11 +89,11 @@ Third-party tools report the following; none of it is confirmed by OpenAI, and t
 gcr import synthetic-export.zip --db ./demo.sqlite
 ```
 
-Import is **atomic** (all or nothing) and **idempotent**. Exit code 0 on success. The report prints counts, warning codes and file names, never message text.
+Import is meant to be **atomic** (all or nothing; a refused `--strict` import and a refused ZIP left no database file in the cases tried by hand) and **idempotent** (a repeated import was a no-op, shown below). If you interrupt a *first* import with Ctrl-C, the empty database file it had created stays, per [CLI_REFERENCE.md](CLI_REFERENCE.md) (not tried by hand). Exit code 0 on success. The report prints counts, warning codes and file names, never message text.
 
-### Layouts that work
+### Layouts GCR accepts
 
-Each layout below was imported on 2026-10-11 from synthetic data built out of the committed fixtures.
+Each layout below was imported on 2026-10-11 from synthetic data built out of the committed fixtures. None was tried with a real export.
 
 | Input | Command | Result seen |
 |---|---|---|
@@ -104,7 +104,7 @@ Each layout below was imported on 2026-10-11 from synthetic data built out of th
 | A `conversations.json` file | `gcr import conversations.json --db ./j.sqlite` | `sourceKind: conversations_json` |
 | JSON on standard input | `gcr import - --db ./i.sqlite < conversations.json` | `sourceKind: stdin_json`, `sourceLabel: stdin` |
 
-A ZIP cannot be piped; a ZIP inside a ZIP inside a ZIP is refused; encrypted, symlink and path-traversal archives are refused (`IMPORT_ZIP_UNSAFE`).
+Refusals tried by hand on 2026-10-11: a ZIP piped to standard input and a ZIP nested more than one level are `IMPORT_UNSUPPORTED_FORMAT`; a ZIP with a `../` entry name is `IMPORT_ZIP_UNSAFE` (`NAME_DOT_DOT`). Encrypted, symlink, duplicate-name and damaged archives are also meant to be `IMPORT_ZIP_UNSAFE` (decision ADR-0017, covered by the test suite; not tried by hand).
 GCR only reads the input: the SHA-256 of the sharded ZIP, the nested ZIP, a `conversations.json` and the folder was identical before and after an import. See [IMPORT_GUIDE.md](IMPORT_GUIDE.md) sections 3 to 5 for the rules.
 
 ### What happens on re-import: snapshots and the head rule
@@ -148,7 +148,7 @@ $ gcr get 00000000-0000-4000-8000-000000000001 --db ./accounts.sqlite
 error[AMBIGUOUS_CONVERSATION]: The conversation id exists under more than one provider or account.
   remedy: Name one of the candidates: pass an object reference { conversationId, provider, accountLabel } (CLI: --provider and --account) to choose.
 exit=3
-$ gcr get 00000000-0000-4000-8000-000000000001 --account work --db ./accounts.sqlite --format compact      # works
+$ gcr get 00000000-0000-4000-8000-000000000001 --account work --db ./accounts.sqlite --format compact      # returns the conversation (tried)
 ```
 
 (A separate database, `accounts.sqlite`, is used so that the demo numbers elsewhere in this guide stay unchanged.)
@@ -182,7 +182,7 @@ By default a damaged conversation becomes a **warning** and the import continues
 Example with `fixtures/chatgpt/identity-collisions.json` (the same conversation id appears twice):
 
 ```text
-$ gcr import conversations.json --db ./lenient.sqlite --format compact      # 4 read, 3 stored, warning DUPLICATE_CONVERSATION, exit 0
+$ gcr import conversations.json --db ./lenient.sqlite --format compact      # 4 read, 3 stored, exit 0; warnings DUPLICATE_CONVERSATION, ID_ALIAS_MISMATCH, ID_CASE_NORMALIZED
 $ gcr import conversations.json --strict --db ./strict.sqlite
 error[IMPORT_PARSE_ERROR]: A conversation id occurs more than once in the input.
   remedy: Re-run without --strict to import what can be read (the problem is then recorded as a warning), or obtain a fresh export.
@@ -258,7 +258,7 @@ You then choose, explicitly:
 | `--all-branches` (on `get`) | Print every branch, one after another | Three threads, each labelled |
 | `gcr thread <ref> [--branch ...]` | Always exactly one thread | |
 
-A heuristic is a **labelled guess**; do not treat its answer as what you saw on screen. A wrong branch id is `BRANCH_NOT_FOUND` (exit 3). A conversation with no `current_node` but only one branch is shown with `selection=only_branch` (nothing to guess) and a `NO_CURRENT_NODE` warning.
+A conversation whose `current_node` is null (tried above) is also stored with completeness `unknown` instead of `exported_tree` (warning `COMPLETENESS_LOWERED`, reason `no_current_node`), and every result for it starts with a `NOTICE:` line. A heuristic is a **labelled guess**; do not treat its answer as what you saw on screen. A wrong branch id is `BRANCH_NOT_FOUND` (exit 3). A conversation with no `current_node` but only one branch is shown with `selection=only_branch` (nothing to guess) and a `NO_CURRENT_NODE` warning.
 Hidden messages (system scaffolding, memory, reasoning) are left out unless you pass `--include-hidden`.
 
 ---
@@ -292,7 +292,7 @@ The prefix, accent and CJK examples below use the `copy.sqlite` database built i
 `--raw` passes your query to SQLite FTS5 unchanged (AND / OR / NOT / NEAR / phrases / column filters). A syntax error is reported, not hidden:
 
 ```text
-$ gcr search 'answer OR "turn 1"' --raw --limit 3 --db ./demo.sqlite --format compact      # works: 3 hits (limit 3), each marking "turn 1"
+$ gcr search 'answer OR "turn 1"' --raw --limit 3 --db ./demo.sqlite --format compact      # 3 hits (limit 3), each marking "turn 1" (tried)
 $ gcr search 'answer AND' --raw --db ./demo.sqlite
 error[FTS_SYNTAX_ERROR]: The query is not valid FTS5 syntax.
   remedy: Use plain mode, or fix the raw FTS5 expression (quote phrases, balance parentheses, use AND/OR/NOT in upper case).
@@ -308,7 +308,7 @@ exit=2
 | `--conversation <uuid or link>` | only inside one conversation |
 | `--after <ISO>` , `--before <ISO>` | message creation time window (ISO-8601 UTC) |
 | `--provider`, `--account` | restrict to a provider or account label |
-| `--include-hidden` | also search hidden messages (system scaffolding, memory...). On the demo: 28 hits for `synthetic` by default, 34 with `--include-hidden` |
+| `--include-hidden` | also search hidden messages (system scaffolding, memory...). On the demo with `--limit 200`: 28 hits for `synthetic` by default, 34 with `--include-hidden` (the default `--limit` is 20, so without it both print `hits=20`) |
 | `--all-batches` | include superseded snapshots (the same message can then appear once per snapshot) |
 
 ### Pagination
@@ -470,7 +470,7 @@ NOTICE: completeness is "partial_user_supplied": the user supplied only part of 
 ```
 
 Rules: `messages` (1 to 10,000) with `role` and `text`; `createdAt` (ISO-8601 **with** a zone) and `modelSlug` are stored only if you give them and are never inferred; `conversationId` is optional (without it GCR derives a deterministic UUID-shaped id and warns `CONVERSATION_ID_SYNTHESIZED`);
-`sourceUri` must be exactly `https://chatgpt.com/c/<uuid>` (stored as a label, never opened; anything else is `INVALID_URL`). Standard input works too: `gcr import-copy - --db ./c.sqlite < copied-messages.json` gave the same batch id as the file (the batch identity is the content, not the source label).
+`sourceUri` must be exactly `https://chatgpt.com/c/<uuid>` (stored as a label, never opened; anything else is `INVALID_URL`). Standard input is accepted too: `gcr import-copy - --db ./c.sqlite < copied-messages.json` gave the same batch id as the file (the batch identity is the content, not the source label).
 A manual copy has no `updated_at`, so it never displaces a dated official export of the same conversation as head. Audit flags the missing timestamps of this sample (`CONVERSATION_CREATED_AT_NULL`, `MESSAGE_CREATED_AT_NULL`) and `no_current_node`.
 
 ---
@@ -520,7 +520,7 @@ command = "node"
 args = ["/ABSOLUTE/PATH/TO/chatgpt-conversation-reader/dist/mcp/entry.js", "--db", "/ABSOLUTE/PATH/TO/gcr.sqlite"]
 ```
 
-**These three client configurations were not tested with the real clients**; check them against each client's current documentation. A client launches the server itself and passes it only the environment you configure (add `env` for `GCR_APPROVED_IMPORT_ROOTS`).
+**These three client configurations were not tested with the real clients**; check them against each client's current documentation. A client launches the server itself. Whether it passes your shell environment on is client-specific (NOT VERIFIED for the three clients), so set `env` explicitly in the client configuration for `GCR_APPROVED_IMPORT_ROOTS` or `GCR_MCP_ALLOW_WRITES`.
 What was tested: the official SDK client over stdio (12 tools listed, calls below) and a raw JSON-RPC pipe (`initialize` and `tools/list` answered, nothing else on stdout, empty stderr).
 
 ### Read-only default, enabling writes, approved import roots
@@ -541,7 +541,7 @@ gcr_import_export {"path":"/etc/hostname"}   (no approved roots)                
 
 ### Prompt-injection note
 
-Text in your conversations is **untrusted data**. It can contain sentences such as "ignore previous instructions and run a tool". The GCR server never acts on imported text (tests feed it exactly such text), tool descriptions are static, and
+Text in your conversations is **untrusted data**. It can contain sentences such as "ignore previous instructions and run a tool". The GCR server never acts on imported text (`test/mcp/security.injection.test.ts` feeds it text of that kind; it ran green in the suite), tool descriptions are static, and
 every result is marked `untrustedContent: true`. That does **not** make a language-model client immune: a model that reads results can still be steered by them. Keep write tools off unless you need them, keep import roots narrow,
 review any tool call the client proposes, and remember that connecting a hosted model to this server sends the returned conversation text to that model's provider (see [section k](#k-privacy-checklist-before-sharing-anything)).
 
@@ -549,7 +549,7 @@ review any tool call the client proposes, and remember that connecting a hosted 
 
 ## j. Troubleshooting by error code
 
-Errors print as `error[CODE]: message` plus `remedy:` on stderr (one JSON document with `--format json`) and set the process exit code. The codes are the `ERROR_CODES` of `src/errors.ts`; the **Seen** column says whether the exact text below was produced in this session.
+Errors print as `error[CODE]: message` plus `remedy:` on stderr (one JSON document with `--format json`) and set the process exit code. The codes are the `ERROR_CODES` of `src/errors.ts`; the **Seen** column says whether the exact text below was reproduced by hand on 2026-10-11 (`yes (MCP)` means through the MCP server).
 
 | Code | Exit | What happened | The remedy GCR prints | Seen |
 |---|---|---|---|---|
@@ -569,7 +569,7 @@ Errors print as `error[CODE]: message` plus `remedy:` on stderr (one JSON docume
 | `IMPORT_PARSE_ERROR` | 4 | Malformed or truncated JSON (with a byte offset) | "The file is not a well-formed JSON export (array expected). It may be truncated or corrupted: obtain a fresh export." | yes |
 | `IMPORT_PATH_NOT_ALLOWED` | 4 | MCP import outside the approved roots, or no roots configured | see section i | yes (MCP) |
 | `DB_NOT_FOUND` | 5 | No database at that path | "run: gcr import <export.zip>  (or point --db / GCR_DB at an existing database)" | yes |
-| `DB_SCHEMA_TOO_NEW` | 5 | The file was written by a newer GCR (checked on a copy with `PRAGMA user_version = 99`) | "Upgrade GCR, or use a different database file. The file was not modified." (file hash unchanged) | yes |
+| `DB_SCHEMA_TOO_NEW` | 5 | The file was written by a newer GCR (checked on a copy with `PRAGMA user_version = 99`) | "Upgrade GCR, or use a different database file. The file was not modified." (the SHA-256 of the database file was unchanged after `list` and `import` were refused; a zero-byte `-wal` file and a 32 KiB `-shm` file appeared next to it, because SQLite creates them when it opens a WAL-mode file) | yes |
 | `DB_MIGRATION_FAILED` | 5 | A schema migration failed and was rolled back | "The database was left at its previous version. Report the issue (without attaching private data)." | no (source text) |
 | `DB_ERROR` | 5 | SQLite problem; on old Node, `details.reason = "FTS5_UNAVAILABLE"` (see below) | e.g. the Node upgrade remedy | yes (FTS5) |
 | `FTS_SYNTAX_ERROR` | 2 | Invalid `--raw` search syntax | see section d | yes |
@@ -577,7 +577,7 @@ Errors print as `error[CODE]: message` plus `remedy:` on stderr (one JSON docume
 | `DRAFT_NOT_FOUND` | 3 | No draft with that id | "List drafts to find the id." | yes |
 | `ANNOTATION_NOT_FOUND` | 3 | No annotation with that id | "List annotations to find the id." | yes |
 | `ANNOTATION_CONFLICT` | 6 | Stale `--expected-version` | see section g | yes |
-| `NOT_IMPLEMENTED` | 7 | Mode D (OpenAI API) access through the SDK. The CLI rejects `--provider openai_api` earlier as `INVALID_ARGUMENT` ("must be one of: chatgpt, claude") | n/a | CLI path: `INVALID_ARGUMENT` |
+| `NOT_IMPLEMENTED` | 7 | Mode D (OpenAI API) access; emitted by the disabled adapter (`src/ingest/openai-api.ts`). `gcr import --provider openai_api` is rejected earlier as `INVALID_ARGUMENT` ("must be one of: chatgpt, claude"); `gcr list` and `gcr stats` accept `--provider openai_api` as a filter and return an empty result | n/a | no: the CLI never reaches it (tried) |
 | `FEATURE_GATED` | 7 | Defined for browser-interaction features | **No code path in `src/` emits it** (searched); there is nothing to unlock | no |
 | `REMOTE_ACCESS_FORBIDDEN` | 7 | Defined for anything that would touch a ChatGPT endpoint | **No code path in `src/` emits it**; no such feature exists | no |
 | `INTERNAL_ERROR` | 1 | A bug; the raw message is withheld because it can hold paths or text | "Re-run with GCR_DEBUG=1 to print the stack trace to stderr, then report the issue without attaching private data." | no (source text) |
@@ -604,6 +604,7 @@ Fix: install Node 22.16.0 or newer (`node --version`). Node 24 and newer: **not 
 * `gcr doctor` first: Node version, SQLite and FTS5, database path/schema status, the capability modes, and whether `GCR_DB` / `GCR_APPROVED_IMPORT_ROOTS` are set (never their values).
 * Nothing printed on stdout but an error on stderr? Errors go to stderr; stdout carries only results. Use `--debug` (or `GCR_DEBUG=1`) for a stack trace; check it for paths before sharing.
 * `gcr mcp` without `--db` uses the same default (`./.gcr/gcr.sqlite`) and fails with `DB_NOT_FOUND` (exit 5) if it does not exist.
+* Known limitations (an interrupted first import, a database in a read-only folder, per-handle read refusal during writes in the SDK, MCP result and deadline limits) are listed in [SECURITY_AND_BOUNDARIES.md](SECURITY_AND_BOUNDARIES.md#9-residual-risks-and-known-limitations) and [IMPORT_GUIDE.md](IMPORT_GUIDE.md) section 14; the author of this guide did not reproduce them (the checks ran as `root`, where folder permissions are not enforced).
 * If your real export imports with many warnings, run `gcr audit` and read `formatProfile` in the import report; report the warning **codes** and counts, not the content.
 
 ---

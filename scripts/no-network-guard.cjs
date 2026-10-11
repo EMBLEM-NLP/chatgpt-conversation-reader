@@ -161,7 +161,7 @@ function install() {
   block(process, 'dlopen', 'process.dlopen');
 
   // ---- child processes -------------------------------------------------------------------------------------------------------
-  const NETWORK_NAMES = 'curl|wget|ssh|scp|sftp|nc|ncat|netcat|telnet|ftp|tftp|socat|nmap|ping6?|dig|nslookup|traceroute|mtr|rsync|aria2c|lynx';
+  const NETWORK_NAMES = 'curl|wget|ssh|scp|sftp|nc|ncat|netcat|telnet|ftp|tftp|socat|nmap|ping6?|dig|nslookup|getent|traceroute|mtr|rsync|aria2c|lynx';
   const NETWORK_PROGRAM = new RegExp(`(?:^|[\\s;&|\`(/])(?:${NETWORK_NAMES})(?:\\.exe)?(?=$|[\\s;&|)\`"'])`, 'i');
   const IS_SHELL = /^(?:ba|z|da|k|c|tc)?sh$|^cmd(?:\.exe)?$|^pwsh$|^powershell(?:\.exe)?$/i;
   // Programs whose arguments contain the program that really runs (or a command line): their whole argv is read.

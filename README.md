@@ -34,10 +34,10 @@ Version `0.2.0-dev.0` (pre-release, `private`, not published). Date of the runs 
 ## Install and build
 
 ```bash
-git clone https://github.com/EMBLEM-NLP/chatgpt-conversation-reader   # or use your existing checkout
+git clone --branch claude/chatgpt-conversation-reader-rraexo https://github.com/EMBLEM-NLP/chatgpt-conversation-reader   # or use your existing checkout
 cd chatgpt-conversation-reader
 npm ci            # reproducible install from the committed package-lock.json
-npm run build     # compiles src/ to dist/ (about 2 s here)
+npm run build     # compiles src/ to dist/ (1.4 s wall time on 2026-10-11 with Node 22.22.0 on a busy machine)
 node dist/cli/main.js --help
 ```
 
@@ -45,7 +45,7 @@ node dist/cli/main.js --help
   published, so run it as `node dist/cli/main.js ...` (or add `alias gcr='node /ABSOLUTE/PATH/dist/cli/main.js'`).
   The examples below write `gcr` for that command.
 * `npm ci` was **not run** while this README was written (no network permitted); `node_modules` was already present. The clone
-  URL above is the repository named in `docs/REPO_RUNBOOK.md`; its availability was not checked. **NOT VERIFIED.**
+  URL above is the `origin` of this checkout and the branch is the one the work was committed on; the remote was not contacted, so whether the repository is reachable, whether it is public and whether that branch is on it are **NOT VERIFIED**.
 * `npm run build` and `node dist/cli/main.js --help` were run on 2026-10-11 with Node 22.22.0.
 
 ## Two-minute quick start (synthetic data)
@@ -158,7 +158,7 @@ exit code: 3
 ```
 
 The words "(active branch)" inside the search snippets are part of the invented fixture text, not a GCR annotation.
-A larger end-to-end run over all 13 fixtures, driving the built CLI and the built MCP server with a network guard active, is `npm run smoke` (`node scripts/ci-smoke.mjs`): `SMOKE OK (41 checks)` on 2026-10-11 with Node 22.22.0 and with Node 22.16.0.
+A larger end-to-end run over all 13 fixtures, driving the built CLI and the built MCP server with a network guard active, is `npm run smoke` (`node scripts/ci-smoke.mjs`). The number of checks grows as the script is extended: `SMOKE OK (41 checks)` for the version of commit `91caaf2`, `SMOKE OK (51 checks)` for the version of commit `1e27fa0` (2026-10-11). The working-tree version after that commit (modified 14:13 UTC) failed in 2 of 10 runs on Node 22.22.0 (cause not diagnosed), so treat a single green run with caution (details in [CHANGELOG.md](CHANGELOG.md)).
 The task-oriented walk-through (branches without a `current_node`, sharded exports, search syntax, MCP, troubleshooting) is [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 
 ## Status: capability modes A to E
@@ -168,8 +168,8 @@ Source: `gcr doctor` (run 2026-10-11, Node 22.22.0, Linux), whose wording is quo
 | Mode | What | `gcr doctor` status | What it rests on |
 |---|---|---|---|
 | A | Official export (`conversations.json`, sharded files or export ZIP) | `supported (synthetic-fixture tested; no live export verified)` | Imports of the committed synthetic fixtures and generated test data only. **Never run on a real export.** |
-| B | Manual copy of messages you pasted yourself (`gcr import-copy`) | `supported (manual copy, partial)` | Run in this session on a synthetic file. Always labelled `partial_user_supplied`; the active branch stays unknown. |
-| C | Local drafts and annotations (`gcr draft`, `gcr annotate`) | `supported (local drafts/annotations only)` | Run in this session. They live in the local database; nothing is transmitted and a draft has no "sent" state. |
+| B | Manual copy of messages you pasted yourself (`gcr import-copy`) | `supported (manual copy, partial)` | Run by hand on 2026-10-11 with a synthetic file (and by the test suite). Always labelled `partial_user_supplied`; the active branch stays unknown. |
+| C | Local drafts and annotations (`gcr draft`, `gcr annotate`) | `supported (local drafts/annotations only)` | Run by hand on 2026-10-11 (and by the test suite). They live in the local database; nothing is transmitted and a draft has no "sent" state. |
 | D | OpenAI developer API (API-created conversations) | `not implemented (interface + disabled adapter only)` | A disabled adapter documents the boundary. API conversations are not `chatgpt.com/c` history. |
 | E | Browser interaction | `gated - no code (docs/BROWSER_GATE.md)` | Nothing exists to run. `npm run test:browser` reports `NOT_RUN` by design. |
 
@@ -177,11 +177,11 @@ Source: `gcr doctor` (run 2026-10-11, Node 22.22.0, Linux), whose wording is quo
 
 | Tested (synthetic data only) | NOT tested / NOT verified |
 |---|---|
-| Compiled TypeScript test suite on **Node 22.22.0**: 6,750 tests, 6,748 pass, 0 fail, 2 skipped (both skip because the run was as `root`, where file permissions are not enforced); commit `1341059`, 2026-10-11 | **A real ChatGPT export** (never available). Field names, shards, manifest, asset naming and drift are community reports only |
-| Same suite on **Node 22.16.0** (the declared minimum): 6,750 tests, 6,748 pass, 0 fail, 2 skipped, same commit. Earlier runs on a tree that was still being edited had transient failures (see [CHANGELOG.md](CHANGELOG.md)) | **Node 24 and newer**; Node below 22.16.0 is refused by design (verified: 22.13.1 reports `FTS5 NOT available`) |
-| `npm run typecheck`, `npm run build`, and `node scripts/ci-smoke.mjs` (`SMOKE OK (41 checks)` on Node 22.22.0 and 22.16.0: built CLI and MCP server driven on synthetic data with a network guard) | **The GitHub Actions workflow has never run on GitHub** (`.github/workflows/gcr-ci.yml` was only executed step by step locally) |
+| Compiled TypeScript test suite on **Node 22.22.0**: 6,750 tests, 6,748 pass, 0 fail, 2 skipped (both skip because the run was as `root`, where file permissions are not enforced), 905 suites, 390 s. Run 2026-10-11 14:01 to 14:08 UTC from a working tree whose `src/` and `test/` equal commit `1341059`; the later test file `test/scripts/no-network-guard.adversarial.test.ts` (commit `1e27fa0`) is **not** in these counts | **A real ChatGPT export** (never available). Field names, shards, manifest, asset naming and drift are community reports only |
+| Same compiled suite on **Node 22.16.0** (the declared minimum): 6,750 tests, 6,748 pass, 0 fail, 2 skipped, 905 suites, 575 s (machine load average 7 to 14, other processes running). Earlier runs on a tree that was still being edited had transient failures (see [CHANGELOG.md](CHANGELOG.md)) | **Node 24 and newer**; Node below 22.16.0 is refused by design (verified: 22.13.1 reports `FTS5 NOT available`) |
+| `npm run typecheck` and `npm run build` (exit 0), and `node scripts/ci-smoke.mjs` (built CLI and MCP server driven on synthetic data with a network guard): the script version of commit `91caaf2` printed `SMOKE OK (41 checks)`; the version of commit `1e27fa0` has 51 checks and passed 1 of 1 run on Node 22.22.0; the working-tree version after it passed 1 of 1 run on Node 22.16.0 but **failed in 2 of 10 runs on Node 22.22.0** (cause not diagnosed; see [CHANGELOG.md](CHANGELOG.md)) | **The GitHub Actions workflow has never run on GitHub** (`.github/workflows/gcr-ci.yml` was only executed step by step locally) |
 | The MCP server through the real SDK client over stdio (`gcr_*` tools, read-only default, write refusal) | **VS Code, Claude Desktop and Codex themselves**: the config snippets follow those clients' documented shape as the authors knew it |
-| Privacy scan of the working tree (`node scripts/privacy-scan.mjs --root .`: clean) and `npm audit --omit=dev --audit-level=high` (0 vulnerabilities, 2026-10-11, ran against the npm registry). **The history scan (`--history`, a CI step) reports 1 finding in an old commit and would fail CI** (see [CHANGELOG.md](CHANGELOG.md)) | **OpenAI Terms of Use, Usage Policies and help-center pages: not readable from the sandbox, so the platform policy review is NOT PERFORMED.** Nothing in this repository quotes or paraphrases an OpenAI clause as fact |
+| Privacy scan of the working tree (`node scripts/privacy-scan.mjs --root .`: clean, 339 files, 2026-10-11 14:05 UTC) and `npm audit --omit=dev --audit-level=high` (0 vulnerabilities in the first author's run on 2026-10-11; it contacts the npm registry and was **not re-run** by the fact-check, which had no network). **The history scan (`--history`, a CI step) reports 1 finding in an old commit and would fail CI** (see [CHANGELOG.md](CHANGELOG.md)) | **OpenAI Terms of Use, Usage Policies and help-center pages: not readable from the sandbox, so the platform policy review is NOT PERFORMED.** Nothing in this repository quotes or paraphrases an OpenAI clause as fact |
 | Graph HTML generated, scanned for network references, and read for its structure | Graph HTML in a real browser or with a screen reader; Windows and macOS; encryption at rest (none exists); permission-denied paths (the suite ran as root) |
 
 The baseline GCR v0.1.1 named in the task was **never available** (ADR-0001). GCR 0.2.0-dev.0 is a clean-room implementation of
@@ -191,7 +191,7 @@ The baseline GCR v0.1.1 named in the task was **never available** (ADR-0001). GC
 
 * Everything stays in one local SQLite file that you choose (`--db`, `$GCR_DB`, or `./.gcr/gcr.sqlite`). New files are created with mode `0600`.
 * No network code exists in `src/` (a tripwire test scans the sources; it is not a proof); GCR never contacts chatgpt.com, never reads cookies or browser data, never sends a message.
-* Imported text is **untrusted data**. It is quoted in output, never executed, and never allowed to steer GCR or an MCP client's tools.
+* Imported text is **untrusted data**. GCR quotes it in output and never executes it or acts on it (a test feeds the MCP server text of that kind). GCR cannot stop a language-model client that reads such text from being influenced by it: see [docs/USER_GUIDE.md section i](docs/USER_GUIDE.md#i-mcp-server).
 * Logs, errors and import reports are designed to carry only codes, counts, ids and basenames, never message text or absolute paths (tests exist for this; the author of this README did not audit them one by one).
 * GCR has **no encryption at rest**. Keep exports and databases outside Git on an encrypted disk, and do not upload them to a coding agent, CI or a hosted service.
 * `node scripts/privacy-scan.mjs --root .` (after `npm run build`) fails if databases, archives, raw exports or secrets are in the working tree.
@@ -261,20 +261,21 @@ needs `GCR_APPROVED_IMPORT_ROOTS`. Twelve tools are registered (`gcr_list`, `gcr
 | [docs/SECURITY_AND_BOUNDARIES.md](docs/SECURITY_AND_BOUNDARIES.md) | What GCR will not do, how the code enforces it, the threat model, data handling and the open risks |
 | [docs/PARITY_MATRIX.md](docs/PARITY_MATRIX.md) | Every FR/NFR and capability mode classified (supported, synthetic-only, experimental, not implemented, blocked by platform) with evidence, plus the CCR feature comparison |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | The measured performance baseline on synthetic data (generated by `npm run perf`; single run in a shared sandbox) |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Decision records ADR-0001 to ADR-0012 (clean-room, license, Node minimum, no PR by the agent, ...) |
+| [docs/COVERAGE.md](docs/COVERAGE.md) | Line, branch and function coverage of `src/` by the repository's own tests (Node built-in V8 coverage; synthetic data only; generated by `npm run coverage-summary`) |
+| [docs/WARNING_CODES.md](docs/WARNING_CODES.md) | Catalogue of the warning codes emitted in `src/` (the document counts 116), with meaning and operator action; the meaning columns were written by hand |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Decision records ADR-0001 to ADR-0021 (clean-room, license, Node minimum, no PR by the agent, ...); ADR-0013 to ADR-0021 were written after the code existed and were not confirmed by an operator or by legal review |
 | [docs/BROWSER_GATE.md](docs/BROWSER_GATE.md) | Why browser interaction (Mode E) is gated and ships no code; the human checklist |
 | [docs/EXECUTION_PLAN.md](docs/EXECUTION_PLAN.md) | Milestones M0 to M4 and their gates |
 | [docs/PR_NOTES.md](docs/PR_NOTES.md) | Ready-to-paste PR descriptions for M0 to M4 derived from the real git history; no PR has been opened |
 | [docs/REPO_RUNBOOK.md](docs/REPO_RUNBOOK.md) | The supplied GitHub and Codex runbook, kept verbatim (it says Node 22.13; ADR-0012 supersedes that) |
 
-Also present, listed here because they came after the index above was written: [docs/COVERAGE.md](docs/COVERAGE.md) (test coverage summary by the built-in V8 coverage, synthetic tests only) and
-[docs/WARNING_CODES.md](docs/WARNING_CODES.md) (catalogue of the warning codes the import, branch, search and analysis layers emit). The acceptance record that `SPEC.md` section 10 names (ACCEPTANCE.md under docs/) was **not present** in the repository when this README was written (2026-10-11, about 13:35 UTC).
+`SPEC.md` section 10 and several other files name an acceptance record (`ACCEPTANCE.md` under `docs/`). **That file does not exist** in the repository (checked with `ls` on 2026-10-11 at 14:09 UTC), so this README cannot link to it and no acceptance run is recorded outside the evidence in [CHANGELOG.md](CHANGELOG.md), [docs/PARITY_MATRIX.md](docs/PARITY_MATRIX.md) and [docs/PR_NOTES.md](docs/PR_NOTES.md).
 
 ## License status
 
 The package is declared `"license": "UNLICENSED"` and `"private": true`. **There is no `LICENSE` file by decision (ADR-0008): the repository
-owner must choose a license.** Until then, no license is granted by this repository. The sibling Claude Conversation Reader (CCR) repositories
-also have no `LICENSE` file; **no CCR code was copied** into GCR (only features and documented data shapes were inventoried). npm dependencies keep
+owner must choose a license.** Until then, no license is granted by this repository. The two local checkouts of the sibling Claude Conversation Reader (CCR) repository
+have no `LICENSE`, `NOTICE` or `COPYING` file either (checked with `ls` and `git ls-files` on 2026-10-11); their `package.json` declares `"license": "ISC"` without a license text, which this README does not treat as a grant. **No CCR code was copied** into GCR (only features and documented data shapes were inventoried). npm dependencies keep
 their own licenses (`npm run licenses` summarises them).
 
 ## Contributing
