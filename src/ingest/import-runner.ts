@@ -338,9 +338,20 @@ function conversationKeyOf(p: ElementPeek): string | null {
   if (p.hasMapping && !p.conversationsIsArray) candidates.push(p.conversationId, p.id);
   if (p.chatMessagesIsArray) candidates.push(p.uuid);
   for (const v of candidates) {
-    if (v !== null && isUsableId(v)) return isUuid(v) ? v.toLowerCase() : v;
+    if (v !== null && isUsableId(v)) return flatString(isUuid(v) ? v.toLowerCase() : v);
   }
   return null;
+}
+
+/**
+ * A copy of `s` that owns its characters. peekElement() decodes ids with String.prototype.slice, and V8 implements a slice of a
+ * long string as a "sliced string" that keeps the WHOLE parent alive; an already-lower-case UUID also survives toLowerCase()
+ * unchanged. The duplicate-resolution map lives for the entire first pass, so a retained id would pin the full text of every
+ * conversation seen so far and memory would grow with the size of the export (NFR-05: found by the final review - a 210 MB /
+ * 500k-message export died with "heap out of memory" under a 192 MiB cap). A round trip through a Buffer yields a new flat string.
+ */
+function flatString(s: string): string {
+  return Buffer.from(s, 'utf8').toString('utf8');
 }
 
 // ---------------------------------------------------------------------------------------------------------------
