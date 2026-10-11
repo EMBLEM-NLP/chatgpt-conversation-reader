@@ -228,10 +228,10 @@ src/ingest/layout.ts. Import-level: stored in the batch row and reported in the 
 | Code | Severity | Meaning | Emitted by | Operator action |
 | --- | --- | --- | --- | --- |
 | `DIRECTORY_DEPTH_LIMIT` | - | Folders deeper than 4 levels below the chosen folder were not searched. | `src/ingest/layout.ts` | Pass the folder that actually holds `conversations*.json`, or the export ZIP. |
-| `MANIFEST_ABSENT` | info | The input has several conversation files but no `export_manifest.json`; the files found were used as they are. | `src/ingest/layout.ts` | None. |
+| `MANIFEST_ABSENT` | info | The input has more than one conversation file, or a numbered one (`conversations-N.json`), but no `export_manifest.json`; the files found were used as they are. | `src/ingest/layout.ts` | None. |
 | `MANIFEST_AMBIGUOUS` | info | More than one `export_manifest.json` was found; the outermost one was used. | `src/ingest/layout.ts` | None. |
-| `MANIFEST_COUNT_MISMATCH` | - | The manifest is internally inconsistent: `logical_files_count` or `export_files_count` differs from the list it counts. The manifest is only ever checked against itself, never against the container. | `src/ingest/layout.ts` | The export may be damaged; obtain a fresh one. Under `--strict` the import aborts. |
-| `MANIFEST_INVALID` | - | The manifest was ignored (not JSON, not an object, unknown `version`, wrong shape, larger than 16 MiB, or it listed paths that leave the container). The reason is in `ids`. | `src/ingest/layout.ts` | The conversation files are still imported. Under `--strict` the import aborts. |
+| `MANIFEST_COUNT_MISMATCH` | - | The manifest is internally inconsistent: `logical_files_count` or `export_files_count` differs from the list it counts. Only this count check compares the manifest with itself; the comparison of the listed files with the files found in the input is done by `MANIFEST_SHARD_MISSING` and `SHARD_NOT_IN_MANIFEST` (the reason, in the layout source comment: the first manifest of a multipart export legitimately lists files of other parts). | `src/ingest/layout.ts` | The export may be damaged; obtain a fresh one. Under `--strict` the import aborts. |
+| `MANIFEST_INVALID` | - | The manifest was ignored (reasons in `ids`: `not_json`, `not_object`, `unknown_version` (`version` is not 1), `logical_files_not_object`, `conversations_entry_not_object`, `files_not_string_array`, `too_large` (over 16 MiB)). With the reason `unsafe_paths_ignored` the manifest is **not** ignored: only the listed paths that leave the container or are malformed are dropped and the rest is used. | `src/ingest/layout.ts` | The conversation files are still imported. Under `--strict` the import aborts. |
 | `MANIFEST_SHARD_MISSING` | - | Conversation files listed in the manifest are not in the input. | `src/ingest/layout.ts` | Obtain and import the missing parts. Under `--strict` the import aborts. |
 | `SHARD_GAP` | - | The numbers of the `conversations-<N>.json` files are not contiguous. The missing numbers are in `ids` (at most 50). | `src/ingest/layout.ts` | A part of the export may be missing; check the export parts. |
 | `SHARD_NOT_IN_MANIFEST` | - | Conversation files in the input are not listed in the manifest. | `src/ingest/layout.ts` | Check that the input is one export. Under `--strict` the import aborts. |
@@ -243,7 +243,7 @@ src/ingest/import-runner.ts. Import-level; some of these abort the import under 
 
 | Code | Severity | Meaning | Emitted by | Operator action |
 | --- | --- | --- | --- | --- |
-| `COMPLETENESS_BELOW_BATCH_LEVEL` | - | The batch row records the adapter nominal completeness (written before any adapter ran); some conversations turned out weaker. `ids` lists a few. Each conversation own `completeness` is authoritative. | `src/ingest/import-runner.ts` | Read per-conversation completeness (`gcr list`, `gcr audit`). Known limitation, see ADR-0015 and `docs/IMPORT_GUIDE.md`. |
+| `COMPLETENESS_BELOW_BATCH_LEVEL` | - | The batch row records the adapter nominal completeness (the value is fixed before any adapter runs); some conversations turned out weaker. `ids` lists a few. Each conversation own `completeness` is authoritative. | `src/ingest/import-runner.ts` | Read per-conversation completeness (`gcr list`, `gcr audit`). Known limitation, see ADR-0015 and `docs/IMPORT_GUIDE.md`. |
 | `DUPLICATE_CONVERSATION` | - | A conversation id occurs more than once in the input (for example in two shards). The winner is the element with the greatest update time, then the largest size, then the earliest file order and index (rule: `docs/ARCHITECTURE.md` section 5); the losers were skipped. | `src/ingest/import-runner.ts` | None, unless it is unexpected; under `--strict` the import aborts. |
 | `ELEMENT_INTERNAL_ERROR` | - | An unexpected (non-GcrError) failure while normalizing a conversation element; it was skipped. Only the element position is reported. | `src/ingest/import-runner.ts` | Report the issue without private data (re-run with `--debug` for a stack trace on stderr). |
 | `ELEMENT_PARSE_FAILED` | - | A conversation element could not be normalized (invalid JSON, a limit such as nesting depth, or a validation failure) and was skipped. The import continues. | `src/ingest/import-runner.ts` | Obtain a fresh export if many elements fail. Under `--strict` the import aborts with the precise error. |
@@ -286,7 +286,7 @@ src/sdk/gcr.ts and src/sdk/envelope.ts. Present in the `warnings` array of the `
 | `ACTIVE_BRANCH_UNKNOWN` | - | SDK `get` with `allBranches`: the source did not identify the active branch (or its branch is beyond the enumeration limit), so `thread` is null and every branch is listed in `threads`. The Claude adapter emits it when explicit parent pointers do not form a single chain. The same string is also an error code (`ACTIVE_BRANCH_UNKNOWN`, exit 3) for `get`/`thread` without `allBranches`. | `src/ingest/claude-export.ts`, `src/sdk/gcr.ts` | Pick a branch (`gcr branches`, then `--branch <id>`) or opt in to `--branch-policy`. |
 | `GRAPH_STALE` | - | Some conversations have a newer imported snapshot than the one the graph was built from; the graph facts and the cited source describe the older snapshot. | `src/sdk/gcr.ts` | Rebuild the graph (`gcr graph build`). |
 | `NEIGHBORS_TRUNCATED` | - | Only part of the neighbours of a node are listed (the `limit`). | `src/sdk/gcr.ts` | Raise `--limit` or narrow with `--kinds` / `--edge-kinds`. |
-| `NO_BRANCHES` | - | The stored message tree of this snapshot is empty: there is no thread to show. | `src/sdk/gcr.ts` | Import an export that contains messages for it. |
+| `NO_BRANCHES` | - | The stored message tree of this snapshot is empty: there is no thread to show. SDK `get` without an explicit `branch` succeeds with `thread` null and this warning; `thread()` on such a snapshot fails with the error `BRANCH_NOT_FOUND` and `details.reason = "no_branches"` instead (`src/sdk/gcr.ts`, `get`, `selectPrimary`). | `src/sdk/gcr.ts` | Import an export that contains messages for it. |
 | `PATH_SEARCH_TRUNCATED` | - | The path search budget was exhausted: "not found" means not found within the budget, not that no path exists. | `src/sdk/gcr.ts` | Inspect the neighbours of both nodes (`gcr graph neighbors`), or give the SDK option `maxExplored` a larger budget; there is no CLI flag for the budget. |
 | `SOURCE_BATCH_MISSING` | - | A contributing import batch row could not be read (a database edited outside GCR); its provenance is unknown and counts as `unknown` completeness. | `src/sdk/envelope.ts` | Re-import into a new database file. |
 | `SOURCE_NOT_FULL_HISTORY` | - | The first warning of every envelope whose completeness is not `exported_tree` (and of an empty result): this result is NOT the full conversation history, and states what is missing (FR-09). `ids` lists the batches. | `src/sdk/envelope.ts` | Do not present the result as the complete history. An empty result only says nothing matched in the data you imported. |
@@ -330,10 +330,10 @@ src/graph/query.ts (query, neighbours, path, explain, export).
 
 | Code | Severity | Meaning | Emitted by | Operator action |
 | --- | --- | --- | --- | --- |
-| `BRANCH_IDS_TRUNCATED` | - | A cited message lies on more branches than the per-citation cap; only the first branch ids are listed. | `src/graph/query.ts` | None. |
-| `EDGES_TRUNCATED` | - | The subgraph has more edges than the cap; the heaviest are returned. | `src/graph/query.ts` | Narrow the query (`--depth`, `--kinds`). |
+| `BRANCH_IDS_TRUNCATED` | - | A cited message lies on 1,000 or more branches (the per-citation cap `MAX_BRANCH_IDS_PER_EVIDENCE`); only the first 1,000 branch ids are listed. | `src/graph/query.ts` | None. |
+| `EDGES_TRUNCATED` | - | The subgraph has more than 5,000 edges (`MAX_SUBGRAPH_EDGES`); the heaviest 5,000 are returned. | `src/graph/query.ts` | Narrow the query (`--depth`, `--kinds`). |
 | `GRAPH_EMPTY` | - | The graph has no nodes (not built), or, for the overview export, has nodes but none with a connection to show (entities seen in fewer than 2 conversations are left out by default). | `src/graph/query.ts`, `src/sdk/gcr.ts` | Run `gcr graph build` (a lower `--min-conversations 1` keeps rarer entities). |
-| `NODES_TRUNCATED` | - | The neighbourhood has more nodes than `maxNodes`; only the first in breadth-first order are returned. | `src/graph/query.ts` | Narrow the query or raise `--max-nodes`. |
+| `NODES_TRUNCATED` | - | The neighbourhood has more nodes than `maxNodes`; only the first in breadth-first order are returned. Emitted only when neither `SEEDS_TRUNCATED` nor `EDGES_TRUNCATED` was already added to the same result. | `src/graph/query.ts` | Narrow the query or raise `--max-nodes`. |
 | `SEEDS_TRUNCATED` | - | More nodes match the term than `maxNodes`; only the best are used as seeds. | `src/graph/query.ts` | Use a more specific term. |
 
 ### 3.13 Renderers
@@ -377,7 +377,7 @@ These strings look like codes but are not `Warning.code` values. They are classi
 | `unknown_roles` | warn | author role strings (data values, not codes) |
 | `unknown_content_types` | warn | content-type strings (data values; ChatGPT provider only) |
 | `timestamps` | info; warn when a value is invalid or time runs backwards | the seven sub-codes in Section 4 |
-| `hidden` | info | role / content-type strings |
+| `hidden` | info | author role strings (data values, not codes) |
 
 The audit also emits the warnings `NO_CONVERSATIONS_IN_SCOPE`, `BRANCH_PROVENANCE_NOT_COMPUTED`, `BYCODE_TRUNCATED`, `SUPERSEDED_SNAPSHOTS_INCLUDED`, `INCOMPLETE_SOURCE` and `STORED_JSON_INVALID`, catalogued above.
 
