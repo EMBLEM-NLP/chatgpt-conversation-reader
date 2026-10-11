@@ -1,0 +1,19 @@
+{
+  "name": "GCR (ChatGPT Conversation Reader & Writer)",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm",
+  "features": {},
+  "postCreateCommand": "node --version && npm ci",
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint", "editorconfig.editorconfig"],
+      "settings": {
+        "files.exclude": { "**/dist": true, "**/dist-test*": true },
+        "search.exclude": { "**/node_modules": true, "**/dist": true, "**/dist-test*": true }
+      }
+    }
+  },
+  "remoteEnv": {
+    "GCR_LOG_LEVEL": "warn"
+  },
+  "// privacy": "A Codespace/devcontainer is a REMOTE computer. Do not copy a real ChatGPT export or a GCR database into it unless you have assessed the privacy and storage implications (docs/REPO_RUNBOOK.md). The image is a floating 1-22 tag: confirm 'node --version' is >= 22.16.0 (ADR-0012)."
+}

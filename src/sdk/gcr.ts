@@ -38,7 +38,7 @@ import { runAudit } from '../analysis/audit.js';
 import type { AuditOptions, AuditResult } from '../analysis/audit.js';
 import { analyzeTree, selectBranchByPolicy } from '../domain/branches.js';
 import type { BranchPolicy } from '../domain/branches.js';
-import { isUuid, parseConversationRef } from '../domain/ids.js';
+import { isUuid, parseChatGptUrl, parseConversationRef } from '../domain/ids.js';
 import type { BatchInfo, BranchListResult, ConversationSummary, FormatProfile, ImportReport, Page, SearchHit, ThreadResult } from '../domain/results.js';
 import type { Branch, BranchActiveness, Completeness, ConversationRecord, ConversationRef, MessageRecord, ResultEnvelope, TreeAnalysis } from '../domain/types.js';
 import { LocalStore } from '../drafts/drafts.js';
@@ -1002,6 +1002,18 @@ export class Gcr {
     });
   }
 
+  /**
+   * `get` for callers that hold a link: ONLY an exact https://chatgpt.com/c/<uuid> URL is accepted (a bare UUID is
+   * INVALID_URL here; use `get`). The link is a lookup key into the local database, never opened.
+   */
+  getByUrl(url: string, opts: GetOptions = {}): ResultEnvelope<GetResult> {
+    return this.read(() => {
+      if (typeof url !== 'string') throw invalidArgument('url', 'expected an https://chatgpt.com/c/<uuid> link');
+      const { conversationId } = parseChatGptUrl(url);
+      return this.get({ conversationId, provider: 'chatgpt' }, opts);
+    });
+  }
+
   /** Every branch (root -> leaf path) of a conversation with its activeness, plus the tree warnings. */
   branches(ref: string | ConversationRef, opts: BranchesOptions = {}): ResultEnvelope<BranchListResult> {
     return this.read(() => {
@@ -1313,6 +1325,11 @@ export class Gcr {
       const provenance = buildProvenance(this.lookupBatch, { contributions: this.graphContributions(), warnings, untrustedContent: true });
       return { html, nodes: nodes.length, edges: edges.length, ...provenance };
     });
+  }
+
+  /** Alias of `graphExportHtml` (the name used in docs/ARCHITECTURE.md section 8). */
+  graphExport(opts: GraphHtmlOptions = {}): GraphHtmlExport {
+    return this.graphExportHtml(opts);
   }
 
   /** Edges whose both ends are in `ids` (bound placeholders only; the id count is capped by MAX_OVERVIEW_NODES). */

@@ -1,0 +1,83 @@
+# GCR CI - synthetic, deterministic, offline-fixture testing only.
+#
+# Boundaries (SPEC section 2, CODEX_TASK Phase 3): this workflow never logs in to ChatGPT, never uses secrets,
+# never touches a private conversation or a real export, and makes no ChatGPT/OpenAI request. The only network use
+# is fetching npm packages (npm ci) and the audit endpoint. Actions are pinned to commit SHAs (resolved with
+# `git ls-remote` on 2026-10-10; tags v7.0.1 / v7.1.0 are lightweight so the SHA is the commit).
+#
+# STATUS: this definition has NOT been executed on GitHub from the authoring sandbox. Every step is exercised locally
+# by the same npm scripts (see docs/ACCEPTANCE.md); the GitHub-hosted run itself is untested.
+name: gcr-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:          # NOT pull_request_target: fork PRs get no secrets and a read-only token
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: the token can only read repository contents.
+permissions:
+  contents: read
+
+concurrency:
+  group: gcr-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  GCR_LOG_LEVEL: warn
+  NO_UPDATE_NOTIFIER: "1"
+  npm_config_audit: "false"          # `npm ci` stays quiet; the explicit audit step below is the gate
+  npm_config_fund: "false"
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.16.0 is the declared minimum (first Node 22 whose node:sqlite has FTS5, ADR-0012); 22.x is the current line.
+        # Node 24 is deliberately not listed: it has not been tested by the authors.
+        node: ["22.16.0", "22.x"]
+    steps:
+      - name: Check out (full history for the privacy history scan)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install (reproducible, lockfile only)
+        run: npm ci
+
+      - name: Dependency audit (runtime dependencies, high severity and above)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit, integration, property and security tests (compiled from TypeScript)
+        run: npm test
+
+      - name: Fixture-import smoke test (CLI + MCP, synthetic data, no network)
+        run: npm run smoke
+
+      - name: Privacy scan (tracked files and full git history)
+        run: npm run privacy-scan:history
+
+      - name: Dependency license summary
+        run: npm run licenses
+
+      - name: Browser capability gate (reports NOT_RUN by design - FR-17 is gated)
+        run: npm run test:browser
