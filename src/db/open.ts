@@ -20,7 +20,7 @@ import { basename } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { GcrError } from '../errors.js';
 import { log } from '../logger.js';
-import { applyMigrations, assertCompatible, readUserVersion } from './schema.js';
+import { applyMigrations, assertCompatible, assertSchemaNotNewer, readUserVersion } from './schema.js';
 
 export const BUSY_TIMEOUT_MS = 5000;
 
@@ -257,6 +257,8 @@ export function openDatabase(path: string, opts: OpenOptions = {}): GcrDatabase 
   let db: DatabaseSync | undefined;
   try {
     db = new DatabaseSync(path, { readOnly, timeout: BUSY_TIMEOUT_MS });
+    // A file from a newer tool must stay byte-for-byte untouched: check BEFORE configureConnection switches the journal mode to WAL.
+    if (!memory) assertSchemaNotNewer(db);
     configureConnection(db, readOnly, memory);
     let migrated: { from: number; to: number } | null = null;
     if (!readOnly) {

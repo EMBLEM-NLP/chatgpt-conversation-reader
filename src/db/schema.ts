@@ -213,6 +213,16 @@ export function readUserVersion(db: DatabaseSync): number {
   return readIntPragma(db, 'user_version');
 }
 
+/**
+ * Refuse a database written by a NEWER tool before anything else touches it. openDatabase calls this BEFORE switching the
+ * journal mode to WAL (which rewrites the file header), so a newer file stays byte-for-byte untouched, as the
+ * DB_SCHEMA_TOO_NEW remedy promises. Reading `user_version` is a pure read.
+ */
+export function assertSchemaNotNewer(db: DatabaseSync): void {
+  const fileVersion = readUserVersion(db);
+  if (fileVersion > SCHEMA_VERSION) throw schemaTooNew(fileVersion, SCHEMA_VERSION);
+}
+
 function userObjectCount(db: DatabaseSync): number {
   const row = db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").get();
   const n = row?.['n'];
