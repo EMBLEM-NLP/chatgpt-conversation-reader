@@ -19,7 +19,7 @@ Status values: `accepted` · `proposed` · `superseded`. Dates are UTC.
   fabricate compatibility. `src/mcp/aliases.ts` provides and tests the mechanism; the table is empty until the real v0.1.1 names are supplied.
 
 ## ADR-0003 — SQLite via built-in `node:sqlite`; hand-written ZIP and JSON stream parsers
-* Status: accepted · Matches runbook ("uses built-in Node SQLite", Node ≥ 22.13); verified here: FTS5 (`unicode61`, `trigram`, `porter`) and JSON1 available (SQLite 3.50.4 in Node 22.22).
+* Status: accepted (minimum Node corrected by ADR-0012) · Matches runbook ("uses built-in Node SQLite"); verified here: FTS5 (`unicode61`, `trigram`, `porter`) and JSON1 available (SQLite 3.50.4 in Node 22.22).
   `node:sqlite` is still flagged experimental by Node and emits an `ExperimentalWarning`; the CLI/MCP entry points suppress only that single warning on stderr.
   No native addons, no `better-sqlite3`. ZIP and streaming-JSON are first-party code so every safety limit is explicit and testable (no third-party archive library).
 * Runtime dependencies are limited to `@modelcontextprotocol/sdk` and `zod`.
@@ -59,3 +59,11 @@ Status values: `accepted` · `proposed` · `superseded`. Dates are UTC.
 ## ADR-0011 — Accepted ChatGPT URL forms
 * Status: accepted · `parseChatGptUrl` accepts `https://chatgpt.com/c/<uuid>` only (SPEC FR-01: "rejects `share/`, other domains, malformed UUID"). Legacy `chat.openai.com`, `www.chatgpt.com`,
   project-scoped `/g/<gizmo>/c/<uuid>` and `http:` are rejected with `UNSUPPORTED_URL` to stay inside the spec's exact-link contract. A bare UUID is accepted by CLI/SDK as a local lookup key.
+
+## ADR-0012 — Minimum Node.js is 22.16.0, not 22.13 (deviation from the runbook, evidence-based)
+* Date: 2026-10-11 · Status: accepted · Supersedes the "Node ≥ 22.13" statement in `docs/REPO_RUNBOOK.md` / `SPEC` baseline metadata (those user-supplied files are kept verbatim).
+* Context: the runbook and the baseline package declare `engines.node >= 22.13` with "built-in Node SQLite". GCR's search (FR-05) requires SQLite FTS5. The compiled suite was run on real Node binaries obtained from the npm registry:
+  22.13.1 / 22.14.0 (SQLite 3.47.2) and 22.15.0 / 22.15.1 (3.49.1): `CREATE VIRTUAL TABLE … USING fts5` fails with **"no such module: fts5"** (720 of 5,707 tests failed on 22.13.0, all from the failed schema migration);
+  22.16.0 (SQLite 3.49.1), 22.17.x, 22.18.0, 22.19.0, 22.20.0, 22.21.x (3.50.x): FTS5 present. Full suite on **22.16.0: 5,771 tests, 5,770 pass, 0 fail, 1 skipped**; on 22.22.0 also green.
+* Decision: `engines.node` is `>=22.16.0`; `openDatabase` probes FTS5 on a private in-memory connection before touching any file and fails with `DB_ERROR` (`details.reason = "FTS5_UNAVAILABLE"`, remedy names 22.16.0) instead of a misleading `DB_MIGRATION_FAILED`; `gcr doctor` reports it; CI tests the declared minimum (22.16.0) and the current 22.x line.
+* Not verified: Node 24+ (not available in this sandbox); the baseline v0.1.1 package may have used a different FTS strategy (unavailable, ADR-0001). The operator should confirm the minimum matches their deployment targets.

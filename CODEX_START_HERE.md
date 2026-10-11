@@ -11,7 +11,7 @@ with search, branch reconstruction, a knowledge graph, a stable TypeScript SDK, 
 5. `docs/EXECUTION_PLAN.md`, `docs/ACCEPTANCE.md`, `docs/PARITY_MATRIX.md` — plan, evidence, honest status.
 6. `.agents/skills/gcr-implementation/SKILL.md` — the working procedure.
 
-## Commands (Node ≥ 22.13)
+## Commands (Node ≥ 22.16.0 — see ADR-0012; 22.13–22.15 lack SQLite FTS5)
 ```bash
 npm ci                    # reproducible install (package-lock.json is committed)
 npm run typecheck         # tsc --noEmit over src + test

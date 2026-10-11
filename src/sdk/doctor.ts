@@ -20,9 +20,15 @@ import { GCR_APPLICATION_ID } from '../db/schema.js';
 import { listAdapters } from '../ingest/registry.js';
 import { SCHEMA_VERSION, TOOL_NAME, TOOL_VERSION } from '../version.js';
 
-/** `engines.node` of package.json (">=22.13"); kept as numbers so the check needs no semver library. */
-const REQUIRED_NODE: readonly [number, number, number] = [22, 13, 0];
-const REQUIRED_NODE_RANGE = '>=22.13';
+/**
+ * `engines.node` of package.json (">=22.16.0"); kept as numbers so the check needs no semver library. 22.16 is the first
+ * Node whose bundled node:sqlite ships SQLite WITH FTS5 (22.13-22.15 fail with "no such module: fts5"), so it is a hard
+ * floor for GCR, not merely a recommendation.
+ */
+const REQUIRED_NODE: readonly [number, number, number] = [22, 16, 0];
+const REQUIRED_NODE_RANGE = '>=22.16';
+const FTS5_MISSING_MESSAGE =
+  "FTS5 is missing from this Node build's SQLite, so full-text search cannot work. Upgrade to Node >= 22.16.0 (the first release whose node:sqlite includes FTS5).";
 
 export type DoctorModeId = 'A' | 'B' | 'C' | 'D' | 'E';
 
@@ -62,7 +68,13 @@ export type DatabaseSchemaStatus =
   | 'not_a_gcr_database'
   | 'not_a_file'
   | 'unreadable'
-  | 'invalid_path';
+  | 'invalid_path'
+  /**
+   * This Node build cannot run GCR at all (node:sqlite without FTS5, Node < 22.16). Says nothing about the file itself:
+   * it is reported INSTEAD of a schema verdict because the same condition makes db/open.ts refuse every open with
+   * DB_ERROR reason "FTS5_UNAVAILABLE".
+   */
+  | 'unsupported_runtime';
 
 export interface DoctorDatabase {
   /** Basename of the file (or ":memory:"). Never a directory path. */
@@ -172,7 +184,14 @@ function canWrite(path: string): boolean {
 const INVALID_PATH_STATUS: DoctorDatabase = { label: '(invalid path)', exists: false, writable: false, schemaVersion: null, schemaStatus: 'invalid_path' };
 
 /** Same refusals as openDatabase: empty, NUL bytes, "file:" URIs (which could smuggle SQLite open options). */
-function inspectDatabase(dbPath: unknown): DoctorDatabase {
+export function inspectDatabase(dbPath: unknown, fts5: boolean): DoctorDatabase {
+  const inspected = inspectFile(dbPath);
+  // A runtime without FTS5 cannot open ANY GCR database, whatever the file looks like: that is the actionable finding, not a schema problem.
+  const usable: readonly DatabaseSchemaStatus[] = ['ok', 'missing', 'in_memory', 'empty_uninitialized', 'needs_migration'];
+  return !fts5 && usable.includes(inspected.schemaStatus) ? { ...inspected, schemaStatus: 'unsupported_runtime' } : inspected;
+}
+
+function inspectFile(dbPath: unknown): DoctorDatabase {
   if (typeof dbPath !== 'string' || dbPath === '' || dbPath.includes('\0') || /^file:/i.test(dbPath)) return INVALID_PATH_STATUS;
   if (dbPath === ':memory:') return { label: ':memory:', exists: true, writable: true, schemaVersion: SCHEMA_VERSION, schemaStatus: 'in_memory' };
   const label = basename(dbPath);
@@ -234,12 +253,12 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorReport {
   const nodeVersion = process.versions.node;
   const satisfies = nodeSatisfies(nodeVersion);
   const sqlite = probeSqlite();
-  const database = opts !== null && typeof opts === 'object' && opts.dbPath !== undefined ? inspectDatabase(opts.dbPath) : null;
+  const database = opts !== null && typeof opts === 'object' && opts.dbPath !== undefined ? inspectDatabase(opts.dbPath, sqlite.fts5) : null;
 
   const problems: string[] = [];
   if (!satisfies) problems.push(`Node ${nodeVersion} does not satisfy engines ${REQUIRED_NODE_RANGE}; upgrade Node.`);
   if (!sqlite.available) problems.push('node:sqlite is not available in this Node build; GCR cannot store or search data.');
-  else if (!sqlite.fts5) problems.push('SQLite FTS5 is not available; full-text search cannot work.');
+  else if (!sqlite.fts5) problems.push(FTS5_MISSING_MESSAGE);
   if (database !== null) {
     switch (database.schemaStatus) {
       case 'newer_than_tool':
@@ -252,6 +271,9 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorReport {
       case 'not_a_file':
       case 'invalid_path':
         problems.push(`The database path is not usable (${database.schemaStatus}).`);
+        break;
+      case 'unsupported_runtime':
+        problems.push('This Node runtime cannot open GCR databases (unsupported runtime, see the FTS5 finding); the database file itself was not judged.');
         break;
       default:
         break;

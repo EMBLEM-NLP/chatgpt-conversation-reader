@@ -177,6 +177,39 @@ describe('sourceLabel hygiene: a label made of separators is cut to its basename
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// 1b. Unbounded time: generic data with a huge number of distinct keys
+// ---------------------------------------------------------------------------------------------------------------
+
+describe('renderEnvelope: an array of objects with a huge number of distinct keys is rejected as a table in linear time', () => {
+  // `asUniformTable` used to collect every distinct key with an O(n) `includes` per key (quadratic) before checking the
+  // 12-column limit: 200 rows x 2000 keys took over four minutes. Keys of generic data can come from imported text
+  // (stats keyed by model slug, role, channel ...).
+  const env = (data: unknown) => ({ ok: true as const, data, source: [SRC], completeness: 'exported_tree' as const, warnings: [], ids: {}, untrustedContent: true });
+
+  it('one very wide row', () => {
+    const row = Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`k${i}`, i]));
+    const { value: md, ms } = timed(() => renderEnvelope(env([row]), { format: 'markdown' }));
+    assert.ok(ms < 1500, `took ${Math.round(ms)} ms`);
+    assert.ok(md.includes('| Path | Value |'), 'more than 12 columns falls back to path/value rows');
+    assert.ok(md.includes('Output limited to the first 500 values'));
+  });
+
+  it('many rows whose keys are all different', () => {
+    const rows = Array.from({ length: 50 }, (_, r) => Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`r${r}k${i}`, i])));
+    const { value: md, ms } = timed(() => renderEnvelope(env(rows), { format: 'markdown' }));
+    assert.ok(ms < 1500, `took ${Math.round(ms)} ms`);
+    assert.ok(md.includes('| Path | Value |'));
+  });
+
+  it('negative control: exactly 12 distinct keys across the rows is still a real table, 13 is not', () => {
+    const twelve = Array.from({ length: 3 }, (_, r) => Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`c${i}`, r])));
+    assert.ok(renderEnvelope(env(twelve), { format: 'markdown' }).includes('| c0 | c1 | c2 | c3 | c4 | c5 | c6 | c7 | c8 | c9 | c10 | c11 |'));
+    const thirteen = [...twelve, { c12: 1 }];
+    assert.ok(renderEnvelope(env(thirteen), { format: 'markdown' }).includes('| Path | Value |'));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
 // 2. Huge outputs must not overflow the call stack
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -555,6 +588,72 @@ describe('renderEnvelope: exotic values in generic data', () => {
     assert.ok(renderEnvelope(env({ list: [], map: {} }), { format: 'compact' }).includes('\n  list: []\n  map: {}\n'));
     assert.ok(renderEnvelope(env([]), { format: 'markdown' }).includes('| (value) | \\[\\] |'));
     assert.ok(renderEnvelope(env(undefined), { format: 'markdown' }).includes('| (value) | null |'));
+  });
+});
+
+describe('renderEnvelope: a subtree shown as inline JSON (nesting deeper than eight levels) is never cut silently', () => {
+  const env = (data: unknown) => ({ ok: true as const, data, source: [SRC], completeness: 'exported_tree' as const, warnings: [], ids: {}, untrustedContent: true });
+  const nest = (leaf: unknown) => ({ a: { b: { c: { d: { e: { f: { g: { h: { i: leaf } } } } } } } } });
+
+  it('a long subtree ends with an explicit "[+N chars]" marker in markdown and compact', () => {
+    const data = nest('x'.repeat(500)); // the value at a.b.c.d.e.f.g.h is inline JSON {"i":"xxx..."}: 508 characters
+    const md = renderEnvelope(env(data), { format: 'markdown' });
+    const row = md.split('\n').find((l) => l.startsWith('| a.b.c.d.e.f.g.h |')) ?? '';
+    assert.match(row, /…\\\[\+308 chars\\\] \|$/, row);
+    const compact = renderEnvelope(env(data), { format: 'compact' });
+    assert.ok(compact.includes('…[+308 chars]\n'), compact);
+  });
+
+  it('the cut never splits a surrogate pair (no lone surrogate, so no visible \\uD83D escape appears)', () => {
+    // {"i":" is 6 characters, so 193 BMP letters put the emoji across the 200-unit boundary (UTF-16 units 199 and 200).
+    const data = nest(`${'y'.repeat(193)}\u{1F600}${'z'.repeat(50)}`);
+    for (const format of ['markdown', 'compact'] as const) {
+      const out = renderEnvelope(env(data), { format });
+      assert.ok(!/\\uD[89AB][0-9A-F]{2}/i.test(out), `${format}: a pair was split`);
+    }
+  });
+
+  it('negative: a short subtree is shown whole, without a marker', () => {
+    const md = renderEnvelope(env(nest(1)), { format: 'markdown' });
+    assert.ok(md.includes('| a.b.c.d.e.f.g.h | {"i":1} |') && !md.includes('chars'), md);
+  });
+});
+
+describe('renderImportReport: the format profile is never cut silently', () => {
+  // roleCounts is keyed by the role strings found in the export, so a crafted export can make it arbitrarily large.
+  const profile = (roles: number): NonNullable<ImportReport['formatProfile']> => ({
+    layout: 'single',
+    manifest: 'absent',
+    wrapperObject: false,
+    conversations: 1,
+    conversationsWithCurrentNode: 1,
+    nodesWithChildrenDeclared: 1,
+    nodesWithChildrenAbsent: 0,
+    roleCounts: Object.fromEntries(Array.from({ length: roles }, (_, i) => [`role${i}`, i])),
+    messagesWithRecipient: 0,
+    messagesWithStatus: 0,
+    messagesWithModelSlug: 0,
+    hiddenMessages: 0,
+    rootIsLiteralClientCreatedRoot: true,
+    auxiliaryFilesIgnored: 0,
+    assetsExtensionless: false,
+  });
+
+  it('markdown: more than 500 observations are cut WITH a note pointing at the JSON format', () => {
+    const md = renderImportReport({ ...REPORT, formatProfile: profile(700) }, { format: 'markdown' });
+    const section = md.slice(md.indexOf('## Format profile'), md.indexOf('## Warnings'));
+    assert.equal(section.split('\n').filter((l) => l.startsWith('| ')).length - 2, 500, 'the first 500 observations are shown (table rows minus header and separator)');
+    assert.match(section, /Output limited to the first 500 values; use --format json for everything\./);
+  });
+
+  it('JSON keeps every observation (the format the note points at)', () => {
+    const json = JSON.parse(renderImportReport({ ...REPORT, formatProfile: profile(700) }, { format: 'json' })) as { data: { formatProfile: { roleCounts: Record<string, number> } } };
+    assert.equal(Object.keys(json.data.formatProfile.roleCounts).length, 700);
+  });
+
+  it('negative: a profile that fits carries no such note', () => {
+    const md = renderImportReport({ ...REPORT, formatProfile: profile(3) }, { format: 'markdown' });
+    assert.ok(md.includes('## Format profile') && !md.includes('Output limited'));
   });
 });
 

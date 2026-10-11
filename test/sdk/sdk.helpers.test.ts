@@ -52,8 +52,18 @@ export const ID = {
 export const title = (words: string): string => `${SYNTHETIC_MARKER} ${words}`;
 
 /** root -> (user, assistant) x turns; texts are given so tests can search for them. */
-export function chat(id: string, words: string, turns: ReadonlyArray<readonly [string, string]>, over: { current?: string | null | typeof OMIT; omitChildren?: boolean } = {}): ConversationBuilder {
-  const b = new ConversationBuilder({ id, title: title(words), ...(over.omitChildren === true ? { omitChildren: true } : {}) });
+export function chat(
+  id: string,
+  words: string,
+  turns: ReadonlyArray<readonly [string, string]>,
+  over: { current?: string | null | typeof OMIT; omitChildren?: boolean; updateTime?: number } = {},
+): ConversationBuilder {
+  const b = new ConversationBuilder({
+    id,
+    title: title(words),
+    ...(over.omitChildren === true ? { omitChildren: true } : {}),
+    ...(over.updateTime === undefined ? {} : { updateTime: over.updateTime }),
+  });
   let prev = b.root();
   for (const [u, a] of turns) {
     prev = b.user(prev, u);
@@ -286,3 +296,46 @@ export function assertEnvelopeShape(env: ResultEnvelope<unknown>): void {
 }
 
 export const warningCodes = (env: { warnings: ReadonlyArray<{ code: string }> }): string[] => env.warnings.map((w) => w.code);
+
+// ---------------------------------------------------------------------------------------------------------------
+// One call per public method (valid arguments), for the table-driven tests (closed handle, read-only handle, failures
+// injected into the database, envelope shape). `needs` marks calls that only reach the database with data present.
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface CallSpec {
+  name: string;
+  /** "write" = async mutator (rejects WRITE_FORBIDDEN on a read-only handle). */
+  kind: 'read' | 'write';
+  run: (g: Gcr) => unknown;
+}
+
+export const CALLS: readonly CallSpec[] = [
+  { name: 'list', kind: 'read', run: (g) => g.list() },
+  { name: 'get', kind: 'read', run: (g) => g.get(ID.linear) },
+  { name: 'branches', kind: 'read', run: (g) => g.branches(ID.linear) },
+  { name: 'thread', kind: 'read', run: (g) => g.thread(ID.linear) },
+  { name: 'search', kind: 'read', run: (g) => g.search({ query: 'quokka' }) },
+  { name: 'search(titles)', kind: 'read', run: (g) => g.search({ query: 'alpha', scope: 'titles' }) },
+  { name: 'search(all)', kind: 'read', run: (g) => g.search({ query: 'quokka', scope: 'all' }) },
+  { name: 'stats', kind: 'read', run: (g) => g.stats({ groupBy: 'role' }) },
+  { name: 'audit', kind: 'read', run: (g) => g.audit() },
+  { name: 'listBatches', kind: 'read', run: (g) => g.listBatches() },
+  { name: 'graphQuery', kind: 'read', run: (g) => g.graphQuery({ term: 'quokka' }) },
+  { name: 'graphPath', kind: 'read', run: (g) => g.graphPath('ent:keyword:quokka', 'ent:keyword:habitat') },
+  { name: 'graphNeighbors', kind: 'read', run: (g) => g.graphNeighbors('ent:keyword:quokka') },
+  { name: 'graphGodNodes', kind: 'read', run: (g) => g.graphGodNodes() },
+  { name: 'graphExplain', kind: 'read', run: (g) => g.graphExplain({ edgeId: 1 }) },
+  { name: 'graphExportHtml', kind: 'read', run: (g) => g.graphExportHtml() },
+  { name: 'getDraft', kind: 'read', run: (g) => g.getDraft('draft-1') },
+  { name: 'listDrafts', kind: 'read', run: (g) => g.listDrafts() },
+  { name: 'renderDraftMarkdown', kind: 'read', run: (g) => g.renderDraftMarkdown('draft-1') },
+  { name: 'getAnnotation', kind: 'read', run: (g) => g.getAnnotation('note-1') },
+  { name: 'listAnnotations', kind: 'read', run: (g) => g.listAnnotations() },
+  { name: 'importExport', kind: 'write', run: (g) => g.importExport({ source: { kind: 'path', path: join(tmpdir(), 'gcr-sdk-does-not-exist', 'conversations.json') } }) },
+  { name: 'importManualCopy', kind: 'write', run: (g) => g.importManualCopy('{"messages":[{"role":"user","text":"hello"}]}') },
+  { name: 'buildGraph', kind: 'write', run: (g) => g.buildGraph() },
+  { name: 'createDraft', kind: 'write', run: (g) => g.createDraft({ conversationRef: ID.linear, body: 'a local draft' }) },
+  { name: 'archiveDraft', kind: 'write', run: (g) => g.archiveDraft('draft-1') },
+  { name: 'createAnnotation', kind: 'write', run: (g) => g.createAnnotation({ conversationRef: ID.linear, body: 'a note' }) },
+  { name: 'updateAnnotation', kind: 'write', run: (g) => g.updateAnnotation('note-1', { body: 'changed', expectedVersion: 1 }) },
+];

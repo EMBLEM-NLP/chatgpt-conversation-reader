@@ -19,7 +19,7 @@ cli/  mcp/                 thin adapters: parse args / tool input, call sdk/, re
 errors.ts, version.ts, logger.ts: leaf modules usable everywhere.
 ```
 
-* Node >= 22.13, ESM + NodeNext, TypeScript strict. Runtime deps: `@modelcontextprotocol/sdk`, `zod` only.
+* Node >= 22.16.0 (the first Node 22 whose bundled SQLite has FTS5; see ADR-0012), ESM + NodeNext, TypeScript strict. Runtime deps: `@modelcontextprotocol/sdk`, `zod` only.
   SQLite is `node:sqlite` (`DatabaseSync`, FTS5 verified available). ZIP/JSON streaming are hand-written
   (`node:zlib`, `node:fs`) so every limit is explicit. GCR contains no network code at all (no `http`/`https`/`fetch`/`net` imports); a test enforces this.
 * Relative imports use the `.js` extension (`import { x } from './y.js'`). Named exports only. `import type` for types.

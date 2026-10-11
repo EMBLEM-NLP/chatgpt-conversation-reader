@@ -1216,6 +1216,8 @@ export function renderBranchList(result: BranchListResult, source: SourceSummary
 
 const MAX_FLAT_ROWS = 500;
 const MAX_FLAT_DEPTH = 8;
+/** Code points of inline JSON shown for a subtree that is nested deeper than MAX_FLAT_DEPTH. */
+const MAX_INLINE_JSON = 200;
 const MAX_TABLE_ROWS = 200;
 const MAX_TABLE_COLUMNS = 12;
 
@@ -1244,7 +1246,9 @@ function flatten(value: unknown, path: string, state: FlatState, depth: number):
   const label = path === '' ? '(value)' : path;
   if (value === undefined) return;
   if (depth >= MAX_FLAT_DEPTH && typeof value === 'object' && value !== null) {
-    state.rows.push([label, jsonText(value, false).slice(0, 200)]);
+    // Cut by code points (a UTF-16 slice can split a surrogate pair) and say so: a silent cut looks like the whole value.
+    const inline = capCodePoints(jsonText(value, false), MAX_INLINE_JSON);
+    state.rows.push([label, inline.removed > 0 ? `${inline.text}…[+${inline.removed} chars]` : inline.text]);
     return;
   }
   if (Array.isArray(value)) {
@@ -1274,10 +1278,14 @@ function asUniformTable(value: unknown): { headers: string[]; rows: string[][] }
     for (const key of Object.keys(item)) {
       const cell = item[key];
       if (typeof cell === 'object' && cell !== null && !(cell instanceof Date)) return null;
-      if (!headers.includes(key)) headers.push(key);
+      if (!headers.includes(key)) {
+        headers.push(key);
+        // Give up the moment the table would be too wide: collecting every distinct key first is quadratic (`includes`).
+        if (headers.length > MAX_TABLE_COLUMNS) return null;
+      }
     }
   }
-  if (headers.length === 0 || headers.length > MAX_TABLE_COLUMNS) return null;
+  if (headers.length === 0) return null;
   const rows = value.map((item) => headers.map((h) => (isPlainObject(item) && item[h] !== undefined ? primitiveText(item[h]) : '')));
   return { headers, rows };
 }
@@ -1361,6 +1369,8 @@ export function renderImportReport(report: ImportReport, opts: RenderOptions): s
         if (report.formatProfile !== undefined) {
           const flat = flatRows(report.formatProfile);
           blocks.push('## Format profile', mdTable(['Observation', 'Value'], flat.rows));
+          // roleCounts is keyed by role strings from the export, so the profile can exceed the row cap: say so, never cut silently.
+          if (flat.limited) blocks.push(`Output limited to the first ${MAX_FLAT_ROWS} values; use --format json for everything.`);
         }
         return {
           title: report.alreadyImported ? 'Import report (already imported: no changes)' : 'Import report',

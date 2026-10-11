@@ -8,9 +8,11 @@
  * Rules implemented here (and nowhere else, so CLI and MCP cannot drift):
  *  - `source` has ONE entry per distinct import batch that contributed, derived from the stored `source_batches` row.
  *    The label is a BASENAME only (a path would leak the operator's directory layout, NFR-07). Order: import order (seq).
- *  - `completeness` is computed from the contributing CONVERSATIONS (their own `completeness` column is authoritative,
- *    ARCHITECTURE section 5) united with the batch rows. One distinct value -> that value; several -> "mixed"; nothing
- *    contributed -> "unknown" (we then know nothing about completeness and say so).
+ *  - `completeness` is computed per contributing CONVERSATION: its own `completeness` column is authoritative
+ *    (ARCHITECTURE section 5) but is never allowed to be STRONGER than its batch row (a batch the importer marked partial
+ *    cannot yield complete conversations). One distinct value -> that value; several -> "mixed"; nothing contributed ->
+ *    "unknown" (we then know nothing about completeness and say so). `source[i].completeness` is the weakest such value
+ *    among the contributing conversations of that batch, so a source never contradicts the envelope that cites it.
  *  - Whenever the result is not a complete exported tree, the FIRST warning is SOURCE_NOT_FULL_HISTORY, which states what
  *    is missing. A rendered or partial source must never be mistaken for the full conversation history (FR-09).
  *  - Warnings are de-duplicated (same code, message and ids) and keep their first-occurrence order: deterministic output.
@@ -181,19 +183,37 @@ export type Provenance = Pick<ResultEnvelope<never>, 'source' | 'completeness' |
 /** Everything except `data` and `ids`: used by results that are not wrapped in a ResultEnvelope (graph HTML export). */
 export function buildProvenance(lookup: BatchLookup, parts: Omit<EnvelopeParts<unknown>, 'data' | 'ids'>): Provenance {
   const batchIds = uniq([...parts.contributions.map((c) => c.batchId), ...(parts.extraBatchIds ?? [])]);
-  const sources: BatchInfo[] = [];
+  const found = new Map<string, BatchInfo>();
   const missing: string[] = [];
   for (const id of batchIds) {
     const b = lookup(id);
     if (b === null) missing.push(id);
-    else sources.push(b);
+    else found.set(id, b);
   }
-  sources.sort((a, b) => a.seq - b.seq || (a.batchId < b.batchId ? -1 : a.batchId > b.batchId ? 1 : 0));
-  const source = sources.map(toSourceSummary);
 
-  const values: Completeness[] = [...parts.contributions.map((c) => normalizeCompleteness(c.completeness)), ...source.map((s) => s.completeness)];
+  // Effective completeness of every contributing conversation: its own value, capped by its batch row.
+  const values: Completeness[] = [];
+  const perBatch = new Map<string, Completeness[]>();
+  for (const c of parts.contributions) {
+    const b = found.get(c.batchId);
+    const effective = b === undefined ? 'unknown' : (weakestCompleteness([normalizeCompleteness(c.completeness), normalizeCompleteness(b.completeness)]) ?? 'unknown');
+    values.push(effective);
+    const list = perBatch.get(c.batchId);
+    if (list === undefined) perBatch.set(c.batchId, [effective]);
+    else list.push(effective);
+  }
+  // A batch listed without any contributing conversation speaks for itself (an import of an empty export).
+  for (const [id, b] of found) {
+    if (perBatch.has(id)) continue;
+    const own = normalizeCompleteness(b.completeness);
+    values.push(own);
+    perBatch.set(id, [own]);
+  }
   // A batch row that vanished (cannot happen with foreign keys, but the database is a file anyone can edit) is unknown, never complete.
   if (missing.length > 0) values.push('unknown');
+
+  const sources = [...found.values()].sort((a, b) => a.seq - b.seq || (a.batchId < b.batchId ? -1 : a.batchId > b.batchId ? 1 : 0));
+  const source: SourceSummary[] = sources.map((b) => ({ ...toSourceSummary(b), completeness: weakestCompleteness(perBatch.get(b.batchId) ?? []) ?? 'unknown' }));
   const overall = overallCompleteness(values);
 
   const lead: Warning[] = [];

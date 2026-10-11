@@ -24,6 +24,48 @@ import { applyMigrations, assertCompatible, readUserVersion } from './schema.js'
 
 export const BUSY_TIMEOUT_MS = 5000;
 
+/**
+ * Oldest Node.js release whose bundled SQLite includes FTS5. Verified on real binaries (2026-10-10): node:sqlite in
+ * 22.13.1, 22.14.0, 22.15.0 and 22.15.1 answers "no such module: fts5"; 22.16.0 and every later 22.x tested has it.
+ * GCR's search (FR-05) cannot work without FTS5, so this - not 22.13 - is the real minimum runtime.
+ */
+export const MIN_NODE_WITH_FTS5 = '22.16.0';
+
+let fts5Verified = false;
+
+/** Create a throw-away FTS5 table on a private in-memory connection (the capability belongs to the Node build, not to the target file). */
+function probeFts5Support(): void {
+  const probe = new DatabaseSync(':memory:');
+  try {
+    probe.exec('CREATE VIRTUAL TABLE gcr_fts5_probe USING fts5(x)');
+  } finally {
+    probe.close();
+  }
+}
+
+/**
+ * Fail fast, clearly and BEFORE touching any file when this Node build's SQLite was compiled without FTS5. Without this
+ * check the first symptom is DB_MIGRATION_FAILED from inside the schema migration, which hides the real cause.
+ * `probe` and `runtime` are test seams; the default probe result is cached for the process lifetime.
+ */
+export function assertFts5Available(probe: () => void = probeFts5Support, runtime: { node: string } = { node: process.versions.node }): void {
+  if (probe === probeFts5Support && fts5Verified) return;
+  try {
+    probe();
+    if (probe === probeFts5Support) fts5Verified = true;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : '';
+    if (/no such module:\s*fts5/i.test(message)) {
+      throw new GcrError('DB_ERROR', 'This Node.js build of SQLite does not include FTS5, which GCR needs for full-text search.', {
+        remedy: `Upgrade Node.js to ${MIN_NODE_WITH_FTS5} or newer (node:sqlite in Node 22.13 to 22.15 is built without FTS5). Running: ${runtime.node}.`,
+        details: { reason: 'FTS5_UNAVAILABLE', node: runtime.node, minimumNode: MIN_NODE_WITH_FTS5 },
+        cause: e,
+      });
+    }
+    throw toDbError(e);
+  }
+}
+
 export interface OpenOptions {
   /** Open without any write capability: never creates, never migrates. Default false. */
   readOnly?: boolean;
@@ -203,6 +245,9 @@ export function openDatabase(path: string, opts: OpenOptions = {}): GcrDatabase 
   if (readOnly && opts.create === true) throw new GcrError('INVALID_ARGUMENT', 'A read-only open never creates the database file.');
   const create = opts.create ?? !readOnly;
   const label = memory ? ':memory:' : basename(path);
+
+  // Before the file is created or touched: an unsupported Node build must not leave an empty database behind.
+  assertFts5Available();
 
   if (!memory && !fileExists(path, label)) {
     if (!create) throw notFound(label, 'file');
