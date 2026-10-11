@@ -155,6 +155,8 @@ describe('read tools over a standard database', () => {
         [`https://example.test/c/${ID.linear}`, 'UNSUPPORTED_URL'],
         ['not-a-uuid', 'INVALID_UUID'],
         ['https://chatgpt.com/c/zzzz', 'INVALID_UUID'],
+        ['https://', 'INVALID_URL'],
+        ['https://chatgpt.com/', 'UNSUPPORTED_URL'],
       ];
       for (const [conversation, code] of cases) {
         assertError(await h.env('gcr_get', { conversation }), code);
@@ -447,6 +449,22 @@ describe('graph not built / empty database / stored non-UUID ids', () => {
       assert.equal(env.completeness, 'unknown');
       assert.equal(env.warnings[0]?.code, 'SOURCE_NOT_FULL_HISTORY');
       assertError(await h.env('gcr_get', { conversation: ID.linear }), 'NOT_IN_LOCAL_EXPORT');
+    } finally {
+      await h.close();
+      await fx.cleanup();
+    }
+  });
+
+  it('a database handle that was closed under the server is a coded DB_ERROR, never a crash or a raw exception', async () => {
+    const fx = await createFixture({ graph: false });
+    const h = await connectMem(fx.dbPath);
+    try {
+      h.gcr.close();
+      for (const [tool, args] of [['gcr_list', {}], ['gcr_get', { conversation: ID.linear }], ['gcr_search', { query: 'quokka' }], ['gcr_doctor', {}]] as const) {
+        const env = await h.env(tool, args);
+        assertError(env, 'DB_ERROR');
+        assert.equal(env.error?.details?.['reason'], 'closed', tool);
+      }
     } finally {
       await h.close();
       await fx.cleanup();

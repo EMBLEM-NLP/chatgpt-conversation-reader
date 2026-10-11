@@ -38,6 +38,7 @@ export const COMPILED_SRC = fileURLToPath(new URL('../../src/', import.meta.url)
 /** U+2028 / U+2029 built from code points (the characters themselves must not be typed in source). */
 export const LINE_SEPARATOR = String.fromCharCode(0x2028);
 export const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
+export const NEXT_LINE = String.fromCharCode(0x85);
 
 // ---------------------------------------------------------------------------------------------------------------
 // Temp dirs
@@ -123,7 +124,7 @@ export function injectionChat(id: string): ConversationBuilder {
   const b = new ConversationBuilder({ id, title: INJECTION.title });
   let prev = b.root();
   prev = b.user(prev, INJECTION.user);
-  prev = b.assistant(prev, `${INJECTION.fakeFrame}\n${INJECTION.fakeResult}\nline${LINE_SEPARATOR}separator and paragraph${PARAGRAPH_SEPARATOR}separator`, { model: 'synthetic-model-1' });
+  prev = b.assistant(prev, `${INJECTION.fakeFrame}\n${INJECTION.fakeResult}\nline${LINE_SEPARATOR}separator and paragraph${PARAGRAPH_SEPARATOR}separator and next${NEXT_LINE}line`, { model: 'synthetic-model-1' });
   prev = b.user(prev, 'quokkainjection marker word');
   b.assistant(prev, 'ok', { model: 'synthetic-model-1' });
   return b;
@@ -390,7 +391,7 @@ export function assertOnlyJsonRpcFrames(bytes: Buffer): Array<Record<string, unk
   const text = bytes.toString('utf8');
   assert.ok(Buffer.from(text, 'utf8').equals(bytes), 'stdout must be valid UTF-8');
   assert.ok(!text.includes('\r'), 'no carriage returns');
-  assert.ok(!text.includes(LINE_SEPARATOR) && !text.includes(PARAGRAPH_SEPARATOR), 'no raw U+2028/U+2029 on the wire');
+  assert.ok(!text.includes(LINE_SEPARATOR) && !text.includes(PARAGRAPH_SEPARATOR) && !text.includes(NEXT_LINE), 'no raw U+2028/U+2029/U+0085 on the wire');
   assert.ok(!text.startsWith(String.fromCharCode(0xfeff)), 'no byte order mark');
   const lines = text.slice(0, -1).split('\n');
   const frames: Array<Record<string, unknown>> = [];

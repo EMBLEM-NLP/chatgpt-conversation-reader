@@ -15,7 +15,7 @@ import type { ErrorCode } from '../../errors.js';
 import { renderEnvelope, sanitizeUntrusted } from '../../format/render.js';
 import type { CommandContext } from '../context.js';
 import { readBoundedText } from '../input.js';
-import { accountOption, limitOption, offsetOption, providerOption } from '../options.js';
+import { accountOption, limitOption, offsetOption, providerOption, storedIdOption } from '../options.js';
 import { renderAnnotationList, renderAnnotationSummary, renderDraftList, renderDraftSummary } from '../render-local.js';
 import type { CommandSpec, OptionSpec, PositionalSpec } from '../spec.js';
 import { conversationRef, defined, emit, first } from './common.js';
@@ -51,7 +51,7 @@ const INPUT_OPTION: OptionSpec = {
 };
 
 function disambiguation(): OptionSpec[] {
-  return [providerOption(undefined, 'Disambiguate when the id exists under several providers.'), accountOption('Disambiguate when the id exists under several accounts.')];
+  return [providerOption(undefined, 'Disambiguate when the id exists under several providers.'), accountOption('Disambiguate when the id exists under several accounts.'), storedIdOption()];
 }
 
 const ID_ARG = (what: string): PositionalSpec => ({ name: 'id', description: `${what} id, as printed by the create or list command.` });
@@ -83,7 +83,7 @@ export const draftCreate: CommandSpec = {
   errors: [...LOCAL_WRITE_ERRORS],
   async run(ctx: CommandContext): Promise<void> {
     const a = ctx.args;
-    const ref = conversationRef(required(ctx, 'conversation', 'Name the conversation: --conversation <uuid>'), a.string('provider'), a.string('account'));
+    const ref = conversationRef(required(ctx, 'conversation', 'Name the conversation: --conversation <uuid>'), a.string('provider'), a.string('account'), a.flag('stored-id'));
     const input = await readBoundedText({
       spec: required(ctx, 'input', 'Name the text file, or "-" for standard input: --input draft.md'),
       maxBytes: LOCAL_INPUT_MAX_BYTES,
@@ -118,7 +118,7 @@ export const draftList: CommandSpec = {
   async run(ctx: CommandContext): Promise<void> {
     const a = ctx.args;
     const conversation = a.string('conversation');
-    const ref = conversation === undefined ? undefined : conversationRef(conversation, a.string('provider'), a.string('account'));
+    const ref = conversation === undefined ? undefined : conversationRef(conversation, a.string('provider'), a.string('account'), a.flag('stored-id'));
     const gcr = await ctx.openRead();
     const env = gcr.listDrafts(defined({ conversationRef: ref, namespace: a.string('namespace'), status: a.choice<'draft' | 'archived'>('status'), limit: a.int('limit'), offset: a.int('offset') }));
     emit(ctx, renderDraftList(env, ctx.renderOptions()));
@@ -191,7 +191,7 @@ export const annotateCreate: CommandSpec = {
   errors: [...LOCAL_WRITE_ERRORS],
   async run(ctx: CommandContext): Promise<void> {
     const a = ctx.args;
-    const ref = conversationRef(required(ctx, 'conversation', 'Name the conversation: --conversation <uuid>'), a.string('provider'), a.string('account'));
+    const ref = conversationRef(required(ctx, 'conversation', 'Name the conversation: --conversation <uuid>'), a.string('provider'), a.string('account'), a.flag('stored-id'));
     const input = await readBoundedText({
       spec: required(ctx, 'input', 'Name the text file, or "-" for standard input: --input note.txt'),
       maxBytes: LOCAL_INPUT_MAX_BYTES,
@@ -260,7 +260,7 @@ export const annotateList: CommandSpec = {
   async run(ctx: CommandContext): Promise<void> {
     const a = ctx.args;
     const conversation = a.string('conversation');
-    const ref = conversation === undefined ? undefined : conversationRef(conversation, a.string('provider'), a.string('account'));
+    const ref = conversation === undefined ? undefined : conversationRef(conversation, a.string('provider'), a.string('account'), a.flag('stored-id'));
     const gcr = await ctx.openRead();
     const env = gcr.listAnnotations(defined({ conversationRef: ref, messageId: a.string('message-id'), kind: a.string('kind'), namespace: a.string('namespace'), limit: a.int('limit'), offset: a.int('offset') }));
     emit(ctx, renderAnnotationList(env, ctx.renderOptions()));

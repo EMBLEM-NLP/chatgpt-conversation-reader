@@ -90,6 +90,22 @@ export function resolveDbLocation(flag: string | undefined, env: Env, cwd: strin
   return { path: resolve(cwd, raw), origin };
 }
 
+/**
+ * Does the database path exist? A path that cannot even be inspected (no permission on a parent directory) is a DB_ERROR with
+ * a content-free message, not a raw file-system error that would surface as INTERNAL_ERROR.
+ */
+export function dbExists(path: string): boolean {
+  try {
+    return statSync(path, { throwIfNoEntry: false }) !== undefined;
+  } catch (e) {
+    throw new GcrError('DB_ERROR', `The database path "${basename(path)}" could not be inspected.`, {
+      remedy: 'Check the permissions of the directory, or choose another file with --db.',
+      details: { reason: 'stat_failed' },
+      cause: e,
+    });
+  }
+}
+
 export function dbNotFound(path: string): GcrError {
   return new GcrError('DB_NOT_FOUND', `No database found at "${basename(path)}".`, {
     remedy: 'run: gcr import <export.zip>  (or point --db / GCR_DB at an existing database)',
@@ -148,8 +164,7 @@ export class CommandContext {
 
   /** Open the database read-only (never creates, never migrates). */
   async openRead(): Promise<Gcr> {
-    const st = statSync(this.db.path, { throwIfNoEntry: false });
-    if (st === undefined) throw dbNotFound(this.db.path);
+    if (!dbExists(this.db.path)) throw dbNotFound(this.db.path);
     const { Gcr: GcrClass } = await import('../sdk/gcr.js');
     const gcr = GcrClass.open({ dbPath: this.db.path, readOnly: true, actor: 'cli' });
     this.io.lifecycle.add(() => gcr.close());
@@ -162,7 +177,7 @@ export class CommandContext {
    * they fail with DB_NOT_FOUND instead of leaving an empty database behind.
    */
   async openWrite(opts: { mustExist?: boolean } = {}): Promise<Gcr> {
-    if (opts.mustExist === true && statSync(this.db.path, { throwIfNoEntry: false }) === undefined) throw dbNotFound(this.db.path);
+    if (opts.mustExist === true && !dbExists(this.db.path)) throw dbNotFound(this.db.path);
     const dir = dirname(this.db.path);
     if (this.db.origin === 'default' && !existsSync(dir)) {
       try {

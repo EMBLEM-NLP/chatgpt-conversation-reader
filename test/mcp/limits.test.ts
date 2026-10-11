@@ -18,7 +18,7 @@ import { createGcrMcpServer } from '../../src/mcp/server.js';
 import type { Fixture, MemHarness } from './mcp.helpers.test.js';
 import { ID, callTool, connectMem, createFixture, envelopeOf } from './mcp.helpers.test.js';
 
-const BIG_CAP = 4_194_304;
+const BIG_CAP = 3_000_000;
 
 describe('result truncation through the real server', () => {
   let fx: Fixture;
@@ -190,7 +190,7 @@ describe('GCR_MCP_MAX_RESULT_BYTES', () => {
     const fx = await createFixture({ graph: false });
     const gcr = Gcr.open({ dbPath: fx.dbPath, readOnly: true });
     try {
-      for (const bad of [0, 8191, 4_194_305, 1.5, Number.NaN]) assert.throws(() => createGcrMcpServer(gcr, { maxResultBytes: bad }), (e: unknown) => e instanceof GcrError && e.code === 'INVALID_ARGUMENT', String(bad));
+      for (const bad of [0, 8191, 3_000_001, 4_194_305, 1.5, Number.NaN]) assert.throws(() => createGcrMcpServer(gcr, { maxResultBytes: bad }), (e: unknown) => e instanceof GcrError && e.code === 'INVALID_ARGUMENT', String(bad));
       assert.throws(() => createGcrMcpServer(gcr, { toolDeadlineMs: 0 }), GcrError);
       assert.throws(() => createGcrMcpServer(gcr, { importDeadlineMs: 5 }), GcrError);
     } finally {

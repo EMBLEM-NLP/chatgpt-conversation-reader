@@ -16,8 +16,10 @@
  *    system or JavaScript can embed paths or conversation text (NFR-07).
  *
  * SIZE CAP (default 200 000 bytes, `GCR_MCP_MAX_RESULT_BYTES`)
- *  The envelope appears twice in the response and the text copy is re-escaped, so the wire size is about 2.1x the cap, and a
- *  message over the transport buffer (10 MiB) closes the connection. Oversize results are therefore REDUCED, never cut:
+ *  The envelope appears twice in the response and the text copy is JSON-escaped a second time, so the wire size is about 2.1x
+ *  the cap for ordinary text and up to 3x for text made of quotes or backslashes (each costs 2 bytes in the envelope, 4 in the
+ *  text copy and 2 in structuredContent). A message over the transport buffer (10 MiB) closes the connection, so the largest
+ *  configurable cap is chosen such that even 3x stays below it. Oversize results are therefore REDUCED, never cut:
  *   - the tool's `plan` names the lists to shorten, in priority order; trailing items are dropped (a binary search finds the
  *     longest prefix that fits), so the output is always valid JSON and the same input always gives the same output;
  *   - paging fields are kept coherent (`nextOffset = offset + kept`, a keyset cursor is removed because it would skip the
@@ -109,8 +111,13 @@ export const mcpEnvelopeSchema = z.strictObject({
 export const DEFAULT_MAX_RESULT_BYTES = 200_000;
 /** Below this an envelope (provenance, warnings, one error) may not fit at all. */
 export const MIN_MAX_RESULT_BYTES = 8_192;
-/** The envelope is sent twice, ~2.1x on the wire; 4 MiB keeps even that far below the 10 MiB transport buffer. */
-export const MAX_MAX_RESULT_BYTES = 4_194_304;
+/**
+ * The envelope is sent twice and the text copy is escaped again: ~2.1x on the wire for ordinary text, up to 3x for data that
+ * is mostly quotes or backslashes (measured: 2.87x). 3 000 000 x 3 = 9 MB stays below the 10 MiB (10 485 760 bytes) read
+ * buffer of the SDK transport on both ends, which closes the connection on anything longer; the former limit of 4 MiB did not
+ * (12 MB frames). test/mcp/limits.adversarial.test.ts pins the arithmetic with real frames.
+ */
+export const MAX_MAX_RESULT_BYTES = 3_000_000;
 
 /** Strict parse of `GCR_MCP_MAX_RESULT_BYTES` (digits only). undefined/empty = default. A bad value is an error, not a silent default. */
 export function parseMaxResultBytes(raw: string | undefined): number {

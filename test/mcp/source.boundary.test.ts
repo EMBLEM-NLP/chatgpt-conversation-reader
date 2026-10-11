@@ -12,7 +12,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { after, before, describe, it } from 'node:test';
 import type { Fixture, MemHarness } from './mcp.helpers.test.js';
-import { connectMem, createFixture, LINE_SEPARATOR, PARAGRAPH_SEPARATOR } from './mcp.helpers.test.js';
+import { connectMem, createFixture, LINE_SEPARATOR, NEXT_LINE, PARAGRAPH_SEPARATOR } from './mcp.helpers.test.js';
 
 // Compiled tests live at <root>/<outDir>/test/mcp, whatever the out dir is called.
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
@@ -140,6 +140,7 @@ describe('src/mcp source boundaries', () => {
     for (const [file, raw] of sources) {
       assert.ok(!raw.includes(LINE_SEPARATOR), `${file} has a raw U+2028`);
       assert.ok(!raw.includes(PARAGRAPH_SEPARATOR), `${file} has a raw U+2029`);
+      assert.ok(!raw.includes(NEXT_LINE), `${file} has a raw U+0085`);
       assert.ok(!raw.startsWith(String.fromCharCode(0xfeff)), `${file} has a byte-order mark`);
     }
   });

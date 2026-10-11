@@ -15,15 +15,27 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { installStdoutGuard } from './stdout-guard.js';
 
+/**
+ * The file Node runs for `process.argv[1]`. `node dist/mcp/entry` (no extension) is a legal way to start a script: Node adds the
+ * extension itself but leaves `argv[1]` as typed, so the spellings it would try are tried here too. An exact match wins, as it
+ * does for Node.
+ */
+function resolveMainFile(argv1: string): string | undefined {
+  for (const candidate of [argv1, `${argv1}.js`, `${argv1}.ts`]) {
+    try {
+      return realpathSync(candidate);
+    } catch {
+      /* not this spelling */
+    }
+  }
+  return undefined;
+}
+
 function startedOnEntryFile(): boolean {
   const argv1 = process.argv[1];
   if (argv1 === undefined) return false;
-  let started: string;
-  try {
-    started = realpathSync(argv1);
-  } catch {
-    return false;
-  }
+  const started = resolveMainFile(argv1);
+  if (started === undefined) return false;
   for (const name of ['./entry.js', './entry.ts']) {
     try {
       if (realpathSync(fileURLToPath(new URL(name, import.meta.url))) === started) return true;

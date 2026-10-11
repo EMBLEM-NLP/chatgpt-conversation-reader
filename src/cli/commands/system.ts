@@ -1,9 +1,8 @@
 /**
  * `gcr doctor` and `gcr mcp`.
  */
-import { statSync } from 'node:fs';
 import type { CommandContext } from '../context.js';
-import { dbNotFound } from '../context.js';
+import { dbExists, dbNotFound } from '../context.js';
 import { renderDoctor } from '../render-local.js';
 import type { CommandSpec } from '../spec.js';
 import { emit } from './common.js';
@@ -53,7 +52,7 @@ export const mcpCommand: CommandSpec = {
   globals: ['db', 'quiet', 'debug', 'help'],
   async run(ctx: CommandContext): Promise<void> {
     // The server never creates or migrates a database from here: a missing file is the same answer as for every other command.
-    if (statSync(ctx.db.path, { throwIfNoEntry: false }) === undefined) throw dbNotFound(ctx.db.path);
+    if (!dbExists(ctx.db.path)) throw dbNotFound(ctx.db.path);
     // The server installs its own SIGINT/SIGTERM handlers (graceful shutdown) and its own broken-pipe handling on the
     // JSON-RPC channel; the CLI's would race with them and cut the shutdown short.
     ctx.io.lifecycle.signalsDelegated = true;

@@ -93,3 +93,12 @@ export function allBatchesOption(what: string): OptionSpec {
 export function batchOption(): OptionSpec {
   return { name: 'batch', kind: 'string', valueName: 'id', description: 'Read this import snapshot (a batch id from "gcr batches") instead of the newest one.' };
 }
+
+export function storedIdOption(): OptionSpec {
+  return {
+    name: 'stored-id',
+    kind: 'boolean',
+    description:
+      'Take the conversation as an id exactly as "gcr list" prints it. Needed only for ids that are not UUIDs (for example one GCR synthesized for an export that had none). Links are not accepted with this switch.',
+  };
+}

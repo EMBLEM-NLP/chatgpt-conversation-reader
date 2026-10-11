@@ -31,7 +31,8 @@
     "test:browser": "node scripts/test-browser-gated.mjs",
     "capture:cli-help": "npm run build && node scripts/capture-cli-help.mjs",
     "dump:mcp-schemas": "npm run build && node scripts/dump-mcp-schemas.mjs",
-    "perf": "npm run build && node scripts/perf-baseline.mjs"
+    "perf": "npm run build && node scripts/perf-baseline.mjs",
+    "coverage-summary": "npm run build:test && node scripts/coverage-summary.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

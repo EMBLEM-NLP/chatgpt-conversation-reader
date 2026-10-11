@@ -98,7 +98,7 @@ function globalLines(spec: CommandSpec | undefined): string[] {
 
 export function renderCommandHelp(spec: CommandSpec): string {
   const name = `gcr ${spec.path.join(' ')}`;
-  const out: string[] = [`${name} - ${spec.summary}`, '', 'Usage:', ...usageLines(spec)];
+  const out: string[] = [...wrap(`${name} - ${spec.summary}`, WIDTH, '  ', ''), '', 'Usage:', ...usageLines(spec)];
   if (spec.details !== undefined && spec.details.length > 0) {
     out.push('');
     spec.details.forEach((d, i) => {
@@ -123,7 +123,7 @@ export function renderCommandHelp(spec: CommandSpec): string {
 
 export function renderGroupHelp(group: GroupSpec): string {
   const out: string[] = [
-    `gcr ${group.name} - ${group.summary}`,
+    ...wrap(`gcr ${group.name} - ${group.summary}`, WIDTH, '  ', ''),
     '',
     'Usage:',
     `  gcr ${group.name} <command> [options]`,
@@ -150,7 +150,7 @@ const ROOT_EXAMPLES: ReadonlyArray<readonly [string, string]> = [
 
 export function renderRootHelp(entries: readonly RootEntry[]): string {
   const out: string[] = [
-    `${TOOL_NAME} ${TOOL_VERSION} - read, search and annotate your own ChatGPT export data, offline`,
+    ...wrap(`${TOOL_NAME} ${TOOL_VERSION} - read, search and annotate your own ChatGPT export data, offline`, WIDTH, '  ', ''),
     '',
     'Usage:',
     '  gcr <command> [options]',

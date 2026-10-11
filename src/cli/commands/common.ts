@@ -23,7 +23,8 @@ export function defined<T extends Record<string, unknown>>(o: T): { [K in keyof 
  * exit code 2 whatever the state of the database (and without any I/O). A chatgpt.com link is only ever a lookup key.
  * With --provider / --account the reference becomes an object so the SDK resolves exactly that provider and account.
  */
-export function conversationRef(raw: string, provider: string | undefined, account: string | undefined): string | ConversationRef {
+export function conversationRef(raw: string, provider: string | undefined, account: string | undefined, stored = false): string | ConversationRef {
+  if (stored) return storedRef(raw, provider, account);
   const parsed = parseConversationRef(raw);
   if (provider === undefined && account === undefined) return raw;
   const ref: ConversationRef = { conversationId: parsed.conversationId };
@@ -33,9 +34,27 @@ export function conversationRef(raw: string, provider: string | undefined, accou
   return ref;
 }
 
-/** The `ref` positional of a command plus the --provider / --account disambiguation options. */
+/**
+ * `--stored-id`: an id as the database stores it. Only ids of other shapes than UUIDs need this (GCR synthesizes one for an
+ * export element that has none). A link is refused: it is a different kind of reference, with its own rules.
+ */
+function storedRef(raw: string, provider: string | undefined, account: string | undefined): ConversationRef {
+  const control = /[\u0000-\u001f\u007f-\u009f]/;
+  if (raw.length > 512 || control.test(raw) || /^\s*[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw)) {
+    throw new GcrError('INVALID_ARGUMENT', 'With --stored-id the argument must be a conversation id as printed by "gcr list", not a link.', {
+      remedy: 'Drop --stored-id to use a UUID or a https://chatgpt.com/c/<uuid> link.',
+      details: { option: 'stored-id' },
+    });
+  }
+  const ref: ConversationRef = { conversationId: isUuid(raw) ? raw.toLowerCase() : raw };
+  if (provider !== undefined) ref.provider = provider as Provider;
+  if (account !== undefined) ref.accountLabel = account;
+  return ref;
+}
+
+/** The `ref` positional of a command plus the --provider / --account / --stored-id options. */
 export function refFromArgs(ctx: CommandContext, positional: string): string | ConversationRef {
-  return conversationRef(positional, ctx.args.string('provider'), ctx.args.string('account'));
+  return conversationRef(positional, ctx.args.string('provider'), ctx.args.string('account'), ctx.args.flag('stored-id'));
 }
 
 /**

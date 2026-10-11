@@ -14,7 +14,7 @@ import { notFullHistoryWarning, overallCompleteness, toSourceSummary } from '../
 import type { SearchItem, SearchOptions, SearchScope } from '../../sdk/gcr.js';
 import type { CommandContext } from '../context.js';
 import { withEnvelopeWarnings } from '../warnings.js';
-import { accountOption, allBatchesOption, batchOption, cursorOption, includeHiddenOption, limitOption, offsetOption, providerOption } from '../options.js';
+import { accountOption, allBatchesOption, batchOption, cursorOption, includeHiddenOption, limitOption, offsetOption, providerOption, storedIdOption } from '../options.js';
 import type { CommandSpec, OptionSpec } from '../spec.js';
 import { conversationFilterValue, defined, emit, first, refFromArgs } from './common.js';
 
@@ -110,6 +110,7 @@ export const getCommand: CommandSpec = {
     batchOption(),
     providerOption(undefined, 'Disambiguate when the id exists under several providers.'),
     accountOption('Disambiguate when the id exists under several accounts.'),
+    storedIdOption(),
   ],
   examples: [
     { command: 'get 00000000-0000-4000-8000-000000000001', note: 'Print the conversation as Markdown.' },
@@ -167,6 +168,7 @@ export const threadCommand: CommandSpec = {
     batchOption(),
     providerOption(undefined, 'Disambiguate when the id exists under several providers.'),
     accountOption('Disambiguate when the id exists under several accounts.'),
+    storedIdOption(),
   ],
   examples: [
     { command: 'thread 00000000-0000-4000-8000-000000000001', note: 'The active thread of a conversation.' },
@@ -203,7 +205,7 @@ export const branchesCommand: CommandSpec = {
   summary: 'List the branches of a conversation (edited prompts, regenerated answers).',
   details: ['A branch id is the id of its leaf message; pass it to "gcr thread --branch". The active branch is shown only when the export names it.'],
   positionals: [REF_ARG],
-  options: [batchOption(), providerOption(undefined, 'Disambiguate when the id exists under several providers.'), accountOption('Disambiguate when the id exists under several accounts.')],
+  options: [batchOption(), providerOption(undefined, 'Disambiguate when the id exists under several providers.'), accountOption('Disambiguate when the id exists under several accounts.'), storedIdOption()],
   examples: [
     { command: 'branches 00000000-0000-4000-8000-000000000001', note: 'All branches with their activeness.' },
     { command: 'branches https://chatgpt.com/c/00000000-0000-4000-8000-000000000001 --format json', note: 'The same, looked up by link, as JSON.' },

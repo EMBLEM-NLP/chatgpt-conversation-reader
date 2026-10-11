@@ -23,7 +23,7 @@ import { installStdoutGuard } from './stdout-guard.js';
  *   GCR_DB                      database path when --db is not given
  *   GCR_MCP_ALLOW_WRITES        "1" enables drafts, annotations and import (anything else keeps the server read-only)
  *   GCR_APPROVED_IMPORT_ROOTS   absolute directories (platform path delimiter) that gcr_import_export may read from
- *   GCR_MCP_MAX_RESULT_BYTES    result size cap, 8192 to 4194304 (default 200000)
+ *   GCR_MCP_MAX_RESULT_BYTES    result size cap, 8192 to 3000000 (default 200000)
  *   GCR_LOG_LEVEL / GCR_DEBUG   stderr log threshold (error | warn | info | debug)
  */
 
@@ -174,17 +174,34 @@ export async function runMcpServer(argv: readonly string[], env: NodeJS.ProcessE
       emitter.on(event, fn);
       listeners.push([emitter, event, fn]);
     };
+    // A second signal during the shutdown means "do not wait for a slow reader any longer" (see `shutdown`).
+    let impatient = false;
+    let stopWaiting: () => void = () => {
+      impatient = true;
+    };
     const shutdown = async (reason: string, code = 0): Promise<void> => {
       if (closing) return;
       closing = true;
       log.info('mcp_shutdown', { reason });
-      for (const [emitter, event, fn] of listeners) emitter.off(event, fn);
       try {
         // Bounded: a transport that never finishes closing must not keep the process alive.
         await Promise.race([server.close(), delay(1500)]);
       } catch {
         log.warn('mcp_server_close_failed');
       }
+      // Answers that were already computed must reach the reader before the process leaves: stdout is a pipe, its writes are
+      // asynchronous and it holds only 64 KiB, so leaving now would drop queued frames (or cut one in half). The wait is
+      // bounded, and a second SIGINT/SIGTERM ends it at once.
+      if (!impatient) {
+        await Promise.race([
+          guard.flush(),
+          new Promise<void>((done) => {
+            stopWaiting = done;
+          }),
+        ]);
+      }
+      // Only now are the signal handlers given back (they stay installed until here so that `onSignal` can see a second signal).
+      for (const [emitter, event, fn] of listeners) emitter.off(event, fn);
       try {
         gcr.close();
       } catch {
@@ -192,11 +209,15 @@ export async function runMcpServer(argv: readonly string[], env: NodeJS.ProcessE
       }
       resolve(code);
     };
+    const onSignal = (name: string): void => {
+      if (closing) stopWaiting();
+      else void shutdown(name);
+    };
 
     // The SDK stdio transport ignores stdin EOF: without this a server holding any other handle (the database) never exits.
     on(process.stdin, 'end', () => void shutdown('stdin_end'));
-    on(process, 'SIGINT', () => void shutdown('SIGINT'));
-    on(process, 'SIGTERM', () => void shutdown('SIGTERM'));
+    on(process, 'SIGINT', () => onSignal('SIGINT'));
+    on(process, 'SIGTERM', () => onSignal('SIGTERM'));
     guard.setBrokenPipeHandler(() => void shutdown('broken_pipe'));
     server.server.onclose = () => void shutdown('transport_closed');
 

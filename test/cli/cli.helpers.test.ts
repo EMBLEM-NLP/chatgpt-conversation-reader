@@ -364,3 +364,27 @@ export async function copyDb(): Promise<{ dir: string; dbPath: string; std: Stan
   copyFileSync(t.dbPath, dbPath);
   return { dir, dbPath, std: t.std };
 }
+
+/**
+ * Assert that `stdout` is a well-formed document of `format`: JSON parses to the success envelope, every JSONL line parses
+ * (header first, footer last), Markdown and compact start with a title line. Returns the text.
+ */
+export function assertFormat(stdout: string, format: Format, what: string): string {
+  assert.ok(stdout.endsWith('\n'), `${what}: ends with a newline`);
+  switch (format) {
+    case 'json':
+      envelope(stdout);
+      break;
+    case 'jsonl': {
+      const lines = parseJsonl(stdout);
+      assert.equal(lines[0]?.['type'], 'header', `${what}: first JSONL line is the header`);
+      assert.equal(lines.at(-1)?.['type'], 'footer', `${what}: last JSONL line is the footer`);
+      break;
+    }
+    case 'markdown':
+    case 'compact':
+      assert.ok(stdout.startsWith('# '), `${what}: ${format} output starts with a title line, got: ${stdout.slice(0, 50)}`);
+      break;
+  }
+  return stdout;
+}

@@ -36,7 +36,7 @@ function limitOptions(): OptionSpec[] {
 }
 
 function inputNotFound(path: string): GcrError {
-  return new GcrError('IMPORT_INPUT_NOT_FOUND', `The import path "${printable(basename(path), 60)}" does not exist.`, {
+  return new GcrError('IMPORT_INPUT_NOT_FOUND', `The import path "${printable(basename(path), 60)}" does not exist or cannot be read.`, {
     remedy: 'Check the path. GCR never downloads anything: pass the export ZIP, the extracted folder or conversations.json that you downloaded yourself.',
     details: { reason: 'NOT_FOUND' },
   });
@@ -73,7 +73,13 @@ export const importCommand: CommandSpec = {
       source = { kind: 'stream', stream: ctx.io.stdin, label: 'stdin' };
     } else {
       const absolute = resolve(ctx.io.cwd, target);
-      if (statSync(absolute, { throwIfNoEntry: false }) === undefined) throw inputNotFound(absolute);
+      let found = false;
+      try {
+        found = statSync(absolute, { throwIfNoEntry: false }) !== undefined;
+      } catch {
+        found = false; // no permission to look: reported the same way, the message already says "or cannot be read"
+      }
+      if (!found) throw inputNotFound(absolute);
       source = { kind: 'path', path: absolute };
     }
 

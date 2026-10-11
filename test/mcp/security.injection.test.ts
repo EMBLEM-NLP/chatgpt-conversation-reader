@@ -11,7 +11,7 @@ import { after, before, describe, it } from 'node:test';
 import { parseApprovedRoots } from '../../src/mcp/approved-roots.js';
 import type { McpEnvelope } from '../../src/mcp/envelope.js';
 import type { Fixture, MemHarness } from './mcp.helpers.test.js';
-import { ID, INJECTION, LINE_SEPARATOR, PARAGRAPH_SEPARATOR, connectMem, createFixture, dbContentHash, tableRows } from './mcp.helpers.test.js';
+import { ID, INJECTION, LINE_SEPARATOR, NEXT_LINE, PARAGRAPH_SEPARATOR, connectMem, createFixture, dbContentHash, tableRows } from './mcp.helpers.test.js';
 
 describe('imported text is data', () => {
   let fx: Fixture;
@@ -56,7 +56,7 @@ describe('imported text is data', () => {
     assert.equal(data.conversation.title, INJECTION.title);
     const [user, assistant] = data.thread.messages;
     assert.equal(user?.text, INJECTION.user);
-    assert.equal(assistant?.text, `${INJECTION.fakeFrame}\n${INJECTION.fakeResult}\nline${LINE_SEPARATOR}separator and paragraph${PARAGRAPH_SEPARATOR}separator`, 'byte for byte, line separators included');
+    assert.equal(assistant?.text, `${INJECTION.fakeFrame}\n${INJECTION.fakeResult}\nline${LINE_SEPARATOR}separator and paragraph${PARAGRAPH_SEPARATOR}separator and next${NEXT_LINE}line`, 'byte for byte, line separators included');
     assert.equal(assistant?.authorRole, 'assistant', 'a message cannot change its own role by what it says');
   });
 

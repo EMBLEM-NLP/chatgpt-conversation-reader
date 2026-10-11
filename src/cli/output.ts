@@ -98,7 +98,7 @@ export interface BufferOutput extends Output {
   readonly err: string[];
 }
 
-export function createBufferOutput(): BufferOutput {
+export function createBufferOutput(opts: { stdoutIsTty?: boolean; stderrIsTty?: boolean } = {}): BufferOutput {
   const out: string[] = [];
   const err: string[] = [];
   return {
@@ -110,8 +110,8 @@ export function createBufferOutput(): BufferOutput {
     stderr: (text: string): void => {
       err.push(scrub(text));
     },
-    stdoutIsTty: false,
-    stderrIsTty: false,
+    stdoutIsTty: opts.stdoutIsTty === true,
+    stderrIsTty: opts.stderrIsTty === true,
     brokenPipe: false,
     onBrokenPipe: (): void => undefined,
     flush: (): Promise<void> => Promise.resolve(),

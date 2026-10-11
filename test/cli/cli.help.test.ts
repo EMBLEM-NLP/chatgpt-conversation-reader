@@ -76,7 +76,8 @@ describe('every command is documented', () => {
     const name = spec.path.join(' ');
     it(`gcr ${name} --help: purpose, usage, every option with its default, examples, exit codes`, async () => {
       const text = await helpOf([...spec.path, '--help']);
-      assert.ok(text.startsWith(`gcr ${name} - ${spec.summary}\n`), 'first line: name and one-line purpose');
+      const title = text.slice(0, text.indexOf('\n\n')).replace(/\s+/g, ' ');
+      assert.equal(title, `gcr ${name} - ${spec.summary}`, 'the first paragraph: name and one-line purpose');
       assert.match(text, /\nUsage:\n  gcr /);
       for (const o of effectiveOptions(spec)) {
         assert.ok(text.includes(`--${o.name}`), `${name}: --${o.name} is documented`);

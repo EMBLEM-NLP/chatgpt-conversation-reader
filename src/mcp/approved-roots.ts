@@ -9,7 +9,8 @@
  *
  * Rules (all pinned by test/mcp/approved-roots.test.ts):
  *  - The variable is a path list separated by the platform delimiter (`:` on POSIX, `;` on Windows).
- *  - Roots are resolved ONCE at startup with `realpath` and the canonical value is what is compared later. A directory
+ *  - Roots are resolved ONCE at startup with the native `realpath` (the same primitive that canonicalizes candidates, so both
+ *    sides are spelled alike on case-insensitive file systems too) and the canonical value is what is compared later. A directory
  *    that is swapped for a symlink after startup therefore cannot widen the approval. Roots must be absolute, existing
  *    directories (a file is not a root); the filesystem root is refused (approving "/" would approve everything). Rejected entries are only
  *    counted, never echoed.
@@ -59,7 +60,10 @@ export function parseApprovedRoots(value: string | undefined, delimiter: string 
     }
     let real: string;
     try {
-      real = realpathSync(raw);
+      // `.native` = realpath(3), the very primitive behind `fs.promises.realpath` that canonicalizes every candidate later. The
+      // plain `realpathSync` is a JavaScript re-implementation that keeps the letter case it was given where no symlink is
+      // involved, so on a case-insensitive file system roots and candidates would be spelled differently and never match.
+      real = realpathSync.native(raw);
       if (!statSync(real).isDirectory()) throw new Error('not a directory');
     } catch {
       ignored++;

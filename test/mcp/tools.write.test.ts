@@ -15,6 +15,7 @@ import { parseApprovedRoots } from '../../src/mcp/approved-roots.js';
 import type { McpEnvelope } from '../../src/mcp/envelope.js';
 import { Gcr } from '../../src/sdk/gcr.js';
 import { syntheticUuid } from '../helpers/chatgpt-export-builder.js';
+import { buildZip } from '../helpers/zip-builder.js';
 import type { Fixture, MemHarness } from './mcp.helpers.test.js';
 import { ID, connectMem, conversationsJson, createFixture, dbContentHash, linearChat, makeTempDir, removeDir, tableRows, writeText } from './mcp.helpers.test.js';
 
@@ -399,6 +400,21 @@ describe('gcr_import_export', () => {
     const env = await h.env('gcr_import_export', { path: join(root, 'broken.json'), accountLabel: 'broken' });
     assert.equal(env.ok, false);
     assert.match(env.error?.code ?? '', /^IMPORT_/);
+  });
+
+  it('hostile archives inside the root are refused by the importer with their own codes, and nothing is stored', async () => {
+    const before = ((await h.env('gcr_list', { allBatches: true })).data as { total: number }).total;
+    await writeFile(join(root, 'zip-slip.zip'), buildZip([{ name: '../../escape/conversations.json', data: '[]' }]));
+    await writeFile(join(root, 'wrong-shape.zip'), buildZip([{ name: 'notes.txt', data: 'not an export' }]));
+    await mkdir(join(root, 'empty-folder'));
+    const slip = await h.env('gcr_import_export', { path: join(root, 'zip-slip.zip'), accountLabel: 'slip' });
+    assertError(slip, 'IMPORT_ZIP_UNSAFE');
+    assert.ok(!JSON.stringify(slip).includes(root), 'no absolute path in the error');
+    assertError(await h.env('gcr_import_export', { path: join(root, 'wrong-shape.zip'), accountLabel: 'shape' }), 'IMPORT_UNSUPPORTED_FORMAT');
+    const folder = await h.env('gcr_import_export', { path: join(root, 'empty-folder'), accountLabel: 'folder-empty' });
+    assert.equal(folder.ok, false);
+    assert.match(folder.error?.code ?? '', /^IMPORT_/);
+    assert.equal(((await h.env('gcr_list', { allBatches: true })).data as { total: number }).total, before, 'a refused import stores nothing');
   });
 
   it('import needs the write switch even for an allowed path', async () => {

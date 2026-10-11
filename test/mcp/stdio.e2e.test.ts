@@ -24,6 +24,7 @@ import {
   INITIALIZED,
   INJECTION,
   LINE_SEPARATOR,
+  NEXT_LINE,
   PARAGRAPH_SEPARATOR,
   assertOnlyJsonRpcFrames,
   callTool,
@@ -169,8 +170,8 @@ describe('raw bytes on stdout', () => {
 
     const injection = frames.find((f) => f['id'] === 4) as { result: { structuredContent: { data: { thread: { messages: Array<{ text: string }> } } } } };
     const text = injection.result.structuredContent.data.thread.messages[1]?.text ?? '';
-    assert.ok(text.includes(LINE_SEPARATOR) && text.includes(PARAGRAPH_SEPARATOR), 'the separators survive the round trip as data');
-    assert.ok(bytes.toString('utf8').includes('\\u2028'), 'and cross the wire as escapes, never raw');
+    assert.ok(text.includes(LINE_SEPARATOR) && text.includes(PARAGRAPH_SEPARATOR) && text.includes(NEXT_LINE), 'the separators survive the round trip as data');
+    for (const escape of ['\\u2028', '\\u2029', '\\u0085']) assert.ok(bytes.toString('utf8').includes(escape), `${escape} crosses the wire as an escape, never raw`);
     assert.ok(bytes.toString('utf8').includes(INJECTION.fakeFrame.replaceAll('"', '\\"')), 'the fake frame travels only as an escaped string inside a result');
 
     const big = frames.find((f) => f['id'] === 15) as { result: { structuredContent: { truncated: boolean } } };
@@ -243,7 +244,13 @@ describe('shutdown', () => {
 
   it('a signal that arrives before any request is handled the same way', async () => {
     const c = spawnRaw(['--db', fx.dbPath]);
-    await new Promise((resolve) => setTimeout(resolve, 400)); // let it start; there is no protocol traffic at all
+    // Wait until the server says it is ready (its signal handlers are installed by then): a fixed sleep is a race on a loaded
+    // machine, and a signal that arrives while the process is still starting is simply Node's default (terminate).
+    const deadline = Date.now() + 20_000;
+    while (!c.stderr().includes('"msg":"mcp_ready"')) {
+      assert.ok(Date.now() < deadline, 'the server became ready');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     c.child.kill('SIGTERM');
     assert.deepEqual(await finished(c), { code: 0, signal: null });
     assert.equal(c.stdout().length, 0, 'an idle server writes nothing to stdout');
@@ -493,10 +500,11 @@ describe('the stdout guard', () => {
     assert.equal(r.stdout, 'NOISE\n');
   });
 
-  it('escapeLineSeparators rewrites exactly the two separators and nothing else', () => {
-    const text = `{"a":"x${LINE_SEPARATOR}y${PARAGRAPH_SEPARATOR}z","b":"\\n plain é \u{1F600}"}`;
+  it('escapeLineSeparators rewrites exactly the three line-breaking characters and nothing else', () => {
+    const backslash = String.fromCharCode(0x5c);
+    const text = `{"a":"x${LINE_SEPARATOR}y${PARAGRAPH_SEPARATOR}z${NEXT_LINE}w","b":"${backslash}n plain caf${String.fromCharCode(0xe9)} ${String.fromCodePoint(0x1f600)}"}`;
     const escaped = escapeLineSeparators(text);
-    assert.equal(escaped, '{"a":"x\\u2028y\\u2029z","b":"\\n plain é \u{1F600}"}');
+    assert.equal(escaped, `{"a":"x${backslash}u2028y${backslash}u2029z${backslash}u0085w","b":"${backslash}n plain caf${String.fromCharCode(0xe9)} ${String.fromCodePoint(0x1f600)}"}`);
     assert.deepEqual(JSON.parse(escaped), JSON.parse(text), 'identical after parsing');
     assert.equal(escapeLineSeparators('no separators here'), 'no separators here');
   });

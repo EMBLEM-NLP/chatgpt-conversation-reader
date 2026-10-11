@@ -29,7 +29,7 @@ export interface GcrMcpServerOptions {
   allowWrites?: boolean;
   /** Canonical roots from `parseApprovedRoots`. Default: none, which disables `gcr_import_export`. */
   approvedImportRoots?: ApprovedRoots;
-  /** Result size cap in bytes, 8192 to 4194304. Default: GCR_MCP_MAX_RESULT_BYTES, else 200000. */
+  /** Result size cap in bytes, 8192 to 3000000. Default: GCR_MCP_MAX_RESULT_BYTES, else 200000. */
   maxResultBytes?: number;
   /** Legacy tool names (ADR-0002: empty by default). */
   aliases?: AliasTable;

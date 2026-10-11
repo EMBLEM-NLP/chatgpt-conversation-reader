@@ -8,6 +8,10 @@
  *    registered with the SDK: that is what drives `tools/list`, schemas and capabilities) this module installs its own
  *    `tools/call` handler through the public `server.server.setRequestHandler`. It validates with the SAME strict zod object
  *    that was advertised. An unknown tool is a JSON-RPC error (-32602), which is what the protocol prescribes for it.
+ *  - The SDK's own guard against hostile argument sizes (`maxToolInputElements`) lives in the handler that this module replaces,
+ *    so it is re-implemented here: BEFORE zod looks at the arguments, their total number of values is bounded
+ *    (`MAX_INPUT_ELEMENTS`). Without it a few megabytes of JSON (a million bad array elements) made zod build a million issues:
+ *    seconds of blocked event loop and hundreds of megabytes of memory, for one call of a tool that takes at most ten values.
  *  - ONE error path: `GcrError` -> its envelope; anything else -> the generic INTERNAL_ERROR (raw messages can embed paths
  *    or conversation text). Only the error NAME is logged, never its message.
  *  - A server-side deadline per call (`AbortSignal.any([client signal, AbortSignal.timeout(ms)])`), because the SDK has none
@@ -39,6 +43,44 @@ export type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 /** Names the protocol allows and that every client can show: letters, digits, `_`, `-`, `.`. */
 export const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/;
+
+/**
+ * A usable tool name: a string of the allowed shape that is not a property every plain object already has (`constructor`,
+ * `toString`, `__proto__`, ...). The SDK keeps its tools in a plain object and would answer such a name with an untyped
+ * "already registered" Error (or, for `__proto__`, misbehave), so it is refused here with a coded error instead.
+ */
+export function isLegalToolName(name: unknown): name is string {
+  return typeof name === 'string' && TOOL_NAME_PATTERN.test(name) && !(name in Object.prototype);
+}
+
+/** Most values (array elements and object members, at any depth) that the arguments of one call may hold. Real calls hold fewer than fifty. */
+export const MAX_INPUT_ELEMENTS = 1000;
+
+/**
+ * true when `value` holds more than `max` values in total: every array element and every object member counts one, nested
+ * containers count themselves and then their contents. Iterative (no recursion limit for deeply nested input) and it stops at
+ * the first excess, so hostile input costs at most `max` steps whatever its size.
+ */
+export function exceedsElementBudget(value: unknown, max: number = MAX_INPUT_ELEMENTS): boolean {
+  let budget = max;
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (typeof current !== 'object' || current === null) continue;
+    if (Array.isArray(current)) {
+      budget -= current.length;
+      if (budget < 0) return true;
+      for (const item of current) if (typeof item === 'object' && item !== null) stack.push(item);
+    } else {
+      for (const key in current) {
+        if (--budget < 0) return true;
+        const member = (current as Record<string, unknown>)[key];
+        if (typeof member === 'object' && member !== null) stack.push(member);
+      }
+    }
+  }
+  return false;
+}
 
 export interface ToolRuntime {
   /** Cap for the serialized envelope in bytes (see envelope.ts). */
@@ -126,6 +168,13 @@ function invalidArguments(tool: string, error: z.ZodError): GcrError {
   });
 }
 
+function tooManyElements(tool: string): GcrError {
+  return new GcrError('INVALID_ARGUMENT', `The arguments for ${tool} hold too many values.`, {
+    remedy: 'Send only the documented fields with short lists: no tool takes more than a few dozen values in total.',
+    details: { reason: 'too_many_elements', max: MAX_INPUT_ELEMENTS },
+  });
+}
+
 /** Stop waiting for `work` when `signal` fires. `work` keeps running; its late outcome is swallowed so it cannot go unhandled. */
 export function abortable<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
   if (signal.aborted) {
@@ -195,7 +244,7 @@ export class ToolRegistry {
 
   /** Register `entry` with the SDK under `name` (an alias when `canonical` differs) and make sure our dispatch is installed. */
   add(server: McpServer, entry: ToolEntry, name: string, canonical: string): void {
-    if (!TOOL_NAME_PATTERN.test(name)) throw new GcrError('INVALID_ARGUMENT', 'A tool name may only contain letters, digits, "_", "-" and "." (1-128 characters).');
+    if (!isLegalToolName(name)) throw new GcrError('INVALID_ARGUMENT', 'A tool name may only contain letters, digits, "_", "-" and "." (1-128 characters) and must not be a property every object has.');
     if (this.byName.has(name)) throw new GcrError('INVALID_ARGUMENT', `Tool ${name} is already registered.`);
     const alias = name !== canonical;
     const description = alias ? `${entry.description} (Deprecated alias of ${canonical}: use ${canonical}.)` : entry.description;
@@ -232,6 +281,8 @@ export class ToolRegistry {
 
     let args: unknown;
     try {
+      // Before zod: validation allocates one issue per bad value, so the cost of a hostile call must be bounded first.
+      if (exceedsElementBudget(rawArgs)) return errorEnvelope(tooManyElements(name));
       const parsed = entry.input.safeParse(rawArgs ?? {});
       if (!parsed.success) return errorEnvelope(invalidArguments(name, parsed.error));
       args = parsed.data;
