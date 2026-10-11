@@ -32,6 +32,13 @@ import { SCHEMA_VERSION } from '../version.js';
 /** `PRAGMA application_id` written by migration 1 ("GCR1"); lets us refuse to touch somebody else's SQLite file. */
 export const GCR_APPLICATION_ID = 0x47435231;
 
+/**
+ * Generation of the indexed representation, stored in gcr_meta('fts_design'). v2: buildSearchText() turns every non-token
+ * character into a space before SQLite tokenizes (v1 let SQLite glue newer symbols/emoji onto neighbouring words). A database
+ * whose marker is older keeps working but misses such words; Repository.rebuildSearchIndex() re-indexes it and updates the marker.
+ */
+export const FTS_DESIGN = 'contentless-unicode61-v2';
+
 /** Tokenizer shared by both FTS tables; see the design notes above and cjk.ts for why plain unicode61 is not enough. */
 const FTS_TOKENIZE = `unicode61 remove_diacritics 2 categories 'L* N* Co Mn Mc'`;
 
@@ -169,7 +176,7 @@ CREATE TABLE graph_communities (community_id INTEGER PRIMARY KEY, size INTEGER N
 function migrateV1(db: DatabaseSync): void {
   db.exec(DDL_V1);
   db.exec(`PRAGMA application_id = ${GCR_APPLICATION_ID}`);
-  db.prepare('INSERT INTO gcr_meta (key, value) VALUES (?, ?)').run('fts_design', 'contentless-unicode61-v1');
+  db.prepare('INSERT INTO gcr_meta (key, value) VALUES (?, ?)').run('fts_design', FTS_DESIGN);
 }
 
 /** Ordered, gap-free list of migrations. `up` must run entirely inside the transaction applyMigrations opens. */

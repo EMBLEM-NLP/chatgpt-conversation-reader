@@ -4,13 +4,13 @@
  * suite left open. All data is synthetic.
  */
 import assert from 'node:assert/strict';
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { GcrError } from '../../src/errors.js';
 import { SCHEMA_VERSION } from '../../src/version.js';
-import { closeDatabase, isSqliteError, openDatabase, sqliteErrcode } from '../../src/db/open.js';
+import { closeDatabase, isSqliteError, openDatabase, sqliteErrcode, toDbError } from '../../src/db/open.js';
 import { GCR_APPLICATION_ID, MIGRATIONS, applyMigrations, assertCompatible, readUserVersion } from '../../src/db/schema.js';
 import type { Migration } from '../../src/db/schema.js';
 import { withTempDir } from '../helpers/tmp.js';
@@ -100,6 +100,21 @@ describe('lock contention while migrating is reported as busy, not as a failed m
         loser.close();
       }
     });
+  });
+});
+
+describe('a failed BEGIN IMMEDIATE never rolls back a transaction that belongs to the caller', () => {
+  it('applyMigrations inside a caller-owned transaction reports DB_MIGRATION_FAILED and leaves that transaction open', () => {
+    const raw = new DatabaseSync(':memory:');
+    try {
+      raw.exec('BEGIN');
+      assert.throws(() => applyMigrations(raw), expectGcr('DB_MIGRATION_FAILED'));
+      assert.equal(raw.isTransaction, true, 'the caller\'s transaction was rolled back');
+      raw.exec('COMMIT');
+      assert.equal(readUserVersion(raw), 0, 'nothing was applied');
+    } finally {
+      raw.close();
+    }
   });
 });
 
@@ -274,5 +289,131 @@ describe('open modes: boundaries', () => {
         closeDatabase(h);
       }
     });
+  });
+});
+
+describe('toDbError maps every SQLite result class to a fixed, content-free GcrError', () => {
+  const sqliteLike = (errcode: number, message = 'SECRET-SQL-TEXT /abs/path/secret.db'): Error => Object.assign(new Error(message), { code: 'ERR_SQLITE_ERROR', errcode });
+
+  it('table of primary/extended result codes (extended codes are masked to their primary class)', () => {
+    const table: Array<[number, string, string | null]> = [
+      [5, 'DB_ERROR', 'busy'],
+      [261, 'DB_ERROR', 'busy'], // SQLITE_BUSY_RECOVERY
+      [6, 'DB_ERROR', 'busy'],
+      [8, 'WRITE_FORBIDDEN', null],
+      [1032, 'WRITE_FORBIDDEN', null], // SQLITE_READONLY_DBMOVED
+      [11, 'DB_ERROR', 'corrupt'],
+      [13, 'DB_ERROR', 'full'],
+      [14, 'DB_ERROR', 'cannot_open'],
+      [19, 'DB_ERROR', 'constraint'],
+      [1555, 'DB_ERROR', 'constraint'], // SQLITE_CONSTRAINT_PRIMARYKEY
+      [26, 'DB_ERROR', 'not_a_database'],
+      [1, 'DB_ERROR', null],
+      [999, 'DB_ERROR', null],
+    ];
+    for (const [errcode, code, reason] of table) {
+      const mapped = toDbError(sqliteLike(errcode));
+      assert.equal(mapped.code, code, `errcode ${errcode}`);
+      assert.equal((mapped.details as { reason?: string } | undefined)?.reason ?? null, reason, `errcode ${errcode}`);
+      const shown = JSON.stringify(mapped.toEnvelope());
+      assert.ok(!shown.includes('SECRET') && !shown.includes('/abs/path'), `errcode ${errcode} leaked SQLite text: ${shown}`);
+    }
+  });
+
+  it('only the trigger\'s own fixed message is recognized as the immutability violation', () => {
+    assert.deepEqual((toDbError(sqliteLike(19, 'constraint failed: imported data is immutable')).details as { reason: string }).reason, 'immutable');
+    assert.deepEqual((toDbError(sqliteLike(19, 'UNIQUE constraint failed: x.y')).details as { reason: string }).reason, 'constraint');
+  });
+
+  it('a closed handle (ERR_INVALID_STATE "database is not open") is reported as such; other invalid states stay generic', () => {
+    const closed = Object.assign(new Error('database is not open'), { code: 'ERR_INVALID_STATE' });
+    const mapped = toDbError(closed);
+    assert.equal(mapped.code, 'DB_ERROR');
+    assert.equal((mapped.details as { reason?: string }).reason, 'closed');
+    assert.ok(!mapped.message.includes('not open'));
+    const other = toDbError(Object.assign(new Error('statement has been finalized'), { code: 'ERR_INVALID_STATE' }));
+    assert.equal(other.message, 'A database operation failed.');
+  });
+
+  it('values that are not SQLite errors become a generic DB_ERROR, even when they look like one', () => {
+    for (const v of [undefined, null, 'ERR_SQLITE_ERROR', 7, { code: 'ERR_SQLITE_ERROR', errcode: 5 }, Object.assign(new Error('x'), { errcode: 5 })]) {
+      const mapped = toDbError(v);
+      assert.equal(mapped.code, 'DB_ERROR');
+      assert.equal(mapped.message, 'A database operation failed.');
+    }
+  });
+});
+
+describe('readUserVersion', () => {
+  it('is 0 for a brand-new database and tracks PRAGMA user_version exactly (including large values)', () => {
+    const raw = new DatabaseSync(':memory:');
+    try {
+      assert.equal(readUserVersion(raw), 0);
+      raw.exec('PRAGMA user_version = 2147483647');
+      assert.equal(readUserVersion(raw), 2147483647);
+    } finally {
+      raw.close();
+    }
+  });
+});
+
+describe('the schema satisfies the documented contract (docs/ARCHITECTURE.md section 3)', () => {
+  /** Run the DDL of section 3 into a scratch database; comments (including the FTS / trigger design notes) are dropped. */
+  function documentedSchema(): DatabaseSync {
+    const doc = readFileSync(new URL('../../../docs/ARCHITECTURE.md', import.meta.url), 'utf8');
+    const start = doc.indexOf('## 3. SQLite schema v1');
+    const end = doc.indexOf('### Migrations');
+    assert.ok(start >= 0 && end > start, 'section 3 of ARCHITECTURE.md must still contain the schema contract');
+    const sql = [...doc.slice(start, end).matchAll(/```sql\n([\s\S]*?)```/g)]
+      .map((m) => m[1] ?? '')
+      .join('\n')
+      .split('\n')
+      .map((line) => line.replace(/--.*$/, ''))
+      .join('\n');
+    const ref = new DatabaseSync(':memory:');
+    for (const statement of sql.split(/;\s*\n/).map((x) => x.trim())) {
+      if (/^CREATE (TABLE|INDEX)/i.test(statement)) ref.exec(statement);
+    }
+    return ref;
+  }
+
+  function describeTable(db: DatabaseSync, table: string): unknown {
+    const cols = db.prepare(`PRAGMA table_xinfo(${table})`).all().map((c) => [c['name'], c['type'], c['notnull'], c['dflt_value'], c['pk']]);
+    const fks = db.prepare(`PRAGMA foreign_key_list(${table})`).all().map((f) => [f['table'], f['from'], f['to']]);
+    const strict = db.prepare('SELECT strict FROM pragma_table_list WHERE name = ?').get(table)?.['strict'];
+    return { cols, fks, strict };
+  }
+
+  it('every documented table exists with the same columns, types, NOT NULL, defaults, primary keys, foreign keys and STRICT flag', () => {
+    const ref = documentedSchema();
+    const real = openDatabase(':memory:').db;
+    try {
+      const tables = ref
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")
+        .all()
+        .map((r) => String(r['name']));
+      assert.ok(tables.length >= 14, `the documented DDL defines ${tables.length} tables`);
+      for (const t of tables) assert.deepEqual(describeTable(real, t), describeTable(ref, t), `table ${t}`);
+      const realIndexes = new Set(real.prepare("SELECT name FROM sqlite_schema WHERE type = 'index'").all().map((r) => String(r['name'])));
+      for (const r of ref.prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").all()) {
+        assert.ok(realIndexes.has(String(r['name'])), `documented index ${String(r['name'])}`);
+      }
+    } finally {
+      ref.close();
+      real.close();
+    }
+  });
+
+  it('the documented immutability triggers exist for the three imported tables (plus the helper table), by name', () => {
+    const real = openDatabase(':memory:').db;
+    try {
+      const triggers = new Set(real.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger'").all().map((r) => String(r['name'])));
+      for (const t of ['source_batches', 'conversations', 'messages']) {
+        assert.ok(triggers.has(`${t}_no_update`) && triggers.has(`${t}_no_delete`), t);
+      }
+      assert.ok(triggers.has('local_audit_log_no_update') && triggers.has('local_audit_log_no_delete'));
+    } finally {
+      real.close();
+    }
   });
 });

@@ -198,6 +198,11 @@ describe('node ids: parsing and injectivity', () => {
     }
   });
 
+  it('an id built from an unknown entity kind is not a node id', () => {
+    assert.equal(parseNodeId(entityNodeId('bogus' as never, 'x')), null);
+    assert.equal(parseNodeId(entityNodeId('email' as never, 'a@b.org')), null);
+  });
+
   it('entity ids with colons in the normalized part keep their kind', () => {
     assert.deepEqual(parseNodeId(entityNodeId('timestamp', '2025-01-15T10:30:00Z')), { type: 'entity', kind: 'timestamp', normalized: '2025-01-15T10:30:00Z' });
     assert.deepEqual(parseNodeId(entityNodeId('url', 'example.com:8080/a:b')), { type: 'entity', kind: 'url', normalized: 'example.com:8080/a:b' });

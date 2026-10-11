@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import fc from 'fast-check';
-import { buildSearchText, isCjkChar, iterateSearchTokens, parsePlainQuery, prepareRawQuery, splitCjk, tokenizeQuery } from '../../src/db/cjk.js';
+import { buildSearchText, isCjkChar, iterateSearchTokens, normalizeForSearch, parsePlainQuery, prepareRawQuery, rawQueryTerms, splitCjk, tokenizeQuery } from '../../src/db/cjk.js';
 import { openDatabase } from '../../src/db/open.js';
 
 const SEED = 20261014;
@@ -159,5 +159,31 @@ describe('index text is tokenized by SQLite exactly like the JS tokenizer (diffe
     assert.ok(!prepareRawQuery('100₽ OR "pay \u{1F916}"').includes('\u{1F916}'));
     const kept = prepareRawQuery('a* OR (b NOT "c d") NEAR(e f, 3) search_text:g ^h');
     for (const syntax of ['*', 'OR', '(', ')', 'NOT', '"', 'NEAR(', ',', ':', '^']) assert.ok(kept.includes(syntax), `lost ${syntax}`);
+  });
+});
+
+describe('negative and boundary cases of the remaining helpers', () => {
+  it('iterateSearchTokens yields nothing for empty text, an empty or inverted range, and a start beyond the end', () => {
+    assert.deepEqual([...iterateSearchTokens('')], []);
+    assert.deepEqual([...iterateSearchTokens('alpha beta', 4, 4)], []);
+    assert.deepEqual([...iterateSearchTokens('alpha beta', 8, 2)], []);
+    assert.deepEqual([...iterateSearchTokens('alpha beta', 99)], []);
+    assert.deepEqual([...iterateSearchTokens('alpha beta', -5, 5)].map((t) => t.norm), ['alpha']);
+    assert.deepEqual([...iterateSearchTokens('   ...   \n\t')], []);
+  });
+
+  it('prepareRawQuery and rawQueryTerms of nothing, or of only operators, are empty', () => {
+    assert.equal(prepareRawQuery(''), '');
+    assert.deepEqual(rawQueryTerms(''), []);
+    assert.deepEqual(rawQueryTerms('AND OR NOT NEAR'), []);
+    assert.deepEqual(rawQueryTerms('title_text: ( ) , 5'), [{ tokens: ['5'], prefix: false }]);
+  });
+
+  it('normalizeForSearch and buildSearchText are total: lone surrogates, control characters and empty input never throw', () => {
+    for (const s of ['', '\uD800', '\uDC00x', 'a\u0000b'.replace('\u0000', ' '), '\u0001\u0002', '\uFFFE\uFFFF', '\u{10FFFF}']) {
+      assert.doesNotThrow(() => normalizeForSearch(s), JSON.stringify(s));
+      assert.doesNotThrow(() => buildSearchText(s), JSON.stringify(s));
+    }
+    assert.equal(buildSearchText('\uD800'), ' ', 'a lone surrogate is a separator, never part of the indexed text');
   });
 });

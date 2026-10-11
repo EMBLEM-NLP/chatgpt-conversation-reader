@@ -183,9 +183,10 @@ const LOCAL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const MAX_REF_CHARS = 512;
 const MAX_OFFSET = 10_000_000;
 /**
- * Free text is rejected without further work above this many UTF-16 code units. A string can legitimately exceed the
- * byte limit before NUL stripping only by being mostly NUL, so a generous multiple of the limit keeps all valid input
- * while bounding the work an absurd argument can cause.
+ * Free text is rejected without further work above this many UTF-16 code units (limit x 16). Below it a string may
+ * exceed the byte limit before NUL stripping only by being mostly NUL, and such padded input is still accepted. Above
+ * it, input that would be valid after stripping (megabytes of NUL around a few real characters) is refused on purpose:
+ * this is a work bound for absurd arguments, a deliberate stricter-than-SPEC edge, not a statement about the content.
  */
 const PRE_STRIP_FACTOR = 16;
 /** Work bound for titles before NUL stripping (UTF-16 code units); see titleOf. */
@@ -322,7 +323,8 @@ function pagingOf(limitIn: unknown, offsetIn: unknown): { limit: number; offset:
   if (typeof offset !== 'number' || !Number.isInteger(offset) || offset < 0 || offset > MAX_OFFSET) {
     throw badArg('offset', 'expected a non-negative integer');
   }
-  return { limit, offset };
+  // `offset === 0` is also true for -0 (which Number.isInteger accepts): report the canonical +0, never a signed zero.
+  return { limit, offset: offset === 0 ? 0 : offset };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -738,12 +740,40 @@ export class LocalStore {
     }
   }
 
-  /** SQLite errors from read paths become GcrErrors with fixed, content-free messages; anything else passes through unchanged. */
+  /**
+   * Read paths only (they never call the injected clock or id factory). Every failure becomes a GcrError with a fixed,
+   * content-free message: SQLite errors by their result code, and anything else (for example the plain Error node:sqlite
+   * throws for a CLOSED connection) as DB_ERROR with the original kept as `cause`. A GcrError passes through unchanged.
+   */
   private guard<T>(fn: () => T): T {
     try {
       return fn();
     } catch (e) {
-      throw isSqliteError(e) ? toDbError(e) : e;
+      throw toDbError(e);
+    }
+  }
+
+  /**
+   * Run read-only `fn` against ONE snapshot. Two statements issued in autocommit mode (a count, then the page) are two
+   * snapshots: a commit from another connection between them makes `total` and the items disagree. Inside a transaction
+   * that the caller already owns everything shares one snapshot, so nothing is started and nothing is committed on the
+   * caller's behalf.
+   */
+  private snapshot<T>(fn: () => T): T {
+    const db = this.db;
+    if (db.isTransaction) return fn();
+    db.exec('BEGIN');
+    try {
+      const out = fn();
+      db.exec('COMMIT');
+      return out;
+    } catch (e) {
+      try {
+        if (db.isTransaction) db.exec('ROLLBACK');
+      } catch {
+        /* the first failure is the one worth reporting */
+      }
+      throw e;
     }
   }
 
@@ -870,15 +900,18 @@ export class LocalStore {
       throw new GcrError('INTERNAL_ERROR', 'A local listing was built from an unapproved SQL fragment and was refused.', { details: { reason: 'unapproved_sql_fragment' } });
     }
     const where = conds.length === 0 ? '' : ` WHERE ${conds.join(' AND ')}`;
-    return this.guard(() => {
-      const total = rowNumber(this.db.prepare(`SELECT count(*) AS n FROM ${table}${where}`).get(...params) ?? {}, 'n');
-      const items = this.db
-        .prepare(`SELECT * FROM ${table}${where} ${PAGE_ORDER} LIMIT ? OFFSET ?`)
-        .all(...params, limit, offset)
-        .map(map);
-      const next = offset + items.length;
-      return { items, limit, offset, total, nextOffset: next < total ? next : null };
-    });
+    return this.guard(() =>
+      // total and items must describe the same moment, hence one snapshot for both statements.
+      this.snapshot(() => {
+        const total = rowNumber(this.db.prepare(`SELECT count(*) AS n FROM ${table}${where}`).get(...params) ?? {}, 'n');
+        const items = this.db
+          .prepare(`SELECT * FROM ${table}${where} ${PAGE_ORDER} LIMIT ? OFFSET ?`)
+          .all(...params, limit, offset)
+          .map(map);
+        const next = offset + items.length;
+        return { items, limit, offset, total, nextOffset: next < total ? next : null };
+      }),
+    );
   }
 }
 
@@ -921,16 +954,23 @@ function addConversationConds(ref: ParsedRef, conds: string[], params: SQLInputV
  */
 export function verifyAuditLog(db: DatabaseSync): { rows: number; ok: boolean } {
   try {
-    const agg = db.prepare('SELECT count(*) AS n, min(seq) AS lo, max(seq) AS hi FROM local_audit_log').get();
-    const issued = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'local_audit_log'").get();
-    const rows = agg === undefined ? 0 : rowNumber(agg, 'n');
-    const highestIssued = issued === undefined ? 0 : rowNumber(issued, 'seq');
+    // ONE statement, hence one snapshot: the row figures and the issued counter must describe the same moment. Read as two
+    // statements, an append committed by another connection in between would be reported as tampering (rows = n,
+    // counter = n + 1) although nothing was wrong.
+    const agg = db
+      .prepare(
+        'SELECT count(*) AS n, min(seq) AS lo, max(seq) AS hi, ' +
+          "(SELECT seq FROM sqlite_sequence WHERE name = 'local_audit_log') AS issued FROM local_audit_log",
+      )
+      .get() ?? {}; // an aggregate always yields one row; the fallback only satisfies the type
+    const rows = rowNumber(agg, 'n');
+    const highestIssued = rowNumber(agg, 'issued'); // NULL (never issued) reads as 0
     if (rows === 0) return { rows, ok: highestIssued === 0 };
     // seq is a PRIMARY KEY, so n distinct integers with min 1 and max n are exactly 1..n.
-    const lo = agg === undefined ? 0 : rowNumber(agg, 'lo');
-    const hi = agg === undefined ? 0 : rowNumber(agg, 'hi');
+    const lo = rowNumber(agg, 'lo');
+    const hi = rowNumber(agg, 'hi');
     return { rows, ok: lo === 1 && hi === rows && highestIssued === rows };
   } catch (e) {
-    throw isSqliteError(e) ? toDbError(e) : e;
+    throw toDbError(e);
   }
 }

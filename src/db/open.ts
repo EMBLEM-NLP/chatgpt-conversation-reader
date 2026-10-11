@@ -74,6 +74,12 @@ export function sqliteErrcode(e: unknown): number | null {
  */
 export function toDbError(e: unknown): GcrError {
   if (e instanceof GcrError) return e;
+  // node:sqlite refuses every call on a closed handle with ERR_INVALID_STATE ("database is not open"): a usage error that
+  // deserves a precise, content-free answer rather than the generic fallback (or, worse, escaping as a raw Error).
+  const state = e as { code?: unknown; message?: unknown } | null;
+  if (state?.code === 'ERR_INVALID_STATE' && typeof state.message === 'string' && state.message.includes('not open')) {
+    return new GcrError('DB_ERROR', 'The database connection is closed.', { remedy: 'Open the database again.', details: { reason: 'closed' }, cause: e });
+  }
   const code = sqliteErrcode(e);
   if (code !== null) {
     const primary = code & 0xff;

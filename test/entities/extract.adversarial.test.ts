@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { GcrError } from '../../src/errors.js';
-import { ENTITY_KINDS, extractEntities, isEntityKind, normalizeNfkc, sanitizeUrl } from '../../src/entities/extract.js';
+import { ENTITY_KINDS, exceedsTextCap, extractEntities, isEntityKind, normalizeNfkc, sanitizeUrl } from '../../src/entities/extract.js';
 import type { ExtractedEntity } from '../../src/entities/extract.js';
 
 function ofKind(entities: readonly ExtractedEntity[], kind: ExtractedEntity['kind']): string[] {
@@ -71,6 +71,40 @@ describe('defects found by review: secrets next to URL-shaped text that is not a
     const e = extractEntities({ text });
     assert.deepEqual(ofKind(e, 'url'), ['example.com/p', 'host.example.org:8080/q']);
     assert.equal(JSON.stringify(e).includes('zqx'), false);
+  });
+});
+
+describe('defects found by review: an e-mail address inside a URL path is PII too', () => {
+  // E-mail addresses are blanked from the text before keyword extraction, but a path such as
+  // /unsubscribe/jane.doe@example.org was stored verbatim as part of the URL entity (value, normalized and node label).
+  const urls = (text: string): string[] => ofKind(extractEntities({ text }), 'url');
+
+  it('the path is cut before the segment that holds the address, and nothing after it is kept', () => {
+    assert.deepEqual(urls('https://x.example.com/unsubscribe/jane.doe@example.org'), ['x.example.com/unsubscribe/']);
+    assert.deepEqual(urls('https://x.example.com/u/a@b.org/zqxtoken/more?k=1'), ['x.example.com/u/']);
+    assert.deepEqual(urls('https://x.example.com/jane@example.org'), ['x.example.com/']);
+    assert.deepEqual(urls('https://mastodon.example/@jane@mastodon.example/12345'), ['mastodon.example/']);
+    const dump = dumpOf('see https://x.example.com/u/jane.doe@example.org/zqxtoken now');
+    for (const part of ['jane', 'doe', 'example.org', 'zqxtoken', '@']) assert.equal(dump.includes(part), false, part);
+  });
+
+  it('the sanitised value (what graph nodes show) has the same cut', () => {
+    const e = extractEntities({ text: 'https://x.example.com/unsubscribe/jane.doe@example.org' }).find((x) => x.kind === 'url');
+    assert.equal(e?.value, 'https://x.example.com/unsubscribe/');
+    assert.deepEqual(sanitizeUrl('https://x.example.com/unsubscribe/jane.doe@example.org'), { value: 'https://x.example.com/unsubscribe/', normalized: 'x.example.com/unsubscribe/' });
+  });
+
+  it('look-alikes that are not addresses keep their path: version pins, scoped packages, handles, bare @', () => {
+    for (const url of [
+      'https://cdn.example.net/npm/lodash@4.17.21/lodash.min.js',
+      'https://unpkg.example/react@18.3.1/umd/react.js',
+      'https://cdn.example.net/npm/pkg@latest/x.js',
+      'https://registry.example/@scope/pkg/-/pkg-1.0.0.tgz',
+      'https://medium.example/@writer/post-123',
+      'https://git.example/org/repo/blob/main/a@b',
+    ]) {
+      assert.deepEqual(urls(url), [url.replace(/^https:\/\//, '')], url);
+    }
   });
 });
 
@@ -164,6 +198,19 @@ describe('defects found by review: every extracted string is well-formed UTF-16'
 });
 
 describe('negative tests for every exported function', () => {
+  it('exceedsTextCap is true exactly when the extractor would not look at the whole text', () => {
+    assert.equal(exceedsTextCap('', 10), false);
+    assert.equal(exceedsTextCap('a'.repeat(10), 10), false);
+    assert.equal(exceedsTextCap('a'.repeat(11), 10), true);
+    assert.equal(exceedsTextCap('\u{E9}'.repeat(10), 10), false, 'accents do not expand');
+    assert.equal(exceedsTextCap('\u{E9}'.repeat(11), 10), true);
+    assert.equal(exceedsTextCap('\u{FDFA}', 17), true, 'one U+FDFA becomes 18 units');
+    assert.equal(exceedsTextCap('\u{FDFA}', 18), false);
+    assert.equal(exceedsTextCap('\u{FDFA}'.repeat(3), 53), true);
+    assert.equal(exceedsTextCap('\u{FDFA}'.repeat(3), 54), false);
+    assert.equal(exceedsTextCap('x'.repeat(1000) + '\u{FDFA}', 1000), true);
+  });
+
   it('sanitizeUrl returns null for everything that is not exactly one acceptable http(s) URL', () => {
     for (const bad of ['', '   ', 'plain text', 'ftp://example.com/', 'javascript:alert(1)', 'data:text/html,hi', 'http://', 'http://-x.example/', 'http://a..b/', `http://x.example/${'a'.repeat(2100)}`]) {
       assert.equal(sanitizeUrl(bad), null, bad);

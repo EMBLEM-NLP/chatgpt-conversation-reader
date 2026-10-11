@@ -352,9 +352,17 @@ function parseUrlCandidate(core: string, start: number): Omit<UrlHit, 'start' | 
   const hp = parseHostPort(authority.slice(userinfoLen), scheme);
   if (hp === null) return null;
   const hostPort = hp.port === '' ? hp.host : `${hp.host}:${hp.port}`;
-  const path = pathRaw === '' ? '/' : pathRaw;
+  let path = pathRaw === '' ? '/' : pathRaw;
   const secretRanges: Range[] = [];
   if (userinfoLen > 0) secretRanges.push([start + authStart, start + authStart + userinfoLen]);
+  // An e-mail address in the path is PII (see findEmailRanges): the path is cut before the segment that holds it, and the
+  // cut-off rest is blanked for the other passes like a query string.
+  const email = findEmailRanges(pathRaw, true)[0];
+  if (email !== undefined) {
+    const keep = pathRaw.lastIndexOf('/', email[0]) + 1; // pathRaw starts with '/', so this is at least 1
+    path = pathRaw.slice(0, keep);
+    secretRanges.push([start + i + keep, start + j]);
+  }
   if (j < core.length) secretRanges.push([start + j, start + core.length]);
   return { value: `${scheme}://${hostPort}${path}`, normalized: `${hostPort}${path}`, secretRanges };
 }
@@ -485,8 +493,9 @@ function isEmailDomainChar(ch: string): boolean {
 /**
  * Ranges of e-mail-shaped substrings. Anchored on '@' and bounded to 64 + 255 characters around it, so the cost per '@'
  * is constant (a regex such as `[\w.]+@[\w.]+\.\w+` is quadratic on long runs of word characters).
+ * `alphabeticTld` (used for URL paths) additionally requires the top-level domain to consist of letters only.
  */
-function findEmailRanges(text: string): Range[] {
+function findEmailRanges(text: string, alphabeticTld = false): Range[] {
   const out: Range[] = [];
   let from = 0;
   for (;;) {
@@ -503,6 +512,8 @@ function findEmailRanges(text: string): Range[] {
     const domain = text.slice(at + 1, domainEnd);
     const lastDot = domain.lastIndexOf('.');
     if (lastDot < 1 || domain.length - lastDot - 1 < 2) continue; // needs "label.tld" with a tld of 2+ chars
+    // Inside URL paths only letters count as a tld, so version pins such as "lodash@4.17.21" are not addresses.
+    if (alphabeticTld && !/^\p{L}+$/u.test(domain.slice(lastDot + 1))) continue;
     out.push([left, domainEnd]);
     from = domainEnd;
   }

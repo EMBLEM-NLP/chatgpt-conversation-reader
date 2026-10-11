@@ -15,6 +15,10 @@
  *     terms from their canonical forms. We apply NFKC first, to the indexed text AND to the query, with the SAME function.
  *  4. By default it treats combining marks of Indic scripts (Mn/Mc) as separators, which tears Hindi/Tamil/... words
  *     apart; schema.ts configures `categories 'L* N* Co Mn Mc'` and the token-character class below mirrors that.
+ *  5. Its Unicode tables are older than this runtime's: currency signs (₽ ₿ ₺), emoji (🤖 🥰 🫶), bidi isolates and every
+ *     unassigned code point count as LETTERS to it, so "100₽" or "thanks🤖" became one glued token and "100" / "thanks"
+ *     found nothing. `buildSearchText` therefore turns every non-token character into a space before SQLite sees the text
+ *     (the differential test in cjk.adversarial.test.ts compares both tokenizers on every assigned code point).
  *
  * Everything here is deterministic and side-effect free (the only module state is a bounded memoization cache).
  * Imported text and queries are untrusted data: these helpers never throw on odd input and never interpret it.

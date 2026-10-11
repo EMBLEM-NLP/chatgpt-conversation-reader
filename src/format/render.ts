@@ -15,8 +15,8 @@
  *   2. Single-line fields (titles, roles, model slugs, ids, table cells) are made single-line (newlines become the
  *      visible two characters `\n`) and Markdown-escaped, or placed in code spans whose delimiter is longer than any
  *      backtick run inside.
- *   3. Compact output indents every continuation line by two spaces, so a message line can never start with "[role]"
- *      or "#" in column 0.
+ *   3. Compact output indents every continuation line (and every generic `path: value` data line) by two spaces, so
+ *      untrusted text can never start a line with "[role]", "#" or "NOTICE:" in column 0: column 0 is ours.
  *   4. `sanitizeUntrusted` replaces hazardous characters by VISIBLE escapes (`\u001B`, `\u202E`, `\u{E0041}`):
  *      C0 controls except TAB/LF, DEL, C1 controls, U+2028/2029, bidi embeddings/overrides/isolates (U+202A-202E,
  *      U+2066-2069), Unicode TAG characters (U+E0000-E007F) and lone surrogates. CR and CRLF are normalized to LF
@@ -383,6 +383,11 @@ function basenameOnly(label: string | null): string | null {
   while (start > 0 && !isSeparator(label[start - 1])) start--;
   const last = label.slice(start, end);
   return last === '' ? null : last;
+}
+
+/** The title to display, or null when it is missing, empty or only whitespace (shown as "untitled"; JSON keeps the raw value). */
+function shownTitle(title: string | null): string | null {
+  return title === null || title.trim() === '' ? null : title;
 }
 
 /** Explicit allow-list copy of a SourceSummary (drops unknown extra properties, never prints a path). */
@@ -873,7 +878,8 @@ export function renderThread(result: ThreadResult, source: SourceSummary, opts: 
       jsonlHeader: { ...threadHeader, messageCount: shapedMessages.length },
       jsonlItems: shapedMessages.map((m) => ({ type: 'message', ...m })),
       md: () => {
-        const title = conv.title === null || conv.title === '' ? '*(untitled)*' : mdInline(conv.title);
+        const shown = shownTitle(conv.title);
+        const title = shown === null ? '*(untitled)*' : mdInline(shown);
         const meta = [
           `- Conversation ID: ${codeSpan(conv.conversationId, 120)}`,
           ...singleSourceMeta(src, ro),
@@ -894,7 +900,7 @@ export function renderThread(result: ThreadResult, source: SourceSummary, opts: 
         return { title, meta, blocks };
       },
       compact: () => {
-        const title = conv.title === null || conv.title === '' ? '(untitled)' : conv.title;
+        const title = shownTitle(conv.title) ?? '(untitled)';
         return {
           header: `# ${cField(title)} | ${cField(conv.provider, 40)} | ${cField(completeness, 40)} | ${cField(result.branchId, 120)}`,
           sourceLine: `${compactSourceLine([src], ro)} | selection=${cField(result.selectionPolicy, 40)} | conversation=${cField(conv.conversationId, 120)}`,
@@ -937,7 +943,7 @@ export function renderConversationList(page: Page<ConversationSummary>, source: 
       md: () => {
         const rows = page.items.map((c, i) => [
           String(page.offset + i + 1),
-          c.title ?? '(untitled)',
+          shownTitle(c.title) ?? '(untitled)',
           c.conversationId,
           `${c.provider}/${c.accountLabel}`,
           time(c.updatedAt, ro),
@@ -957,7 +963,7 @@ export function renderConversationList(page: Page<ConversationSummary>, source: 
         sourceLine: compactSourceLine(sources, ro),
         body: page.items.map(
           (c) =>
-            `[${cRole(c.provider)}] ${cField(c.conversationId, 120)} | ${cField(c.title ?? '(untitled)')} | updated ${cField(time(c.updatedAt, ro), 80)} | ${c.messageCount} msgs | ${cField(c.completeness, 40)}`,
+            `[${cRole(c.provider)}] ${cField(c.conversationId, 120)} | ${cField(shownTitle(c.title) ?? '(untitled)')} | updated ${cField(time(c.updatedAt, ro), 80)} | ${c.messageCount} msgs | ${cField(c.completeness, 40)}`,
         ),
       }),
     },
@@ -1096,7 +1102,7 @@ export function renderSearchHits(page: Page<SearchHit>, source: SourceSummary[],
           String(page.offset + i + 1),
           time(h.createdAt, ro),
           labelled(h),
-          h.conversationTitle ?? '(untitled)',
+          shownTitle(h.conversationTitle) ?? '(untitled)',
           h.conversationId,
           h.messageId,
           `${h.provider}/${h.accountLabel}`,
@@ -1120,7 +1126,7 @@ export function renderSearchHits(page: Page<SearchHit>, source: SourceSummary[],
         header: `# search ${cField(JSON.stringify(query), 200)} | ${providerList(sources)} | ${cField(completeness, 40)} | offset=${page.offset} limit=${page.limit} hits=${items.length}`,
         sourceLine: compactSourceLine(sources, ro),
         body: shownHits.map(
-          (h) => `[${cRole(labelled(h))}] ${cField(h.conversationId, 120)}/${cField(h.messageId, 120)} ${cField(h.conversationTitle ?? '(untitled)', 120)} | ${compactSnippet(h.snippet)}`,
+          (h) => `[${cRole(labelled(h))}] ${cField(h.conversationId, 120)}/${cField(h.messageId, 120)} ${cField(shownTitle(h.conversationTitle) ?? '(untitled)', 120)} | ${compactSnippet(h.snippet)}`,
         ),
       }),
     },
@@ -1161,7 +1167,8 @@ export function renderBranchList(result: BranchListResult, source: SourceSummary
       jsonlHeader: { conversation: shapeSummary(conv), activeBranchId: result.activeBranchId, count: branches.length },
       jsonlItems: branches.map((b) => ({ type: 'branch', ...b })),
       md: () => {
-        const title = conv.title === null || conv.title === '' ? '*(untitled)*' : mdInline(conv.title);
+        const shown = shownTitle(conv.title);
+        const title = shown === null ? '*(untitled)*' : mdInline(shown);
         const active =
           result.activeBranchId === null
             ? '- Active branch: unknown (the source gave no valid current node; GCR does not guess)'
@@ -1191,7 +1198,7 @@ export function renderBranchList(result: BranchListResult, source: SourceSummary
         };
       },
       compact: () => ({
-        header: `# ${cField(conv.title ?? '(untitled)')} | ${cField(conv.provider, 40)} | ${cField(completeness, 40)} | active=${result.activeBranchId === null ? 'unknown' : cField(result.activeBranchId, 120)}`,
+        header: `# ${cField(shownTitle(conv.title) ?? '(untitled)')} | ${cField(conv.provider, 40)} | ${cField(completeness, 40)} | active=${result.activeBranchId === null ? 'unknown' : cField(result.activeBranchId, 120)}`,
         sourceLine: `${compactSourceLine([src], ro)} | conversation=${cField(conv.conversationId, 120)}`,
         body: result.branches.map(
           (b) =>

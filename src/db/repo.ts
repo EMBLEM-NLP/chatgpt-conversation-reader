@@ -45,6 +45,7 @@ import { GcrError } from '../errors.js';
 import type { Warning } from '../errors.js';
 import { SCHEMA_VERSION } from '../version.js';
 import { buildSearchText } from './cjk.js';
+import { FTS_DESIGN } from './schema.js';
 import { isSqliteError, toDbError } from './open.js';
 import { SUMMARY_COLUMNS, compileQuery, conversationSummaryFromRow, rowNumber, rowString, rowStringOrNull } from './search.js';
 
@@ -326,7 +327,12 @@ export class Repository {
     if (IMPORTS_IN_FLIGHT.has(this.db)) {
       throw new GcrError('DB_ERROR', 'An import is already in progress on this database connection.', { details: { reason: 'import_in_progress' } });
     }
-    const queryOnly = this.db.prepare('PRAGMA query_only').get();
+    let queryOnly: Record<string, SQLOutputValue> | undefined;
+    try {
+      queryOnly = this.db.prepare('PRAGMA query_only').get();
+    } catch (e) {
+      throw toDbError(e); // e.g. a closed connection: a GcrError, never a raw node:sqlite Error
+    }
     if (queryOnly?.['query_only'] === 1) throw new GcrError('WRITE_FORBIDDEN', 'The database is read-only.');
     IMPORTS_IN_FLIGHT.add(this.db);
     try {
@@ -663,6 +669,7 @@ export class Repository {
         insertConversation.run(Number(r['rid']), buildSearchText(rowString(r, 'title')));
         conversations++;
       }
+      db.prepare('INSERT INTO gcr_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('fts_design', FTS_DESIGN);
       db.exec('COMMIT');
       return { messages, conversations };
     } catch (e) {

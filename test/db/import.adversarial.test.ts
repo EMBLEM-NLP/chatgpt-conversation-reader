@@ -13,7 +13,7 @@ import { GcrError } from '../../src/errors.js';
 import { closeDatabase, openDatabase } from '../../src/db/open.js';
 import { Repository, computeBatchId } from '../../src/db/repo.js';
 import type { ImportBatchMeta, ImportBatchResult } from '../../src/db/repo.js';
-import { searchMessages } from '../../src/db/search.js';
+import { searchConversationTitles, searchMessages } from '../../src/db/search.js';
 import { convo, link, linearConversation, msg } from '../helpers/records.js';
 import { withTempDir } from '../helpers/tmp.js';
 
@@ -116,6 +116,16 @@ describe('argument hygiene of the readers', () => {
     assert.equal(repo.getMessage({ conversationId: 'c1', batchId: a.batchId }, 'c1-u1'), null, 'the older snapshot has not');
     assert.ok(repo.getMessage({ conversationId: 'c1', batchId: a.batchId }, 'c1-u0'));
     assert.equal(repo.getMessage({ conversationId: 'c1', batchId: 'b_unknown' }, 'c1-u0'), null);
+  });
+
+  it('an empty database has no batches, no conversations and no search hits (and still answers every reader)', () => {
+    const { db, repo } = fresh();
+    assert.deepEqual(repo.listBatches(), []);
+    assert.equal(repo.getBatch('b_00000000000000000000000000000000'), null);
+    assert.deepEqual(repo.listConversations(), { items: [], limit: 50, offset: 0, total: 0, nextOffset: null });
+    assert.deepEqual(repo.resolveConversation({ conversationId: 'x' }), { matches: [] });
+    assert.equal(repo.getConversation({ conversationId: 'x' }), null);
+    assert.deepEqual(searchMessages(db, { query: 'anything' }), { items: [], limit: 20, offset: 0, nextOffset: null, nextCursor: null });
   });
 
   it('computeBatchId is a pure function of exactly provider, account and digest', () => {
@@ -398,6 +408,171 @@ describe('head selection: model-based test against an independent oracle', () =>
       assert.equal(dumpHash(db), before);
     });
   }
+});
+
+describe('storage invariants hold after any mix of successful and failing imports (stateful fuzz)', () => {
+  function scalar(db: DatabaseSync, sql: string): number {
+    return Number(Object.values(db.prepare(sql).get() ?? { n: -1 })[0]);
+  }
+
+  /** Cross-table invariants of the schema; every one must hold after EVERY operation, committed or rolled back. */
+  function assertInvariants(db: DatabaseSync, label: string): void {
+    assert.equal(db.isTransaction, false, `${label}: no open transaction`);
+    assert.equal(db.prepare('PRAGMA integrity_check').get()?.['integrity_check'], 'ok', `${label}: integrity_check`);
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), [], `${label}: foreign keys`);
+    assert.equal(
+      scalar(db, "SELECT count(*) FROM messages_fts_docsize"),
+      scalar(db, "SELECT count(*) FROM messages WHERE node_kind = 'message' AND text <> ''"),
+      `${label}: one index row per non-empty real message`,
+    );
+    assert.equal(
+      scalar(db, "SELECT count(*) FROM messages_fts_docsize d LEFT JOIN messages m ON m.rowid = d.id WHERE m.rowid IS NULL OR m.node_kind <> 'message'"),
+      0,
+      `${label}: no index row points at a missing or structural message`,
+    );
+    assert.equal(
+      scalar(db, "SELECT count(*) FROM conversations_fts_docsize"),
+      scalar(db, "SELECT count(*) FROM conversations WHERE title IS NOT NULL AND title <> ''"),
+      `${label}: one title index row per titled conversation`,
+    );
+    assert.equal(
+      scalar(db, 'SELECT count(*) FROM conversations_fts_docsize d LEFT JOIN conversations c ON c.rowid = d.id WHERE c.rowid IS NULL'),
+      0,
+      `${label}: no title index row points at a missing conversation`,
+    );
+    assert.equal(
+      scalar(
+        db,
+        'SELECT count(*) FROM conversation_heads h LEFT JOIN conversations c ON c.provider = h.provider AND c.account_label = h.account_label ' +
+          'AND c.conversation_id = h.conversation_id AND c.source_batch = h.source_batch WHERE c.provider IS NULL',
+      ),
+      0,
+      `${label}: every head points at an existing snapshot`,
+    );
+    assert.equal(
+      scalar(db, 'SELECT count(*) FROM (SELECT DISTINCT provider, account_label, conversation_id FROM conversations)'),
+      scalar(db, 'SELECT count(*) FROM conversation_heads'),
+      `${label}: exactly one head per conversation`,
+    );
+    assert.equal(scalar(db, 'SELECT count(*) FROM source_batches'), scalar(db, 'SELECT count(*) FROM source_batch_stats'), `${label}: one stats row per batch`);
+    for (const b of db.prepare('SELECT batch_id, conversation_count, message_count FROM source_batches').all()) {
+      const id = String(b['batch_id']);
+      assert.equal(scalar(db, `SELECT count(*) FROM conversations WHERE source_batch = '${id}'`), Number(b['conversation_count']), `${label}: conversation_count of ${id}`);
+      assert.equal(scalar(db, `SELECT COALESCE(sum(message_count), 0) FROM conversations WHERE source_batch = '${id}'`), Number(b['message_count']), `${label}: message_count of ${id}`);
+      assert.equal(scalar(db, `SELECT count(*) FROM messages WHERE source_batch = '${id}' AND node_kind = 'message'`), Number(b['message_count']), `${label}: real messages of ${id}`);
+      assert.equal(
+        scalar(db, `SELECT node_count FROM source_batch_stats WHERE batch_id = '${id}'`),
+        scalar(db, `SELECT count(*) FROM messages WHERE source_batch = '${id}'`),
+        `${label}: node_count of ${id}`,
+      );
+    }
+    for (const c of db.prepare('SELECT provider, account_label, conversation_id, source_batch, message_count FROM conversations').all()) {
+      const n = scalar(
+        db,
+        `SELECT count(*) FROM messages WHERE provider = '${String(c['provider'])}' AND account_label = '${String(c['account_label'])}' AND conversation_id = '${String(c['conversation_id'])}' AND source_batch = '${String(c['source_batch'])}' AND node_kind = 'message'`,
+      );
+      assert.equal(n, Number(c['message_count']), `${label}: message_count of conversation ${String(c['conversation_id'])}`);
+    }
+  }
+
+  for (const seed of [11, 12, 13]) {
+    it(`random imports, aborted imports, duplicates and index rebuilds (seed ${seed})`, async () => {
+      let a = seed;
+      const rnd = (): number => {
+        a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+      const { db, repo } = fresh();
+      let digest = 0;
+      for (let step = 0; step < 30; step++) {
+        const kind = rnd();
+        const count = 1 + Math.floor(rnd() * 4);
+        const records: ConversationRecord[] = [];
+        for (let i = 0; i < count; i++) {
+          const rec = linearConversation(`c${Math.floor(rnd() * 5)}`, 1 + Math.floor(rnd() * 3));
+          records.push({ ...rec, updatedAt: rnd() < 0.2 ? null : `2025-03-0${1 + Math.floor(rnd() * 5)}T00:00:00.000Z`, title: rnd() < 0.2 ? null : rec.title });
+        }
+        const meta: ImportBatchMeta = { ...META, contentDigest: `fuzz-${digest++}` };
+        if (kind < 0.5) {
+          await repo.importBatch({ batch: meta, conversations: records });
+        } else if (kind < 0.7) {
+          const cut = Math.floor(rnd() * records.length);
+          await assert.rejects(
+            repo.importBatch({
+              batch: meta,
+              conversations: (function* () {
+                for (let i = 0; i < cut; i++) yield records[i] as ConversationRecord;
+                throw new Error('abort');
+              })(),
+            }),
+            /abort/,
+          );
+        } else if (kind < 0.8) {
+          const bad = { ...(records[0] as ConversationRecord), importedAt: 'not a time' };
+          await assert.rejects(repo.importBatch({ batch: meta, conversations: [...records.slice(1), bad] }), isCode('IMPORT_PARSE_ERROR'));
+        } else if (kind < 0.9) {
+          await repo.importBatch({ batch: meta, conversations: [...records, ...records] });
+        } else {
+          repo.rebuildSearchIndex();
+        }
+        assertInvariants(db, `seed ${seed} step ${step} (kind ${kind.toFixed(2)})`);
+      }
+    });
+  }
+});
+
+describe('a closed connection yields GcrErrors, never raw node:sqlite errors', () => {
+  it('every Repository method and both searches answer DB_ERROR with reason "closed" (importBatch used to leak ERR_INVALID_STATE)', async () => {
+    const h = openDatabase(':memory:');
+    const repo = new Repository(h.db);
+    await repo.importBatch({ batch: META, conversations: [linearConversation('c1', 1)] });
+    closeDatabase(h);
+    const closed = (e: unknown): boolean => e instanceof GcrError && e.code === 'DB_ERROR' && (e.details as { reason?: string } | undefined)?.reason === 'closed' && !/not open/.test(e.message);
+    const sync: Array<[string, () => unknown]> = [
+      ['listConversations', () => repo.listConversations()],
+      ['resolveConversation', () => repo.resolveConversation({ conversationId: 'c1' })],
+      ['getConversation', () => repo.getConversation({ conversationId: 'c1' })],
+      ['getMessage', () => repo.getMessage({ conversationId: 'c1' }, 'm')],
+      ['listBatches', () => repo.listBatches()],
+      ['getBatch', () => repo.getBatch('b')],
+      ['rebuildSearchIndex', () => repo.rebuildSearchIndex()],
+      ['searchMessages', () => searchMessages(h.db, { query: 'topic0' })],
+      ['searchMessages(raw)', () => searchMessages(h.db, { query: 'topic0', mode: 'raw' })],
+      ['searchConversationTitles', () => searchConversationTitles(h.db, { query: 'synthetic' })],
+    ];
+    for (const [name, call] of sync) assert.throws(call, closed, name);
+    await assert.rejects(repo.importBatch({ batch: { ...META, contentDigest: 'again' }, conversations: [linearConversation('c2', 1)] }), closed, 'importBatch');
+    // and the failed attempt did not leave the connection marked as "import in progress"
+    await assert.rejects(repo.importBatch({ batch: { ...META, contentDigest: 'again2' }, conversations: [] }), closed, 'importBatch (second attempt)');
+  });
+});
+
+describe('a failed BEGIN never rolls back a transaction that belongs to the caller', () => {
+  it('rebuildSearchIndex inside a caller-owned transaction fails with DB_ERROR and leaves that transaction (and its writes) intact', async () => {
+    const { db, repo } = fresh();
+    await repo.importBatch({ batch: META, conversations: [linearConversation('c1', 1)] });
+    db.exec('BEGIN');
+    db.exec("INSERT INTO local_audit_log (ts, actor, action, target_type, target_id) VALUES ('2025-01-01T00:00:00.000Z', 'sdk', 'test', 'x', 'y')");
+    assert.throws(() => repo.rebuildSearchIndex(), isCode('DB_ERROR'));
+    assert.equal(db.isTransaction, true, 'the caller\'s transaction was rolled back by rebuildSearchIndex');
+    assert.equal(count(db, 'local_audit_log'), 1, 'the caller\'s uncommitted write vanished');
+    db.exec('COMMIT');
+    assert.equal(count(db, 'local_audit_log'), 1);
+    assert.ok(searchMessages(db, { query: 'topic0' }).items.length > 0, 'and the index is intact');
+  });
+
+  it('importBatch inside a caller-owned transaction does the same (positive control: this already held)', async () => {
+    const { db, repo } = fresh();
+    db.exec('BEGIN');
+    db.exec("INSERT INTO local_audit_log (ts, actor, action, target_type, target_id) VALUES ('2025-01-01T00:00:00.000Z', 'sdk', 'test', 'x', 'y')");
+    await assert.rejects(repo.importBatch({ batch: META, conversations: [linearConversation('c1', 1)] }), isCode('DB_ERROR'));
+    assert.equal(db.isTransaction, true);
+    db.exec('COMMIT');
+    assert.equal(count(db, 'local_audit_log'), 1);
+    assert.equal(count(db, 'conversations'), 0, 'nothing was imported');
+  });
 });
 
 describe('rebuildSearchIndex: negative cases', () => {

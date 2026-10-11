@@ -13,7 +13,7 @@
  *    can neither forge a highlight nor smuggle terminal escapes; renderers translate the markers (never raw HTML).
  *
  * Ordering and pagination
- *  - Total order: rank ASC, created_at ASC (NULLs last), conversation_id, message_id, then provider, account_label and
+ *  - Total order: rank ASC, created_at ASC as an INSTANT ("Z" and ".000Z" spellings are equal; NULLs last), conversation_id, message_id, then provider, account_label and
  *    source_batch (the natural key is only unique with those three, e.g. under `allBatches`). Because the order is
  *    total, offset pagination and keyset (cursor) pagination return identical sequences with no repeat or skip, as long
  *    as the index does not change between page requests.

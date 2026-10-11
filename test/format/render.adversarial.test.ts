@@ -404,6 +404,177 @@ describe('renderEnvelope compact: an untrusted data key cannot start a structura
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// 5c. Blank titles
+// ---------------------------------------------------------------------------------------------------------------
+
+describe('a blank title ("", spaces, tabs) is shown as untitled by EVERY renderer, never as an empty heading, header segment or cell', () => {
+  // renderThread already treated '' as untitled; the list, search and branch renderers only treated null that way, and
+  // a whitespace-only title produced an empty "# " heading everywhere. Imports can store '' (the adapters keep the source text).
+  const BLANKS = ['', '   ', '\t\n ', '\u00a0'];
+  const titled = (title: string | null) => summary({ title });
+
+  for (const blank of BLANKS) {
+    it(`title ${JSON.stringify(blank)}`, () => {
+      const t = renderThread({ ...thread([]), conversation: titled(blank) }, SRC, { format: 'markdown' });
+      assert.equal(t.split('\n')[0], '# *(untitled)*');
+      assert.ok(renderThread({ ...thread([]), conversation: titled(blank) }, SRC, { format: 'compact' }).startsWith('# (untitled) | chatgpt | '));
+
+      const b = { ...branchResult(), conversation: titled(blank) };
+      assert.equal(renderBranchList(b, SRC, { format: 'markdown' }).split('\n')[0], '# *(untitled)*');
+      assert.ok(renderBranchList(b, SRC, { format: 'compact' }).startsWith('# (untitled) | chatgpt | '));
+
+      const page: Page<ConversationSummary> = { items: [titled(blank)], limit: 20, offset: 0, nextOffset: null };
+      assert.match(renderConversationList(page, [SRC], { format: 'markdown' }), /^\| 1 \| \(untitled\) \| /m);
+      assert.match(renderConversationList(page, [SRC], { format: 'compact' }), /^\[chatgpt\] conv-adv \| \(untitled\) \| updated /m);
+
+      const hits = hitsPage([hit(`${START}x${END}`, { conversationTitle: blank })]);
+      assert.match(renderSearchHits(hits, [SRC], { format: 'markdown', query: 'x' }), /\| \(untitled\) \| conv-adv \|/);
+      assert.match(renderSearchHits(hits, [SRC], { format: 'compact', query: 'x' }), /^\[user\] conv-adv\/m1 \(untitled\) \| /m);
+    });
+  }
+
+  it('JSON keeps the raw title exactly (display only)', () => {
+    const json = JSON.parse(renderBranchList({ ...branchResult(), conversation: titled('   ') }, SRC, { format: 'json' })) as { data: { conversation: { title: string } } };
+    assert.equal(json.data.conversation.title, '   ');
+  });
+
+  it('negative: a real title, and a title with inner or edge whitespace around text, are untouched', () => {
+    assert.equal(renderBranchList({ ...branchResult(), conversation: titled('Real title') }, SRC, { format: 'markdown' }).split('\n')[0], '# Real title');
+    assert.ok(renderBranchList({ ...branchResult(), conversation: titled('  padded ') }, SRC, { format: 'compact' }).startsWith('#   padded  | chatgpt | '));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// 5d. Coverage gaps found by the coverage pass (branches no test reached)
+// ---------------------------------------------------------------------------------------------------------------
+
+describe('provenance for several, many or no sources', () => {
+  const page: Page<ConversationSummary> = { items: [summary()], limit: 20, offset: 0, nextOffset: null };
+  const sources = (n: number): SourceSummary[] => Array.from({ length: n }, (_, i) => ({ ...SRC, accountLabel: `acct${i}`, batchId: `b${i}` }));
+
+  it('compact: each batch is listed with provider/account/batch and its provenance and completeness', () => {
+    const out = renderConversationList(page, sources(2), { format: 'compact' });
+    assert.match(out, /^# source: 2 batches chatgpt\/acct0\/b0:official_chatgpt_export\/exported_tree; chatgpt\/acct1\/b1:official_chatgpt_export\/exported_tree \| tool=/m);
+  });
+
+  it('compact: more than five batches are cut with an explicit "+N more" (never silently)', () => {
+    const line = renderConversationList(page, sources(8), { format: 'compact' }).split('\n')[1] ?? '';
+    assert.match(line, /^# source: 8 batches /);
+    assert.equal((line.match(/chatgpt\/acct\d\/b\d:/g) ?? []).length, 5);
+    assert.ok(line.includes('; +3 more | tool='), line);
+  });
+
+  it('markdown: every batch is a table row', () => {
+    const md = renderConversationList(page, sources(3), { format: 'markdown' });
+    assert.equal(md.split('\n').filter((l) => /^\| chatgpt \| acct\d \|/.test(l)).length, 3);
+  });
+
+  it('no sources: stated plainly in markdown and compact, completeness comes from the items only, nothing is invented', () => {
+    const md = renderConversationList(page, [], { format: 'markdown' });
+    assert.ok(md.includes('No source information was supplied for this result.'));
+    const compact = renderConversationList(page, [], { format: 'compact' });
+    assert.match(compact, /^# source: none supplied \| tool=/m);
+    assert.ok(compact.startsWith('# conversations | - | exported_tree | '), 'no providers are named when no source names one');
+    const json = JSON.parse(renderConversationList(page, [], { format: 'json' })) as { source: unknown[] };
+    assert.deepEqual(json.source, []);
+  });
+});
+
+describe('thread details that no other test reached', () => {
+  it('an unrecognised selection policy is described as unrecognised, never as "undefined" or as a source statement', () => {
+    const t = { ...thread([]), selectionPolicy: 'brand_new_policy' } as unknown as ThreadResult;
+    const md = renderThread(t, SRC, { format: 'markdown' });
+    assert.match(md, /^- Branch selection: brand_new_policy - unrecognized selection policy$/m);
+    assert.ok(!md.includes('undefined'));
+    assert.match(renderThread(t, SRC, { format: 'compact' }), /\| selection=brand_new_policy \|/);
+  });
+
+  it('heuristic policies are labelled as heuristics in the header', () => {
+    for (const policy of ['last_child', 'latest_leaf'] as const) {
+      assert.match(renderThread(thread([], { selectionPolicy: policy }), SRC, { format: 'markdown' }), new RegExp(`^- Branch selection: ${policy} - HEURISTIC "${policy}": not provided by the source$`, 'm'));
+    }
+  });
+
+  it('attachments: names, ids and a placeholder are shown; the list is cut after five with an ellipsis', () => {
+    const att = (id: string | null, name: string | null) => ({ id, name, mimeType: null, sizeBytes: null, assetPointer: null, presentInExportAs: null });
+    const m = msg({ id: 'm-att', conversationId: CONV, authorRole: 'user', createdAt: iso(1), text: 'x', attachments: [att('a1', 'one.png'), att('a2', null), att(null, null), att('a4', 'four'), att('a5', 'five'), att('a6', 'six')] });
+    const md = renderThread(thread([m]), SRC, { format: 'markdown' });
+    assert.ok(md.includes('attachments 6: `one.png`, `a2`, `(unnamed)`, `four`, `five`, ...'), md);
+    const few = renderThread(thread([msg({ ...m, attachments: [att('a1', 'one.png')] })]), SRC, { format: 'markdown' });
+    assert.ok(few.includes('attachments 1: `one.png`') && !few.includes('...'), 'negative: five or fewer are not cut');
+  });
+});
+
+describe('renderEnvelope: exotic values in generic data', () => {
+  const exotic = () => ({
+    when: new Date(0),
+    never: new Date(Number.NaN),
+    big: 10n,
+    fn: () => 1,
+    sym: Symbol('s'),
+    nothing: undefined,
+    nul: null,
+    inf: Number.POSITIVE_INFINITY,
+    deep: { a: { b: { c: { d: { e: { f: { g: { h: { i: 1 } } } } } } } } },
+  });
+  const env = (data: unknown) => ({ ok: true as const, data, source: [SRC], completeness: 'exported_tree' as const, warnings: [], ids: {}, untrustedContent: false });
+
+  it('JSON: dates become ISO text, invalid dates / infinities become null, BigInt becomes text, functions, symbols and undefined are dropped', () => {
+    const data = (JSON.parse(renderEnvelope(env(exotic()), { format: 'json' })) as { data: Record<string, unknown> }).data;
+    assert.equal(data['when'], '1970-01-01T00:00:00.000Z');
+    assert.equal(data['never'], null);
+    assert.equal(data['big'], '10');
+    assert.equal(data['inf'], null);
+    assert.equal(data['nul'], null);
+    assert.deepEqual(Object.keys(data), ['when', 'never', 'big', 'nul', 'inf', 'deep']);
+  });
+
+  it('markdown / compact: every value is shown as text; nesting deeper than eight levels is shown as inline JSON', () => {
+    const md = renderEnvelope(env(exotic()), { format: 'markdown' });
+    for (const row of ['| when | 1970-01-01T00:00:00.000Z |', '| never | invalid date |', '| big | 10 |', '| fn | (function) |', '| sym | (symbol) |', '| nul | null |', '| deep.a.b.c.d.e.f.g | {"h":{"i":1}} |']) {
+      assert.ok(md.includes(row), `missing row ${row}`);
+    }
+    assert.ok(!md.includes('nothing'), 'undefined values are not rows');
+    const compact = renderEnvelope(env(exotic()), { format: 'compact' });
+    assert.ok(compact.includes('\n  never: invalid date\n') && compact.includes('\n  deep.a.b.c.d.e.f.g: {"h":{"i":1}}\n'), compact);
+  });
+
+  it('a self-referencing structure terminates in every format (cycle marker, bounded rows)', () => {
+    const loop: Record<string, unknown> = { a: 1 };
+    for (const key of ['p', 'q', 'r', 's', 't']) loop[key] = loop;
+    for (const format of FORMATS) {
+      const out = renderEnvelope(env(loop), { format });
+      assert.ok(out.endsWith('\n'), format);
+    }
+    assert.ok(renderEnvelope(env(loop), { format: 'json' }).includes('[circular]'));
+  });
+
+  it('empty containers are shown as [] and {} (a value is never silently absent)', () => {
+    const md = renderEnvelope(env({ list: [], map: {} }), { format: 'markdown' });
+    assert.ok(md.includes('| list | \\[\\] |') && md.includes('| map | {} |'), md);
+    assert.ok(renderEnvelope(env({ list: [], map: {} }), { format: 'compact' }).includes('\n  list: []\n  map: {}\n'));
+    assert.ok(renderEnvelope(env([]), { format: 'markdown' }).includes('| (value) | \\[\\] |'));
+    assert.ok(renderEnvelope(env(undefined), { format: 'markdown' }).includes('| (value) | null |'));
+  });
+});
+
+describe('renderImportReport: variants that no other test reached', () => {
+  it('no files, no source label, already imported, warnings with sample ids', () => {
+    const report: ImportReport = { ...REPORT, sourceLabel: null, alreadyImported: true, files: [], warnings: [{ code: 'W_ONE', count: 3, sampleIds: ['x1', 'x2'] }] };
+    const md = renderImportReport(report, { format: 'markdown' });
+    assert.ok(md.startsWith('# Import report (already imported: no changes)\n'));
+    assert.ok(md.includes('No files.') && !md.includes('- Source file:'));
+    assert.ok(md.endsWith('- `W_ONE`: 3 occurrence(s) (ids: `x1`, `x2`)\n'));
+    const compact = renderImportReport(report, { format: 'compact' });
+    assert.ok(compact.includes('alreadyImported=true') && !compact.includes('| file='));
+    assert.ok(compact.endsWith('# warnings: W_ONE: 3 occurrence(s) (ids: x1, x2)\n'));
+    const lines = parseLines(renderImportReport(report, { format: 'jsonl' }));
+    assert.equal(lines.length, 2, 'header + footer, no file lines');
+    assert.equal(lines[0]?.['fileCount'], 0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
 // 6. Coverage gaps: every exported renderer rejects bad options with INVALID_ARGUMENT and never echoes the value
 // ---------------------------------------------------------------------------------------------------------------
 

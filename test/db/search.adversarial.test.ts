@@ -9,10 +9,11 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { ConversationRecord } from '../../src/domain/types.js';
 import { GcrError } from '../../src/errors.js';
 import { openDatabase } from '../../src/db/open.js';
+import { FTS_DESIGN } from '../../src/db/schema.js';
 import { Repository } from '../../src/db/repo.js';
 import type { ImportBatchMeta } from '../../src/db/repo.js';
 import type { SearchQuery } from '../../src/db/search.js';
-import { SNIPPET_MAX_CHARS, SNIPPET_PAGE_SCAN_BUDGET, buildSnippet, compileQuery, conversationSummaryFromRow, rowNumber, rowString, rowStringOrNull, searchConversationTitles, searchMessages } from '../../src/db/search.js';
+import { SNIPPET_MAX_CHARS, SNIPPET_PAGE_SCAN_BUDGET, buildMatchExpression, buildSnippet, compileQuery, conversationSummaryFromRow, rowNumber, rowString, rowStringOrNull, searchConversationTitles, searchMessages } from '../../src/db/search.js';
 import { convo, link, msg } from '../helpers/records.js';
 
 const META: ImportBatchMeta = {
@@ -117,6 +118,16 @@ describe('words next to symbols that SQLite\'s old Unicode tables call letters',
     assert.deepEqual(searchConversationTitles(db, { query: '100' }).items.map((h) => h.conversationId), ['c1']);
     assert.deepEqual(searchConversationTitles(db, { query: 'plan' }).items.map((h) => h.conversationId), ['c1']);
     assert.deepEqual(repo.listConversations({ titleQuery: '100' }).items.map((c) => c.conversationId), ['c1']);
+  });
+
+  it('the index generation marker is current for new databases, and a rebuild brings an old marker up to date', async () => {
+    const { db, repo } = await setup([conv('c', [{ id: 'a', text: 'pay 100\u20BD' }])]);
+    const marker = (): unknown => db.prepare("SELECT value FROM gcr_meta WHERE key = 'fts_design'").get()?.['value'];
+    assert.equal(marker(), FTS_DESIGN);
+    db.prepare("UPDATE gcr_meta SET value = 'contentless-unicode61-v1' WHERE key = 'fts_design'").run();
+    repo.rebuildSearchIndex();
+    assert.equal(marker(), FTS_DESIGN);
+    assert.notEqual(FTS_DESIGN, 'contentless-unicode61-v1', 'the representation changed, so the generation must differ from v1');
   });
 
   it('a rebuilt index tokenizes exactly like the import did', async () => {
@@ -241,7 +252,10 @@ describe('bounded work per page: snippet scanning has a page-level budget', () =
     assert.equal(page.items.length, 100, 'every hit is still returned');
     const highlighted = page.items.filter((h) => h.snippet.includes(MARK_START)).length;
     assert.ok(highlighted >= 1, 'the first hits still get a highlighted snippet');
-    assert.ok(highlighted * 150_000 <= SNIPPET_PAGE_SCAN_BUDGET + 150_000, `scan budget exceeded: ${highlighted} highlighted snippets of 150k characters`);
+    // Independent of the constant's value on purpose: a page may spend at most ~5M characters on finding highlights.
+    assert.ok(SNIPPET_PAGE_SCAN_BUDGET <= 5_000_000, 'the page budget itself must stay small enough to bound a page well under a second');
+    assert.ok(highlighted * 150_000 <= 5_000_000 + 150_000, `scan budget exceeded: ${highlighted} highlighted snippets of 150k characters`);
+    assert.ok(highlighted * 150_000 <= SNIPPET_PAGE_SCAN_BUDGET + 150_000, 'and it never exceeds the declared budget');
     for (const h of page.items) {
       assert.ok(h.snippet.length > 0 && h.snippet.length <= SNIPPET_MAX_CHARS, 'every hit has a bounded, non-empty snippet');
       if (!h.snippet.includes(MARK_START)) assert.ok(h.snippet.startsWith('lorem'), 'beyond the budget the snippet falls back to the start of the text');
@@ -341,6 +355,22 @@ describe('direct negative tests for the exported helpers', () => {
     assert.throws(() => compileQuery('   ', 'raw'), isCode('INVALID_ARGUMENT'));
     assert.throws(() => compileQuery('...', 'plain'), isCode('INVALID_ARGUMENT'));
     assert.deepEqual(compileQuery('Hello World*', undefined).match, '"hello" "world"*');
+  });
+
+  it('buildMatchExpression of no terms is empty, and a hostile token can never leave its quotes', () => {
+    assert.equal(buildMatchExpression([]), '');
+    const expr = buildMatchExpression([{ tokens: ['a"b', 'x") OR (y'], prefix: true }]);
+    assert.equal(expr, '"a""b x"") OR (y"*');
+  });
+
+  it('buildSnippet: empty text, no terms, absurd budgets and unmatched terms never throw and stay within the budget', () => {
+    assert.equal(buildSnippet('', [{ tokens: ['a'], prefix: false }]), '');
+    assert.equal(buildSnippet('hello world', []), 'hello world');
+    for (const budget of [-5, 0, 1, 7, 8, 9, 1000]) {
+      const out = buildSnippet('x '.repeat(400) + 'needle', [{ tokens: ['needle'], prefix: false }], budget);
+      assert.ok(out.length <= Math.max(8, budget), `budget ${budget} gave ${out.length}`);
+    }
+    assert.equal(buildSnippet('hello world', [{ tokens: ['absent'], prefix: false }]), 'hello world');
   });
 
   it('row helpers tolerate NULL, missing columns, bigint and wrong types without throwing', () => {
