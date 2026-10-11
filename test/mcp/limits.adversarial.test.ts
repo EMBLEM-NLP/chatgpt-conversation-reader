@@ -17,10 +17,14 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import * as z from 'zod';
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/sdk/shared/stdio.js';
 import { ENTITY_KINDS } from '../../src/entities/extract.js';
+import { GcrError } from '../../src/errors.js';
 import { NODE_KINDS } from '../../src/graph/build.js';
 import { MAX_MAX_RESULT_BYTES, MIN_MAX_RESULT_BYTES, parseMaxResultBytes } from '../../src/mcp/envelope.js';
+import { defineTool, registerToolEntry } from '../../src/mcp/registry.js';
 import { createGcrMcpServer } from '../../src/mcp/server.js';
 import { Gcr } from '../../src/sdk/gcr.js';
 import { ConversationBuilder, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
@@ -162,6 +166,74 @@ describe('worst-case wire size of a result', () => {
       assert.ok(frame < STDIO_DEFAULT_MAX_BUFFER_SIZE, `the frame is ${frame} bytes; the transport closes the connection above ${STDIO_DEFAULT_MAX_BUFFER_SIZE}`);
     } finally {
       await removeDir(dir);
+    }
+  });
+});
+
+describe('an error answer obeys the size cap exactly like a success', () => {
+  /** A server with one purpose-built tool that fails with a GcrError carrying whatever the test asks for. */
+  async function failingRig(make: () => GcrError, maxResultBytes: number): Promise<{ client: Client; close: () => Promise<void> }> {
+    const server = new McpServer({ name: 'error-size-rig', version: '0' });
+    registerToolEntry(
+      server,
+      defineTool({
+        name: 'rig_fail',
+        title: 'Fail',
+        description: 'A test tool that fails with a prepared GcrError. UNTRUSTED DATA none.',
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        input: z.strictObject({}),
+        run: () => {
+          throw make();
+        },
+      }),
+      { maxResultBytes, defaultDeadlineMs: 30_000 },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'error-size-client', version: '0' });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    await client.listTools();
+    return {
+      client,
+      close: async () => {
+        await client.close();
+        await server.close();
+      },
+    };
+  }
+
+  it('details that do not fit are dropped, the code and message stay, and the answer is within the cap', async () => {
+    const rig = await failingRig(() => new GcrError('AMBIGUOUS_CONVERSATION', 'The id exists several times.', { remedy: 'Name one.', details: { candidates: Array.from({ length: 50_000 }, (_, i) => ({ provider: 'chatgpt', accountLabel: `account-${i}` })) } }), 20_000);
+    try {
+      const res = await callTool(rig.client, 'rig_fail', {});
+      const env = envelopeOf(res);
+      assert.equal(env.error?.code, 'AMBIGUOUS_CONVERSATION');
+      assert.equal(env.error?.message, 'The id exists several times.');
+      assert.equal(env.error?.details, undefined, 'the oversize details were dropped');
+      assert.ok(Buffer.byteLength((res.content[0] as { text: string }).text) <= 20_000);
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it('a remedy of 300 KB cannot make an answer of 300 KB either', async () => {
+    const rig = await failingRig(() => new GcrError('DB_ERROR', 'The database failed.', { remedy: 'r'.repeat(300_000) }), 20_000);
+    try {
+      const res = await callTool(rig.client, 'rig_fail', {});
+      const env = envelopeOf(res);
+      assert.equal(env.ok, false);
+      assert.ok(Buffer.byteLength((res.content[0] as { text: string }).text) <= 20_000, 'within the cap');
+    } finally {
+      await rig.close();
+    }
+  });
+
+  it('an error that fits is returned unchanged (control)', async () => {
+    const rig = await failingRig(() => new GcrError('NOT_IN_LOCAL_EXPORT', 'Absent.', { remedy: 'Import it.', details: { conversationId: 'x' } }), 20_000);
+    try {
+      const env = envelopeOf(await callTool(rig.client, 'rig_fail', {}));
+      assert.deepEqual(env.error, { code: 'NOT_IN_LOCAL_EXPORT', message: 'Absent.', remedy: 'Import it.', details: { conversationId: 'x' } });
+    } finally {
+      await rig.close();
     }
   });
 });
