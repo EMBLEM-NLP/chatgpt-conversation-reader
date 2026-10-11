@@ -1532,7 +1532,18 @@ export class Gcr {
         const limit = optInt('maxNodes', o['maxNodes'], 1, MAX_OVERVIEW_NODES) ?? 100;
         nodes = godNodes(this.db, { limit, ...(o['kinds'] === undefined ? {} : { kinds: o['kinds'] as string[] }) }).map((g) => g.node);
         edges = this.edgesAmong(nodes.map((n) => n.id));
-        if (nodes.length === 0) warnings.push({ code: 'GRAPH_EMPTY', message: 'The graph has no nodes. Import an export and build the graph first.' });
+        if (nodes.length === 0) {
+          // Two different situations deserve two different messages: no graph at all vs a graph with nothing connected to show.
+          const row = this.db.prepare('SELECT count(*) AS n FROM graph_nodes').get();
+          const total = typeof row?.['n'] === 'number' ? row['n'] : 0;
+          warnings.push({
+            code: 'GRAPH_EMPTY',
+            message:
+              total === 0
+                ? 'The graph has no nodes. Import an export and build the graph first.'
+                : `The graph has ${total} node(s) but none with a connection to show. Entities seen in fewer than 2 conversations are left out by default, so small exports can have none; rebuild with a lower minimum (gcr graph build --min-conversations 1) if you want them.`,
+          });
+        }
       }
       const html = exportGraphHtml({ nodes, edges }, pickDefined(o, ['title', 'layoutSeed', 'maxOverviewNodes']) as ExportHtmlOptions);
       const prov = this.graphProvenance();
