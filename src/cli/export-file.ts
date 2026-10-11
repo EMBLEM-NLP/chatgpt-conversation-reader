@@ -11,6 +11,8 @@
  *    symlink or a directory is refused even with `--force`.
  *  - The destination must end in `.html`/`.htm`, so `--force` cannot be pointed at `~/.bashrc` by a slip.
  *  - The directory must already exist: no directory trees are created for the operator.
+ *  - Failures are named for what they are: a permission or read-only error is WRITE_FORBIDDEN, a name the file system rejects
+ *    is INVALID_ARGUMENT, anything else (a full disk) is INTERNAL_ERROR; a half-written private file is always removed.
  * Messages name the file by basename only.
  */
 import { randomBytes } from 'node:crypto';
@@ -24,14 +26,46 @@ function refuse(message: string, reason: string, remedy: string): GcrError {
 }
 
 async function writeNew(path: string, content: string): Promise<number> {
-  // "wx" = O_CREAT | O_EXCL: atomic creation that refuses any existing path, symlinks included.
+  // "wx" = O_CREAT | O_EXCL: atomic creation that refuses any existing path, symlinks included. When this open fails nothing
+  // was created, so nothing is removed.
   const handle = await open(path, 'wx', 0o600);
   try {
     await handle.writeFile(content, 'utf8');
-  } finally {
-    await handle.close();
+  } catch (e) {
+    // The file is ours (we just created it) and half written: take it back rather than leave private data in pieces.
+    await handle.close().catch(() => undefined);
+    await unlink(path).catch(() => undefined);
+    throw e;
   }
+  await handle.close();
   return Buffer.byteLength(content, 'utf8');
+}
+
+/**
+ * Classify a failure of the file system by what it means to the operator. The raw error is kept as the `cause` (shown only with
+ * --debug); its message can hold an absolute path, so it is never forwarded.
+ */
+function writeFailure(e: unknown, shown: string, replacing: boolean): GcrError {
+  const errno = (e as { code?: unknown } | null)?.code;
+  if (errno === 'EACCES' || errno === 'EPERM' || errno === 'EROFS') {
+    return new GcrError('WRITE_FORBIDDEN', `The export file "${shown}" may not be written there (permission denied or read-only location).`, {
+      remedy: 'Choose a directory you are allowed to write to, or fix the permissions of this one.',
+      details: { option: 'out', reason: 'PERMISSION_DENIED' },
+      cause: e,
+    });
+  }
+  if (errno === 'ENAMETOOLONG' || errno === 'EINVAL' || errno === 'ELOOP') {
+    return new GcrError('INVALID_ARGUMENT', `The file name "${shown}" is not accepted by the file system.`, {
+      remedy: 'Choose a shorter name without unusual characters, for example graph.html.',
+      details: { option: 'out', reason: 'BAD_NAME' },
+      cause: e,
+    });
+  }
+  return new GcrError('INTERNAL_ERROR', replacing ? 'The export file could not be replaced.' : 'The export file could not be written.', {
+    remedy: 'Check the free space and the health of the target directory.',
+    details: { option: 'out', reason: 'WRITE_FAILED' },
+    cause: e,
+  });
 }
 
 /** The permission bits of the file as it exists on disk now (what the umask left of the requested 0600), e.g. "0600". */
@@ -61,13 +95,7 @@ export async function writeExportFile(out: string, content: string, force: boole
       if ((e as { code?: unknown } | null)?.code === 'EEXIST') {
         throw refuse(`The export file "${shown}" already exists (or appeared while it was being created).`, 'EXISTS', 'Choose another name, or pass --force to replace a regular file.');
       }
-      // Do not leave a half-written private file behind.
-      await unlink(absolute).catch(() => undefined);
-      throw new GcrError('INTERNAL_ERROR', 'The export file could not be written.', {
-        remedy: 'Check the permissions and free space of the target directory.',
-        details: { option: 'out', reason: 'WRITE_FAILED' },
-        cause: e,
-      });
+      throw writeFailure(e, shown, false);
     }
   }
 
@@ -81,17 +109,14 @@ export async function writeExportFile(out: string, content: string, force: boole
     throw refuse(`The export file "${shown}" already exists; it was not overwritten.`, 'EXISTS', 'Choose another name, or pass --force to replace it.');
   }
 
-  const temp = resolve(dirname(absolute), `.${basename(absolute)}.${randomBytes(6).toString('hex')}.tmp`);
+  // A short name of its own: derived from the target's name it could exceed the file system's limit although the target's does not.
+  const temp = resolve(dirname(absolute), `.gcr-export-${randomBytes(6).toString('hex')}.tmp`);
   try {
     const bytes = await writeNew(temp, content);
     await rename(temp, absolute);
     return { bytes, mode: await modeOf(absolute) };
   } catch (e) {
     await unlink(temp).catch(() => undefined);
-    throw new GcrError('INTERNAL_ERROR', 'The export file could not be replaced.', {
-      remedy: 'Check the permissions and free space of the target directory.',
-      details: { option: 'out', reason: 'WRITE_FAILED' },
-      cause: e,
-    });
+    throw writeFailure(e, shown, true);
   }
 }

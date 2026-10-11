@@ -63,6 +63,19 @@ function spawnSlowReader(dbPath: string): SlowReaderChild {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Wait until the server says it is ready (its signal handlers are installed by then). A fixed sleep is a race on a loaded
+ * machine: a SIGTERM that arrives while the process is still starting is simply Node's default (terminate by signal), which
+ * made the SIGTERM case of this file fail once in a while when the whole suite ran in parallel.
+ */
+async function ready(c: SlowReaderChild): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (!c.stderr().includes('"msg":"mcp_ready"')) {
+    assert.ok(Date.now() < deadline, 'the server became ready');
+    await sleep(20);
+  }
+}
+
 /** Wait for the child, killing it (and failing) when it takes unreasonably long. */
 async function within<T>(c: SlowReaderChild, promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -99,6 +112,7 @@ describe('shutdown never drops or cuts an answer that was already computed', () 
     it(`${trigger} while the reader is slow: every one of the six answers arrives as a whole frame, then exit 0`, async () => {
       const c = spawnSlowReader(fx.dbPath);
       try {
+        await ready(c);
         sendLargeRequests(c, 5);
         if (trigger === 'stdin end') c.endInput();
         await sleep(500); // the child has computed everything and is blocked on a full pipe; nobody is reading
@@ -122,6 +136,7 @@ describe('shutdown never drops or cuts an answer that was already computed', () 
   it('a reader that never reads cannot keep the server alive: it still leaves, with exit code 0, after a bounded wait', async () => {
     const c = spawnSlowReader(fx.dbPath);
     try {
+      await ready(c);
       sendLargeRequests(c, 5);
       c.endInput();
       // Nobody reads while the process runs. The wait for stdout is bounded, so the process must end by itself.
@@ -138,6 +153,7 @@ describe('shutdown never drops or cuts an answer that was already computed', () 
   it('pipelined answers behind a full pipe do not trigger Node\'s MaxListenersExceededWarning (one drain listener per blocked write)', async () => {
     const c = spawnSlowReader(fx.dbPath);
     try {
+      await ready(c);
       c.send(initializeMessage('2025-11-25', 1));
       c.send(INITIALIZED);
       for (let i = 2; i < 42; i++) c.send({ jsonrpc: '2.0', id: i, method: 'tools/call', params: { name: 'gcr_list', arguments: {} } });

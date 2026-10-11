@@ -42,7 +42,7 @@ All ids in this document are synthetic (`00000000-0000-4000-8000-<12 hex>`).
 
 stdout carries **only** the command's result. Notes ("created ./.gcr ..."), progress lines and errors go to stderr, so
 `gcr list --format json | jq` can never be corrupted by a diagnostic. On a successful run stderr is normally **empty**;
-the only notes that exist are listed here: the creation of the default `./.gcr` directory, a hint that superseded snapshots were
+the only notes that exist are listed here: the creation of the default `./.gcr` directory (printed once the command has succeeded), a hint that superseded snapshots were
 searched (`search --all-batches`, human formats), and "reading from standard input" when a person types into a terminal.
 `--quiet` suppresses notes; it never suppresses errors. Progress lines (import) are printed only when stderr is a terminal.
 
@@ -97,6 +97,10 @@ Rules that hold for every document:
   on demand, with mode **0700**, and only at the moment of the first write; an explicit `--db`/`$GCR_DB` whose directory does not exist is
   an error, so a typo never creates directory trees. `graph build`, drafts and annotations need imported data and refuse to create an
   empty database (`DB_NOT_FOUND`).
+* **A failed command does not leave a database behind.** If `import` or `import-copy` creates the database file and then fails (not an export,
+  an unsafe ZIP, a limit, `--strict`, a bad option), the file is removed again, together with `./.gcr` when that command created it, so the
+  next read still answers `run: gcr import <export.zip>` instead of "0 conversations". A database that existed before is never removed, and
+  neither is one that holds an import.
 * A database written by a newer GCR is refused (`DB_SCHEMA_TOO_NEW`) and left untouched. `gcr doctor --db <path>` inspects a file
   read-only.
 * SQLite runs in WAL mode: next to `gcr.sqlite` you may see `-wal` and `-shm` files while a command runs.
@@ -136,7 +140,8 @@ Proxy variables, `NO_COLOR`/`FORCE_COLOR` and the terminal width are ignored: th
 
 * `gcr list | head -1`: when the reader of stdout goes away (EPIPE) the CLI closes the database and exits **0** silently.
 * **SIGINT** (Ctrl-C) and **SIGTERM** close the database and exit **130** / **143**. An import that was in flight is rolled back by SQLite
-  the next time the file is opened: a half-imported batch can never be read. (`gcr mcp` runs its own graceful shutdown and exits 0.)
+  the next time the file is opened: a half-imported batch can never be read. (A database file that the interrupted import had just created
+  stays, empty; the next import fills it.) (`gcr mcp` runs its own graceful shutdown and exits 0.)
 * Node prints "SQLite is an experimental feature" when `node:sqlite` loads. The CLI (and the MCP entry) drop exactly that one
   `ExperimentalWarning` (matched by name and message) with `src/suppress-warnings.ts`; every other warning still reaches stderr.
 
@@ -773,7 +778,7 @@ gcr graph export --out graph.html
 gcr graph export --term quokka --depth 2 --out quokka.html --force
 ```
 
-Can fail with: `NOT_IN_LOCAL_EXPORT` (3), `DB_NOT_FOUND` (5), `DB_SCHEMA_TOO_NEW` (5), `DB_ERROR` (5), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1).
+Can fail with: `NOT_IN_LOCAL_EXPORT` (3), `DB_NOT_FOUND` (5), `DB_SCHEMA_TOO_NEW` (5), `DB_ERROR` (5), `WRITE_FORBIDDEN` (6), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1). A name the file system rejects (too long) is `INVALID_ARGUMENT`; a directory you may not write to is `WRITE_FORBIDDEN`; a half-written file is always removed.
 
 ### `gcr draft create`
 
@@ -1056,8 +1061,9 @@ stack, and report it without private data.
   {"ok":false,"error":{"code":"NOT_IN_LOCAL_EXPORT","message":"The conversation is not present in the locally imported data.","remedy":"...","details":{"conversationId":"00000000-0000-4000-8000-0000000000ff","provider":"chatgpt"}},"warnings":[]}
   ```
 
-  `details` holds ids, limits and counts, never conversation text; the offending value of an argument is never echoed (a link may carry a
-  token in its query string).
+  `details` holds ids, limits and counts, never conversation text. A refused or unknown link is never echoed (a link may carry a token in its
+  query string); an id you typed for a lookup (a batch, branch, message, draft or note id) may appear in `details` of the not-found error,
+  at most 128 characters of it. File names are echoed as base names only, cut at 60 characters.
 * **`--debug`** adds the stack and the cause chain: in text mode as an indented `debug:` block, in JSON mode as `error.details.stack`.
 * Errors found while reading the command line (unknown command or option, a bad number, a missing value) are `INVALID_ARGUMENT` and exit 2
   *before* any file is opened or written. Conversation references are validated before the database is touched: a malformed id or a
@@ -1067,7 +1073,7 @@ stack, and report it without private data.
 
 | Code | Exit | When the CLI reports it | What to do |
 |---|---|---|---|
-| `INVALID_ARGUMENT` | 2 | Bad command line: unknown command/option, missing or repeated value, number out of range, bad `--format`/`--tz`, an SDK-side validation failure, an input file that is a directory or too large. | Read the message; `gcr <command> --help`. |
+| `INVALID_ARGUMENT` | 2 | Bad command line: unknown command/option, missing or repeated value, number out of range, bad `--format`/`--tz`, an SDK-side validation failure, an input file that is a directory or too large, an export file name the file system rejects (too long). | Read the message; `gcr <command> --help`. |
 | `INVALID_URL` | 2 | A link that is not a well-formed canonical `https://` URL (no scheme separator, backslashes, percent-encoding in the path, over 2048 characters). | Use `https://chatgpt.com/c/<uuid>` or a bare UUID. |
 | `INVALID_UUID` | 2 | A reference that is not a UUID, or a link whose id is not one. | Use the UUID from `gcr list`. |
 | `UNSUPPORTED_URL` | 2 | Share links (`/share/...`), other hosts (`www.`, `chat.openai.com`), `http:`, ports, user info, extra path segments. | Only `https://chatgpt.com/c/<uuid>` is accepted, and only as a key into your data. |
@@ -1088,13 +1094,13 @@ stack, and report it without private data.
 | `DB_NOT_FOUND` | 5 | The database file (or, for an explicit path, its directory) does not exist. | `run: gcr import <export.zip>`, or point `--db` / `GCR_DB` at an existing file. |
 | `DB_SCHEMA_TOO_NEW` | 5 | The file was written by a newer GCR. It is not modified. | Upgrade GCR or use another file. |
 | `DB_MIGRATION_FAILED` | 5 | A schema migration failed and was rolled back. | Report it without private data. |
-| `DB_ERROR` | 5 | Any other database failure: not a GCR database, a directory, damaged, locked, no FTS5 in this Node. `details.reason` says which. | `gcr doctor --db <path>`; follow the remedy. |
-| `WRITE_FORBIDDEN` | 6 | A write was attempted on a read-only database or file system. | Use a writable location. |
+| `DB_ERROR` | 5 | Any other database failure: not a GCR database, a directory, damaged, locked, no FTS5 in this Node, or a database in a read-only location (SQLite must create its `-wal`/`-shm` files next to it even to read). `details.reason` says which (`READ_ONLY_LOCATION` for the last). | `gcr doctor --db <path>`; follow the remedy. |
+| `WRITE_FORBIDDEN` | 6 | A write was attempted on a read-only database or file system, or where you may not write (`graph export --out` into a directory without permission: EACCES, EPERM, EROFS). | Use a writable location. |
 | `ANNOTATION_CONFLICT` | 6 | `annotate update --expected-version` does not match; `details.currentVersion` has the real one. | Re-read the note (`annotate show`), merge, retry. |
 | `NOT_IMPLEMENTED` | 7 | A disabled capability (the OpenAI developer-API adapter). No CLI option selects it. | n/a |
 | `FEATURE_GATED` | 7 | Reserved for gated features (browser interaction). No code path exists. | See [`BROWSER_GATE.md`](BROWSER_GATE.md). |
 | `REMOTE_ACCESS_FORBIDDEN` | 7 | Reserved: would be raised by anything that touched a ChatGPT consumer endpoint. There is no such code. | n/a |
-| `INTERNAL_ERROR` | 1 | An unexpected failure (a bug). Generic message, nothing leaked. | `--debug`, then report it without private data. |
+| `INTERNAL_ERROR` | 1 | An unexpected failure (a bug), generic message, nothing leaked; or a write that failed for another reason such as a full disk behind the output file or behind stdout (the message then says what could not be written). | `--debug`, then report it without private data; for a full disk, free space. |
 
 Special cases: `gcr doctor` exits 0 when all checks pass, 5 when the inspected database is unusable and 1 when the environment lacks a
 prerequisite (the report is printed either way). A signal ends the CLI with 130 (SIGINT) or 143 (SIGTERM); a closed pipe with 0.
@@ -1143,8 +1149,9 @@ gcr audit --untitled --format json | jq -e '.data.findings[0].count == 0' >/dev/
 gcr branches 00000000-0000-4000-8000-000000000001 --format json | jq -r '.data.branches[] | "\(.activeness)\t\(.branchId)"'
 
 # React to the stable exit codes, and read the JSON error from stderr
-if ! out=$(gcr get "$REF" --format json 2>err.json); then
-  case $? in
+out=$(gcr get "$REF" --format json 2>err.json); rc=$?   # read $? at once: "if ! cmd; then case $?" would always see 0
+if [ "$rc" -ne 0 ]; then
+  case $rc in
     3) jq -r '.error.code + ": " + .error.remedy' err.json ;;   # NOT_IN_LOCAL_EXPORT, ACTIVE_BRANCH_UNKNOWN, ...
     5) echo "database problem: $(jq -r .error.code err.json)" >&2 ;;
     *) cat err.json >&2 ;;

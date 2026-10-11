@@ -70,8 +70,10 @@ async function runCommand(spec: CommandSpec, rest: readonly string[], io: CliEnv
   try {
     await spec.run(ctx);
   } catch (e) {
+    ctx.discardFreshDatabase(); // a failed command does not leave the empty database it created
     throw withDefaultRemedy(e, commandLine);
   }
+  ctx.flushKeptNotes();
   return ctx.exitCode;
 }
 

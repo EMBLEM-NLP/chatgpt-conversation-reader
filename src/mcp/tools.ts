@@ -130,6 +130,28 @@ function badArgument(field: string, why: string): GcrError {
   return new GcrError('INVALID_ARGUMENT', `Invalid value for "${field}": ${why}.`, { details: { field } });
 }
 
+/**
+ * Run `call`; an error about the SDK option `from` is re-raised about the tool input `to` (message, remedy and `details.field`).
+ * The SDK names its own options ("conversationId", "query"), but the tool accepts "conversation" and "titleQuery", and the inputs
+ * are strict: a model that follows an error naming the SDK's word would retry with a key the schema rejects as unknown.
+ */
+function asInputField<T>(from: string, to: string, call: () => T): T {
+  try {
+    return call();
+  } catch (e) {
+    if (e instanceof GcrError && e.details?.['field'] === from) {
+      const rename = (text: string): string => text.replaceAll(`"${from}"`, `"${to}"`);
+      throw new GcrError(e.code, rename(e.message), {
+        ...(e.remedy === undefined ? {} : { remedy: rename(e.remedy) }),
+        details: { ...e.details, field: to },
+        warnings: e.warnings,
+        cause: e,
+      });
+    }
+    throw e;
+  }
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -190,7 +212,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
       allBatches: allBatchesField,
     }),
     reduce: PAGE_ITEMS,
-    run: (a) => gcr.list(defined(a)),
+    run: (a) => asInputField('query', 'titleQuery', () => gcr.list(defined(a))),
   });
 
   const get = defineTool({
@@ -209,6 +231,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
       allBranches: z.boolean().optional().describe('Also return one thread per branch in `threads`. Default false.'),
     }),
     reduce: [
+      { kind: 'warnings', path: ['thread', 'warnings'] },
       { kind: 'list', path: ['threads'] },
       { kind: 'list', path: ['thread', 'messages'] },
     ],
@@ -240,7 +263,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
     reduce: PAGE_ITEMS,
     run: (a) => {
       const { conversation, ...rest } = a;
-      const result = gcr.search(defined({ ...rest, conversationId: conversation }) as Parameters<Gcr['search']>[0]);
+      const result = asInputField('conversationId', 'conversation', () => gcr.search(defined({ ...rest, conversationId: conversation }) as Parameters<Gcr['search']>[0]));
       // The SDK also offers a keyset cursor; this tool does not accept one (a cut result could not give a correct one), so
       // offering it would invite a call that is refused. `nextOffset` is the one continuation.
       const { nextCursor: _cursor, ...data } = result.data;
@@ -254,7 +277,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
     description: `List every branch (root-to-leaf path) of a conversation with its activeness: active, contains_current_node, inactive or unknown. ${LOCAL_READ} ${UNTRUSTED}`,
     annotations: READ_ONLY,
     input: z.strictObject({ conversation: conversationField, provider: providerField, accountLabel: accountLabelField, batchId: batchIdField }),
-    reduce: [{ kind: 'list', path: ['branches'] }],
+    reduce: [{ kind: 'warnings', path: ['warnings'] }, { kind: 'list', path: ['branches'] }],
     run: (a) => gcr.branches(conversationRef(a), defined({ batchId: a.batchId })),
   });
 
@@ -272,7 +295,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
       branchPolicy: branchPolicyField,
       includeHidden: includeHiddenField,
     }),
-    reduce: [{ kind: 'list', path: ['messages'] }],
+    reduce: [{ kind: 'warnings', path: ['warnings'] }, { kind: 'list', path: ['messages'] }],
     run: (a) => gcr.thread(conversationRef(a), defined({ batchId: a.batchId, branch: a.branch, branchPolicy: a.branchPolicy, includeHidden: a.includeHidden })),
   });
 
@@ -294,7 +317,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
       limit: limitField(500, 100),
       offset: offsetField,
     }),
-    reduce: [{ kind: 'list', path: ['rows'], fix: fixPage }],
+    reduce: [{ kind: 'drop', path: ['formatProfiles'] }, { kind: 'list', path: ['rows'], fix: fixPage }],
     run: (a) => gcr.stats(defined(a) as Parameters<Gcr['stats']>[0]),
   });
 
@@ -316,7 +339,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
       allBatches: allBatchesField,
       sampleSize: z.number().int().min(1).max(50).optional().describe('Sample ids per finding, 1 to 50 (default 5).'),
     }),
-    reduce: [{ kind: 'list', path: ['findings'] }],
+    reduce: [{ kind: 'drop', path: ['formatProfiles'] }, { kind: 'list', path: ['findings'] }],
     run: (a) => gcr.audit(defined(a)),
   });
 
@@ -379,6 +402,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
     reduce: [{ kind: 'elide', path: ['draft', 'body'] }],
     run: async (a, ctx) => {
       assertWritesAllowed(deps);
+      ctx.signal.throwIfAborted(); // a write must not START for a call that was already cancelled or timed out
       return ctx.abortable(gcr.createDraft(defined({ conversationRef: conversationRef(a), body: a.body, title: a.title, anchorMessageId: a.anchorMessageId, namespace: a.namespace }) as Parameters<Gcr['createDraft']>[0]));
     },
   });
@@ -402,6 +426,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
     reduce: [{ kind: 'elide', path: ['annotation', 'body'] }],
     run: async (a, ctx) => {
       assertWritesAllowed(deps);
+      ctx.signal.throwIfAborted(); // see gcr_create_local_draft
       if (a.annotationId !== undefined) {
         // UPDATE: only the body changes; fields that only make sense at creation would be silently ignored, so refuse them.
         if (a.expectedVersion === undefined) throw badArgument('expectedVersion', 'is required when annotationId is given (optimistic concurrency)');
@@ -443,6 +468,7 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
       strict: z.boolean().optional().describe('Abort the whole import on any unreadable conversation instead of recording a warning. Default false.'),
     }),
     reduce: [
+      { kind: 'drop', path: ['formatProfile'] },
       { kind: 'list', path: ['files'] },
       { kind: 'list', path: ['warnings'] },
     ],
@@ -453,6 +479,9 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
       assertWritesAllowed(deps);
       // 3. Check again IMMEDIATELY before use and hand the SDK the canonical path just verified, not the caller's spelling.
       const real = await resolveApprovedImportPath(a.path, deps.approvedRoots);
+      // The checks above awaited: the client may have cancelled meanwhile, and `abortable` only stops WAITING, so an import that
+      // started now would still commit a batch nobody is waiting for.
+      ctx.signal.throwIfAborted();
       let step = 0;
       return ctx.abortable(
         gcr.importExport({

@@ -413,15 +413,25 @@ describe('import errors (exit 4)', () => {
     await bothModes(['import-copy', writeFile(cwd, 'url.json', JSON.stringify({ sourceUri: 'https://example.invalid/c/x', messages: [{ role: 'user', text: 'x' }] })), '--db', db], 'INVALID_URL', { cwd });
   });
 
-  it('a failed --strict import stores nothing', async () => {
+  it('a failed --strict import stores nothing: a new database is not even left behind, an existing one is unchanged', async () => {
     const cwd = tempDir();
-    const db = join(cwd, 'atomic.sqlite');
     const full = (await templateDb()).std.json;
     const exportPath = writeFile(cwd, 'conversations.json', full.slice(0, full.length - 40));
-    assertTextError(await gcr(['import', exportPath, '--strict', '--db', db]), 'IMPORT_PARSE_ERROR');
-    const list = await gcr(['list', '--db', db, '--format', 'json']);
-    assertOk(list);
-    assert.equal((JSON.parse(list.stdout) as { data: { items: unknown[] } }).data.items.length, 0);
+    const fresh = join(cwd, 'atomic.sqlite');
+    assertTextError(await gcr(['import', exportPath, '--strict', '--db', fresh]), 'IMPORT_PARSE_ERROR');
+    assert.equal(existsSync(fresh), false, 'the refused import did not leave an empty database');
+    assertTextError(await gcr(['list', '--db', fresh]), 'DB_NOT_FOUND', { remedy: NOT_FOUND_REMEDY });
+
+    const { dbPath } = await copyDb();
+    const count = async (): Promise<number> => {
+      const list = await gcr(['list', '--db', dbPath, '--format', 'json']);
+      assertOk(list);
+      return (JSON.parse(list.stdout) as { data: { items: unknown[] } }).data.items.length;
+    };
+    const before = await count();
+    assert.ok(before > 0);
+    assertTextError(await gcr(['import', exportPath, '--strict', '--db', dbPath]), 'IMPORT_PARSE_ERROR');
+    assert.equal(await count(), before, 'a failed strict import changes nothing in an existing database');
   });
 });
 
@@ -430,7 +440,7 @@ describe('the error table', () => {
     const cannot: Record<string, string> = {
       IMPORT_PATH_NOT_ALLOWED: 'raised only by the MCP adapter (approved import roots); the CLI imports what the operator names',
       DB_MIGRATION_FAILED: 'needs a failing schema migration; there is only schema version 1',
-      WRITE_FORBIDDEN: 'the CLI opens writable handles for writes and read-only handles for reads; a read-only file system is the only trigger',
+      WRITE_FORBIDDEN: 'needs a file system that refuses the write (read-only mount, no permission): `graph export` maps EACCES/EPERM/EROFS to it, tested with injected errors in cli.adversarial.test.ts',
       NOT_IMPLEMENTED: 'the openai_api provider is not an --provider choice of any command',
       FEATURE_GATED: 'reserved for the gated browser feature, which has no code path',
       REMOTE_ACCESS_FORBIDDEN: 'reserved; there is no code path that could reach a consumer endpoint',

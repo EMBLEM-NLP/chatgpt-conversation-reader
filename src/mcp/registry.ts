@@ -301,8 +301,10 @@ export class ToolRegistry {
           : [{ code: 'DEPRECATED_TOOL_ALIAS', message: `The tool name ${reg.name} is a deprecated alias of ${reg.canonical}; use ${reg.canonical}.` }];
       return boundEnvelope(successEnvelope(result, aliasNote), entry.reduce, this.runtime.maxResultBytes);
     } catch (e) {
-      // A real, coded failure that happened to coincide with the deadline is still reported as itself.
-      if (e instanceof GcrError) return errorEnvelope(e);
+      // A real, coded failure that happened to coincide with the deadline is still reported as itself. It obeys the size cap
+      // like a success: details can quote ids from the data (the branch ids of ACTIVE_BRANCH_UNKNOWN, the candidates of
+      // AMBIGUOUS_CONVERSATION) and a remedy is free text, so an unbounded error could close the connection (transport buffer).
+      if (e instanceof GcrError) return boundEnvelope(errorEnvelope(e), [], this.runtime.maxResultBytes);
       if (signal.aborted && !extra.signal.aborted) {
         return errorEnvelope(
           new GcrError('INTERNAL_ERROR', `The tool call exceeded its server-side deadline of ${deadlineMs} ms.`, {

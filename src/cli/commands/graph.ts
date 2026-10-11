@@ -214,7 +214,7 @@ export const graphExport: CommandSpec = {
     { command: 'graph export --out graph.html', note: 'The most connected nodes of the whole graph.' },
     { command: 'graph export --term quokka --depth 2 --out quokka.html --force', note: 'The neighbourhood of "quokka", replacing quokka.html if it exists.' },
   ],
-  errors: [...GRAPH_ERRORS],
+  errors: [...GRAPH_ERRORS, 'WRITE_FORBIDDEN'],
   async run(ctx: CommandContext): Promise<void> {
     const a = ctx.args;
     const out = a.string('out');

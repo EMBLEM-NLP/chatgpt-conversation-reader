@@ -1247,6 +1247,7 @@ Exit codes:
   2   INVALID_ARGUMENT
   3   NOT_IN_LOCAL_EXPORT
   5   DB_NOT_FOUND, DB_SCHEMA_TOO_NEW, DB_ERROR
+  6   WRITE_FORBIDDEN
 
 stdout carries only the result; notes and errors go to stderr. GCR never
 contacts chatgpt.com.

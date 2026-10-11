@@ -27,6 +27,14 @@
  *     says what was dropped. Truncation is never silent;
  *   - write results elide the echoed text body instead of failing AFTER the write was committed (a failure there would invite
  *     a retry and a duplicate);
+ *   - a bulky member that is not a list (`drop` steps: the format profile, whose keys are the export's own role names) is
+ *     removed when it alone exceeds a quarter of the cap, so that one hostile member cannot make a whole result unreturnable
+ *     (an import would be reported as failed although it committed, and stats/audit would fail whatever the arguments);
+ *   - the provenance list `source` (outside `data`) is cut to a prefix when it alone exceeds a quarter of the cap (hundreds of
+ *     import batches); the warning says how many entries are shown and `completeness` still covers all of them;
+ *   - warning lists that together exceed a quarter of the cap keep only the first ids of each warning (`warnings` steps; the SDK
+ *     repeats its tree warnings inside the payload and one warning can list 1000 ids);
+ *   - an ERROR result is bounded the same way (details and remedy are dropped when they do not fit);
  *   - only if nothing helps is the result replaced by an error that says so.
  */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -200,18 +208,103 @@ export type Reduction =
       kind: 'elide';
       /** Keys from `data` down to a string that is replaced by '' (the stored original is untouched). */
       path: readonly string[];
+    }
+  | {
+      kind: 'warnings';
+      /**
+       * Keys from `data` down to a `Warning[]` that the SDK repeats inside the payload (tree warnings are in `data.warnings` as well
+       * as in the envelope). When the warning lists together exceed a quarter of the cap, the ids of every warning in them and in
+       * the envelope are cut to the first `WARNING_IDS_KEPT`; the message keeps the SDK's own total.
+       */
+      path: readonly string[];
+    }
+  | {
+      kind: 'drop';
+      /**
+       * Keys from `data` down to an optional member that cannot be cut item by item (an object whose size depends on imported
+       * data, such as the observed `FormatProfile`, whose `roleCounts` is keyed by the export's own role names). It is removed
+       * (an array becomes `[]`) when it ALONE takes more than a quarter of the cap, and only once the whole result is over the cap.
+       */
+      path: readonly string[];
     };
 
-/** Page fields after a cut: continue at offset + kept; a keyset cursor would skip the dropped items, so it is removed. */
+/**
+ * Page fields after a cut: continue at offset + kept; a keyset cursor would skip the dropped items, so it is removed.
+ * When not even the first item fits (`kept` is 0) the continuation steps over that one item: pointing at the offset that was
+ * just asked for would make every pager that follows `nextOffset` ask for the same empty page for ever. The RESULT_TRUNCATED
+ * warning (kept 0 of N) says that the item is missing.
+ */
 export function fixPage(container: Record<string, unknown>, kept: number, total: number): void {
   if (kept >= total) return;
   const offset = typeof container['offset'] === 'number' ? container['offset'] : 0;
-  container['nextOffset'] = offset + kept;
+  container['nextOffset'] = offset + Math.max(kept, 1);
   delete container['nextCursor'];
 }
 
-const sizeOf = (env: McpEnvelope): number => Buffer.byteLength(JSON.stringify(env), 'utf8');
-const itemSize = (item: unknown): number => Buffer.byteLength(JSON.stringify(item) ?? 'null', 'utf8');
+/**
+ * The UTF-8 size of `JSON.stringify(value)` WITHOUT building that string, with an early exit: the exact size when it is at most
+ * `limit`, otherwise `limit + 1` (the walk stops at the first excess). The cap is enforced with this instead of by serializing
+ * first: a result that is enormous once serialized (many list items that share a large member, a thread of a hundred thousand
+ * messages) cost seconds and hundreds of megabytes just to learn that it was too big, and above V8's string limit
+ * (about 512 MB) `JSON.stringify` threw `RangeError: Invalid string length`, so such a call could not be answered at all.
+ *
+ * Exact for the plain JSON data an envelope holds (the rules of JSON.stringify: members that are `undefined`, functions or
+ * symbols are omitted from objects and become `null` in arrays; non-finite numbers are `null`; a BigInt throws, like
+ * JSON.stringify). A value with `toJSON` (a Date) is measured through JSON.stringify itself.
+ */
+export function jsonByteSize(value: unknown, limit: number): number {
+  let used = 0;
+  const add = (n: number): boolean => {
+    used += n;
+    return used <= limit;
+  };
+  const walk = (v: unknown, inArray: boolean): boolean => {
+    switch (typeof v) {
+      case 'string':
+        // An escaped string takes at least as many bytes as it has UTF-16 units, plus the quotes: no need to copy a huge one.
+        if (v.length > limit) {
+          used = limit + 1;
+          return false;
+        }
+        return add(Buffer.byteLength(JSON.stringify(v), 'utf8'));
+      case 'number':
+        return add(Number.isFinite(v) ? String(v).length : 4);
+      case 'boolean':
+        return add(v ? 4 : 5);
+      case 'bigint':
+        throw new TypeError('Do not know how to serialize a BigInt');
+      case 'object': {
+        if (v === null) return add(4);
+        if (typeof (v as { toJSON?: unknown }).toJSON === 'function') return add(Buffer.byteLength(JSON.stringify(v) ?? 'null', 'utf8'));
+        if (Array.isArray(v)) {
+          if (!add(2)) return false;
+          for (let i = 0; i < v.length; i++) {
+            if (i > 0 && !add(1)) return false;
+            if (!walk(v[i], true)) return false;
+          }
+          return true;
+        }
+        if (!add(2)) return false;
+        let first = true;
+        for (const key of Object.keys(v)) {
+          const member = (v as Record<string, unknown>)[key];
+          if (member === undefined || typeof member === 'function' || typeof member === 'symbol') continue;
+          if (!first && !add(1)) return false;
+          first = false;
+          if (!add(Buffer.byteLength(JSON.stringify(key), 'utf8') + 1)) return false;
+          if (!walk(member, false)) return false;
+        }
+        return true;
+      }
+      default:
+        return add(inArray ? 4 : 0); // undefined, function, symbol: `null` inside an array (an object member is skipped by the caller)
+    }
+  };
+  return walk(value, false) ? used : limit + 1;
+}
+
+/** Envelope size, exact up to `maxBytes`, `maxBytes + 1` beyond (see `jsonByteSize`). */
+const sizeOf = (env: McpEnvelope, maxBytes: number): number => jsonByteSize(env, maxBytes);
 
 function getAt(root: unknown, path: readonly string[]): unknown {
   let cur: unknown = root;
@@ -238,17 +331,27 @@ function updateAt(data: Record<string, unknown>, path: readonly string[], mutate
   return root;
 }
 
-/** All string values (up to 512 chars: ids are short) found anywhere in `value`, added to `into`. Iterative: data can be deep. */
-function collectStrings(value: unknown, into: Set<string>): void {
+/**
+ * All string values (up to 512 chars: ids are short) found anywhere in `value`, added to `into`. Iterative: data can be deep.
+ * `seen` (optional) is shared between calls: an object (or array) that an earlier call already walked is skipped, so list items
+ * that SHARE a large member (the SDK hands every branch the same message record) are walked once instead of once per item.
+ */
+function collectStrings(value: unknown, into: Set<string>, seen?: WeakSet<object>): void {
   const stack: unknown[] = [value];
   while (stack.length > 0) {
     const v = stack.pop();
     if (typeof v === 'string') {
       if (v.length <= 512) into.add(v);
-    } else if (Array.isArray(v)) {
-      for (const x of v) stack.push(x);
-    } else if (isPlainObject(v)) {
-      for (const x of Object.values(v)) stack.push(x);
+    } else if (typeof v === 'object' && v !== null) {
+      if (seen !== undefined) {
+        if (seen.has(v)) continue;
+        seen.add(v);
+      }
+      if (Array.isArray(v)) {
+        for (const x of v) stack.push(x);
+      } else if (isPlainObject(v)) {
+        for (const x of Object.values(v)) stack.push(x);
+      }
     }
   }
 }
@@ -274,6 +377,19 @@ function truncationWarning(notes: readonly string[], maxBytes: number): Warning 
   };
 }
 
+/** How many ids of one warning an oversize response still lists (the message of an SDK warning states the total). */
+export const WARNING_IDS_KEPT = 20;
+
+/** A copy of a warning list in which no warning lists more than `WARNING_IDS_KEPT` ids; the message says so. */
+function slimWarnings<T>(list: readonly T[]): T[] {
+  return list.map((w) => {
+    if (!isPlainObject(w)) return w;
+    const ids = w['ids'];
+    if (!Array.isArray(ids) || ids.length <= WARNING_IDS_KEPT) return w;
+    return { ...w, message: `${String(w['message'])} (this response lists the first ${WARNING_IDS_KEPT} ids)`, ids: ids.slice(0, WARNING_IDS_KEPT) } as T;
+  });
+}
+
 export function resultTooLargeError(maxBytes: number): GcrError {
   return new GcrError('INTERNAL_ERROR', 'The result is larger than the configured size limit and could not be reduced.', {
     remedy: `Narrow the request (smaller limit, tighter filters). The limit is ${maxBytes} bytes (GCR_MCP_MAX_RESULT_BYTES); the gcr CLI has no such limit.`,
@@ -290,27 +406,82 @@ export function resultTooLargeError(maxBytes: number): GcrError {
  * exactly when it occurs only in items that were cut (it is not elsewhere in the data and not in a kept item).
  */
 export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxBytes: number): McpEnvelope {
-  if (sizeOf(env) <= maxBytes) return env;
+  if (sizeOf(env, maxBytes) <= maxBytes) return env;
   if (!env.ok || env.data === undefined) {
     const { error, ...rest } = env;
     const slim: McpEnvelope = { ...rest, ...(error === undefined ? {} : { error: { code: error.code, message: error.message } }) };
-    return sizeOf(slim) <= maxBytes ? slim : errorEnvelope(resultTooLargeError(maxBytes));
+    return sizeOf(slim, maxBytes) <= maxBytes ? slim : errorEnvelope(resultTooLargeError(maxBytes));
   }
 
   let data: Record<string, unknown> = env.data;
   let ids = env.ids;
+  let source = env.source;
+  let baseWarnings = env.warnings;
   const notes: string[] = [];
   const assemble = (d: Record<string, unknown>, ns: readonly string[], i: McpEnvelope['ids']): McpEnvelope => ({
     ...env,
     data: d,
+    source,
     ids: i,
     truncated: true,
-    warnings: [...env.warnings, truncationWarning(ns, maxBytes)],
+    warnings: [...baseWarnings, truncationWarning(ns, maxBytes)],
   });
 
+  // The provenance list (one entry per import batch that contributed) lives outside `data`, so no plan can shorten it, and a
+  // database with a few hundred separate batches (every manual copy is one) would make stats and audit unanswerable for ever.
+  // When it alone takes more than a quarter of the cap it is cut to the longest prefix that fits in that quarter. `completeness`
+  // was computed over ALL batches and stays as it is; the warning says how many entries are shown.
+  const sourceBudget = Math.floor(maxBytes / 4);
+  if (jsonByteSize(source, sourceBudget) > sourceBudget) {
+    let lo = 0;
+    let hi = source.length - 1;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (jsonByteSize(source.slice(0, mid), sourceBudget) <= sourceBudget) lo = mid;
+      else hi = mid - 1;
+    }
+    notes.push(`source: kept ${lo} of ${source.length} import batches (completeness still describes all of them)`);
+    source = source.slice(0, lo);
+    const candidate = assemble(data, notes, ids);
+    if (sizeOf(candidate, maxBytes) <= maxBytes) return candidate;
+  }
+
+  // Warning lists: one warning can list 1000 ids (about 40 KB) and the SDK repeats the tree warnings inside `data`, so a few
+  // such warnings fill the whole cap and nothing else can be cut to make room. When the lists together take more than a quarter of
+  // the cap, every warning keeps only its first ids (the message of an SDK warning already states the total).
+  const warningPaths = plan.flatMap((step) => (step.kind === 'warnings' ? [step.path] : []));
+  const warningBytes = [baseWarnings, ...warningPaths.map((path) => getAt(data, path))].reduce<number>((sum, list) => sum + (Array.isArray(list) ? jsonByteSize(list, sourceBudget) : 0), 0);
+  if (warningBytes > sourceBudget) {
+    baseWarnings = slimWarnings(baseWarnings);
+    for (const path of warningPaths) {
+      data = updateAt(data, path, (container, key) => {
+        const list = container[key];
+        if (Array.isArray(list)) container[key] = slimWarnings(list);
+      });
+    }
+    notes.push(`warnings: the ids listed per warning were cut to the first ${WARNING_IDS_KEPT}`);
+    const candidate = assemble(data, notes, ids);
+    if (sizeOf(candidate, maxBytes) <= maxBytes) return candidate;
+  }
+
   for (const step of plan) {
+    if (step.kind === 'warnings') continue; // handled above
     const label = `data.${step.path.join('.')}`;
     const target = getAt(data, step.path);
+
+    if (step.kind === 'drop') {
+      if (target === undefined) continue;
+      const bytes = jsonByteSize(target, maxBytes);
+      if (bytes * 4 <= maxBytes) continue; // small enough to keep: only a member that dominates the cap is sacrificed
+      data = updateAt(data, step.path, (container, key) => {
+        if (Array.isArray(container[key])) container[key] = [];
+        else delete container[key];
+      });
+      notes.push(`${label} omitted from this response (${bytes > maxBytes ? `more than ${maxBytes}` : bytes} bytes; the stored original is unchanged)`);
+      const candidate = assemble(data, notes, ids);
+      if (sizeOf(candidate, maxBytes) <= maxBytes) return candidate;
+      continue;
+    }
 
     if (step.kind === 'elide') {
       if (typeof target !== 'string' || target === '') continue;
@@ -319,7 +490,7 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
       });
       notes.push(`${label} omitted from this response (${Buffer.byteLength(target, 'utf8')} bytes; the stored original is unchanged)`);
       const candidate = assemble(data, notes, ids);
-      if (sizeOf(candidate) <= maxBytes) return candidate;
+      if (sizeOf(candidate, maxBytes) <= maxBytes) return candidate;
       continue;
     }
 
@@ -331,7 +502,7 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
         container[key] = items.slice(0, n);
         step.fix?.(container, n, total);
       });
-    const noteFor = (n: number): string => `${label}: kept ${n} of ${total} items`;
+    const noteFor = (n: number): string => `${label}: kept ${n} of ${total} items${n === 0 ? ' (even the first one does not fit)' : ''}`;
 
     // Which ids survive a cut to n items: those found elsewhere in the data, those in no item of this list, and those whose
     // first occurrence in the list is among the kept items.
@@ -342,9 +513,11 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
     for (const key of IDS_KEYS) for (const id of ids[key] ?? []) universe.add(id);
     const firstIndex = new Map<string, number>();
     if (universe.size > 0) {
+      // Only the FIRST item that holds an id matters, so an object already walked for an earlier item is not walked again.
+      const walked = new WeakSet<object>();
       for (let i = 0; i < total; i++) {
         const found = new Set<string>();
-        collectStrings(items[i], found);
+        collectStrings(items[i], found, walked);
         for (const s of found) if (universe.has(s) && !firstIndex.has(s)) firstIndex.set(s, i);
       }
     }
@@ -354,7 +527,7 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
         const first = firstIndex.get(id);
         return first === undefined || first < n;
       });
-    const probe = (n: number): number => sizeOf(assemble(n === 0 ? emptied : cut(n), [...notes, noteFor(n)], idsFor(n)));
+    const probe = (n: number): number => sizeOf(assemble(n === 0 ? emptied : cut(n), [...notes, noteFor(n)], idsFor(n)), maxBytes);
 
     const emptySize = probe(0);
     if (emptySize > maxBytes) {
@@ -370,7 +543,7 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
     let estimate = emptySize;
     let upper = 0;
     for (let i = 0; i < total; i++) {
-      estimate += itemSize(items[i]) + 1;
+      estimate += jsonByteSize(items[i], maxBytes - estimate) + 1;
       if (estimate > maxBytes) break;
       upper = i + 1;
     }

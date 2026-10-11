@@ -73,9 +73,13 @@ export function resolveRoute(argv: readonly string[]): Route {
     }
     if (isOption(token)) {
       rest.push(token);
-      if (token.startsWith('--') && !token.includes('=') && VALUE_GLOBALS.has(token.slice(2)) && i + 1 < argv.length) {
+      // The value of a global option is skipped when looking for the command word. A word that is itself an option (`--db
+      // --format json list`) is NOT a value: it is left to the parser, which then reports "--db needs a value" instead of
+      // swallowing `--format` and mistaking `json` for the command.
+      const next = argv[i + 1];
+      if (token.startsWith('--') && !token.includes('=') && VALUE_GLOBALS.has(token.slice(2)) && next !== undefined && !isOption(next)) {
         i++;
-        rest.push(argv[i] as string);
+        rest.push(next);
       }
       continue;
     }
@@ -96,6 +100,11 @@ export function resolveRoute(argv: readonly string[]): Route {
   if (head === 'help') {
     const target = words.slice(1);
     if (target.length === 0) return { kind: 'help-root' };
+    if (target[0] === 'help') {
+      // `gcr help help`: help is a word of the root help, not a command with a page of its own.
+      if (target.length > 1) throw unknownCommand(target[1] as string, [], 'help');
+      return { kind: 'help-root' };
+    }
     const leaf = findLeaf(target[0] as string);
     if (leaf !== undefined) {
       if (target.length > 1) throw unknownCommand(target[1] as string, [], leaf.path[0]);

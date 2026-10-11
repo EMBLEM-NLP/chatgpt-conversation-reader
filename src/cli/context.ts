@@ -14,7 +14,7 @@
  * The SDK (and with it node:sqlite) is imported lazily so `gcr --help` and `gcr --version` start instantly and never
  * load SQLite.
  */
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, rmdirSync, statSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import type { OutputFormat } from '../domain/types.js';
 import { GcrError } from '../errors.js';
@@ -113,6 +113,13 @@ export function dbNotFound(path: string): GcrError {
   });
 }
 
+/** A database file (and, for the default location, its directory) that THIS command created and may therefore take back. */
+interface FreshDatabase {
+  readonly gcr: Gcr;
+  /** The `./.gcr` directory when this command created it too. */
+  readonly dir: string | undefined;
+}
+
 export class CommandContext {
   readonly spec: CommandSpec;
   readonly args: ParsedArgs;
@@ -126,6 +133,8 @@ export class CommandContext {
   readonly db: DbLocation;
   /** Set by a command that finishes normally but wants a non-zero exit (doctor with problems). */
   exitCode = 0;
+  private fresh: FreshDatabase | undefined;
+  private readonly keptNotes: string[] = [];
 
   constructor(init: {
     spec: CommandSpec;
@@ -158,6 +167,51 @@ export class CommandContext {
     if (!this.quiet) this.io.out.stderr(`note: ${text}\n`);
   }
 
+  /**
+   * Print the notes about things the command did and KEPT (a directory it created). They wait until the command succeeded, so a
+   * failure that takes the directory back never claims to have created it.
+   */
+  flushKeptNotes(): void {
+    for (const text of this.keptNotes.splice(0)) this.note(text);
+  }
+
+  /**
+   * Take back a database this command created when the command then FAILED. A refused import (not an export, a bad option,
+   * a limit, an unsafe ZIP) must not leave an empty database behind: the next read would answer "0 conversations" instead of
+   * "run: gcr import", and a failed command would have changed the file system. Only a file that did not exist before the
+   * command is ever removed, and only while it holds no import: if anything was stored, or if that cannot be told, it stays.
+   * Never throws.
+   */
+  discardFreshDatabase(): void {
+    const fresh = this.fresh;
+    this.fresh = undefined;
+    if (fresh === undefined) return;
+    try {
+      if (fresh.gcr.listBatches().length > 0) return;
+    } catch {
+      return;
+    }
+    try {
+      fresh.gcr.close();
+    } catch {
+      // the file is what matters now
+    }
+    for (const suffix of ['', '-wal', '-shm', '-journal']) {
+      try {
+        rmSync(this.db.path + suffix, { force: true });
+      } catch {
+        // best effort
+      }
+    }
+    if (fresh.dir !== undefined) {
+      try {
+        rmdirSync(fresh.dir); // only succeeds while the directory is empty
+      } catch {
+        // someone else put something there: leave it
+      }
+    }
+  }
+
   renderOptions(extra: { includeHidden?: boolean } = {}): RenderOptions {
     return { format: this.format, tz: this.tz, ...(extra.includeHidden === true ? { includeHidden: true } : {}) };
   }
@@ -166,7 +220,23 @@ export class CommandContext {
   async openRead(): Promise<Gcr> {
     if (!dbExists(this.db.path)) throw dbNotFound(this.db.path);
     const { Gcr: GcrClass } = await import('../sdk/gcr.js');
-    const gcr = GcrClass.open({ dbPath: this.db.path, readOnly: true, actor: 'cli' });
+    let gcr: Gcr;
+    try {
+      gcr = GcrClass.open({ dbPath: this.db.path, readOnly: true, actor: 'cli' });
+    } catch (e) {
+      // A read-only open can only be refused for writing when SQLite itself needs to write: a WAL database wants its -wal and
+      // -shm files next to it, even to read. In a read-only location (a mounted backup, another user's directory) WRITE_FORBIDDEN
+      // ("local write path", exit 6, "open it read-write") would blame a write nobody asked for and offer an option that does not
+      // exist. Say what is going on, as the storage error it is.
+      if (e instanceof GcrError && e.code === 'WRITE_FORBIDDEN') {
+        throw new GcrError('DB_ERROR', `The database "${basename(this.db.path)}" cannot be read where it is: SQLite has to create its -wal and -shm files next to it, and that location is read-only.`, {
+          remedy: 'Copy the database file (and its -wal file, if one exists) to a directory you can write to and point --db there, or make this directory writable.',
+          details: { reason: 'READ_ONLY_LOCATION' },
+          cause: e,
+        });
+      }
+      throw e;
+    }
     this.io.lifecycle.add(() => gcr.close());
     return gcr;
   }
@@ -177,8 +247,10 @@ export class CommandContext {
    * they fail with DB_NOT_FOUND instead of leaving an empty database behind.
    */
   async openWrite(opts: { mustExist?: boolean } = {}): Promise<Gcr> {
-    if (opts.mustExist === true && !dbExists(this.db.path)) throw dbNotFound(this.db.path);
+    const existed = dbExists(this.db.path);
+    if (opts.mustExist === true && !existed) throw dbNotFound(this.db.path);
     const dir = dirname(this.db.path);
+    let createdDir: string | undefined;
     if (this.db.origin === 'default' && !existsSync(dir)) {
       try {
         mkdirSync(dir, { mode: 0o700 });
@@ -189,11 +261,13 @@ export class CommandContext {
           cause: e,
         });
       }
-      this.note('created ./.gcr (mode 0700) for the default database');
+      createdDir = dir;
+      this.keptNotes.push('created ./.gcr (mode 0700) for the default database');
     }
     const { Gcr: GcrClass } = await import('../sdk/gcr.js');
     const gcr = GcrClass.open({ dbPath: this.db.path, actor: 'cli' });
     this.io.lifecycle.add(() => gcr.close());
+    if (!existed) this.fresh = { gcr, dir: createdDir };
     return gcr;
   }
 }

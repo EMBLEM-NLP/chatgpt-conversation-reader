@@ -11,8 +11,11 @@
  *    machine formats pass through unchanged.
  *  - A closed pipe (`gcr list | head -1`) is not an error: EPIPE on stdout is detected, further output is dropped and
  *    the registered handler runs once (the caller closes the database and exits 0).
+ *  - Any other failure to write the result (a full disk behind `> file`, an I/O error) is reported once, by what it is, as
+ *    INTERNAL_ERROR (exit 1) with a message that blames neither a bug nor the user's input.
  *  - No `console.*` anywhere: console would add its own formatting and its own error handling.
  */
+import { GcrError } from '../errors.js';
 
 export interface Output {
   /** Write result text to stdout (dropped silently after a broken pipe). */
@@ -38,6 +41,17 @@ export function scrub(text: string): string {
   return text.replace(CONTROL, (m) => `\\u${m.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`);
 }
 
+/** A stdout failure other than a closed pipe. Only the errno name (ENOSPC, EIO, ...) is kept; the raw message may hold a path. */
+function stdoutFailure(err: unknown): GcrError {
+  const code = (err as { code?: unknown } | null)?.code;
+  const errno = typeof code === 'string' && /^E[A-Z0-9]{2,14}$/.test(code) ? code : undefined;
+  return new GcrError('INTERNAL_ERROR', 'The result could not be written to standard output.', {
+    remedy: 'Check that the destination of the output is writable and has free space.',
+    details: { reason: 'STDOUT_WRITE_FAILED', ...(errno === undefined ? {} : { errno }) },
+    cause: err,
+  });
+}
+
 /** The real thing: writes to this process's stdout and stderr. */
 export function createProcessOutput(): Output {
   let broken = false;
@@ -58,7 +72,7 @@ export function createProcessOutput(): Output {
       return;
     }
     // Any other stdout failure (EIO, ENOSPC, ...) is a real problem: rethrow so the process-level handler reports it.
-    throw err;
+    throw stdoutFailure(err);
   });
   // Nobody can be told about a failing stderr; an unhandled 'error' event would crash the process with a stack trace.
   process.stderr.on('error', () => undefined);
@@ -66,7 +80,16 @@ export function createProcessOutput(): Output {
   return {
     stdout(text: string): void {
       if (broken) return;
-      process.stdout.write(scrub(text));
+      try {
+        process.stdout.write(scrub(text));
+      } catch (e) {
+        // A file or device behind stdout reports its failure by throwing from write(); a pipe reports it as an 'error' event.
+        if ((e as { code?: unknown } | null)?.code === 'EPIPE') {
+          noteBroken();
+          return;
+        }
+        throw stdoutFailure(e);
+      }
     },
     stderr(text: string): void {
       process.stderr.write(scrub(text));

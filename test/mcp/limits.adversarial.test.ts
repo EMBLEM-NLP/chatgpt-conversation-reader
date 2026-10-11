@@ -10,6 +10,9 @@
  *     copy is JSON-escaped again, so a quote- or backslash-heavy payload costs up to 3x the cap on the wire. The largest
  *     configurable cap (4 MiB) could therefore produce a 12 MB frame, above the 10 MiB ReadBuffer limit of the SDK transport,
  *     which closes the connection. The largest allowed cap must keep even the worst case below that limit.
+ *  3. An ERROR result was never measured against the cap: `GcrError` details (the branch ids of ACTIVE_BRANCH_UNKNOWN, the
+ *     candidates of AMBIGUOUS_CONVERSATION) and the free-text remedy went out as they were (2.7 MB for a cap of 20 KB in the
+ *     rig below). Errors must be bounded exactly like successes.
  */
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -205,11 +208,13 @@ describe('an error answer obeys the size cap exactly like a success', () => {
     const rig = await failingRig(() => new GcrError('AMBIGUOUS_CONVERSATION', 'The id exists several times.', { remedy: 'Name one.', details: { candidates: Array.from({ length: 50_000 }, (_, i) => ({ provider: 'chatgpt', accountLabel: `account-${i}` })) } }), 20_000);
     try {
       const res = await callTool(rig.client, 'rig_fail', {});
+      // Size first, with a short message: a failing assert.equal on the 50 000 candidates would try to diff them and exhaust memory.
+      const bytes = Buffer.byteLength((res.content[0] as { text: string }).text);
+      assert.ok(bytes <= 20_000, `the error answer is ${bytes} bytes for a cap of 20000`);
       const env = envelopeOf(res);
       assert.equal(env.error?.code, 'AMBIGUOUS_CONVERSATION');
       assert.equal(env.error?.message, 'The id exists several times.');
-      assert.equal(env.error?.details, undefined, 'the oversize details were dropped');
-      assert.ok(Buffer.byteLength((res.content[0] as { text: string }).text) <= 20_000);
+      assert.ok(env.error?.details === undefined, 'the oversize details were dropped');
     } finally {
       await rig.close();
     }
@@ -219,9 +224,10 @@ describe('an error answer obeys the size cap exactly like a success', () => {
     const rig = await failingRig(() => new GcrError('DB_ERROR', 'The database failed.', { remedy: 'r'.repeat(300_000) }), 20_000);
     try {
       const res = await callTool(rig.client, 'rig_fail', {});
+      const bytes = Buffer.byteLength((res.content[0] as { text: string }).text);
+      assert.ok(bytes <= 20_000, `the error answer is ${bytes} bytes for a cap of 20000`);
       const env = envelopeOf(res);
       assert.equal(env.ok, false);
-      assert.ok(Buffer.byteLength((res.content[0] as { text: string }).text) <= 20_000, 'within the cap');
     } finally {
       await rig.close();
     }
