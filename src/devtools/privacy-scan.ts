@@ -111,7 +111,10 @@ const REFERENCE_CONVERSATION_ID = '6ac95b6e-9fa0-83e8-bbb0-8107079a8720';
 // The nil UUID is a documented sentinel (no version/variant bits, so no real conversation can carry it); tests use it
 // to exercise id validation, and it identifies nothing.
 const SYNTHETIC_FILE_ID = /^file[-_]0{16}/i;
-const SYNTHETIC_ID = /^(?:00000000-0000-4000-8000-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000)$/;
+// Synthetic conversation-id forms (all-zero first group is the repo convention). The second form lets the FIRST group be anything
+// as long as the other four groups are the fixed synthetic tail with ten leading zeros: a real random UUIDv4 would have to draw
+// group2 = 0000, group3 = 4000, group4 = 8000 and 40 zero bits in group5 (about 2^-82), so this cannot hide a genuine conversation.
+const SYNTHETIC_ID = /^(?:00000000-0000-4000-8000-[0-9a-f]{12}|[0-9a-f]{8}-0000-4000-8000-0000000000[0-9a-f]{2}|00000000-0000-0000-0000-000000000000)$/;
 
 // ---- helpers: masking, sorting ----------------------------------------------------------------------------------
 
