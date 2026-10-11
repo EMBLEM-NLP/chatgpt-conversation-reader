@@ -32,8 +32,8 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { crc32 } from 'node:zlib';
@@ -74,13 +74,28 @@ const EXPECTED = {
   visibleMessages: 109, // non-hidden, non-structural messages (what stats counts)
   auditedMessages: 116, // non-structural messages (what audit scans), hidden ones included
   graphMessagesScanned: 109,
+  hiddenMessages: 7, // all in F04: system scaffolding, memory, thoughts, one visually hidden note
+  hiddenConversationVisible: 16, // F04 thread without / with hidden messages
+  hiddenConversationAll: 23,
+  modelRows: [
+    // [key, messages]: only what the source stated on the message itself; default_model_slug must never be used
+    [null, 92],
+    ['synthetic-model-1', 14],
+    ['synthetic-model-2', 3],
+  ],
+  searchSynthetic: 91, // hits for "synthetic" (limit 200) without / with hidden messages
+  searchSyntheticHidden: 97,
 };
 const IDS = {
   linear: '00000000-0000-4000-8000-000000000001', // F01: two messages, a valid current node
   branching: '00000000-0000-4000-8000-000000000002', // F02: three branches, active one named by the export
   hostile: '00000000-0000-4000-8000-000000000009', // F09: control characters, bidi, lone surrogates in titles and text
   absent: '00000000-0000-4000-8000-0000000000ff', // in no fixture
+  contentTypes: '00000000-0000-4000-8000-000000000004', // F04: holds the seven hidden messages
 };
+/** Text that exists only in a hidden message of F04 ("synthetic system scaffolding"). */
+const HIDDEN_TERM = 'scaffolding';
+const HIDDEN_MESSAGE_ID = '00000000-0000-4000-8000-000000000010';
 const F01_MESSAGES = ['00000000-0000-4000-8000-000000000010', '00000000-0000-4000-8000-000000000011'];
 const F02_ACTIVE_BRANCH = '00000000-0000-4000-8000-000000000013';
 
@@ -238,7 +253,9 @@ const st = {
   loadedLog: '',
   zipBytes: null,
   fixtureElementCounts: [],
-  ledger: [], // every byte any product process wrote to stdout or stderr
+  ledger: [], // every byte any product process wrote to stdout or stderr, plus every MCP tool result
+  bodies: [], // message texts of the fixtures (printable ASCII, 12+ chars): must not appear where no message text belongs
+  titles: [], // conversation titles of the fixtures (same rule)
   spawned: 0, // product processes started (each must have loaded the guard)
   version: '',
 };
@@ -330,6 +347,7 @@ const expectError = (r, what, exit, code) => {
   same(r.code, exit, `${what} exit code`);
   same(errorCodeOf(r), code, `${what} error code`);
   same(r.stdout, '', `${what} stdout`);
+  leakCheck(r.stderr, `${what} stderr`, 'none');
 };
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -411,13 +429,47 @@ const readLines = (path) => (existsSync(path) ? lines(readFileSync(path, 'utf8')
 const HAZARD = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\u{e0000}-\u{e007f}]/u;
 const noHazards = (text, what) => must(!HAZARD.test(text), `${what}: raw control, bidi or separator character on the wire`);
 
+// Imported text must stay inside the commands whose job is to show it. 'none': no message text and no title may appear
+// (import, doctor, stats, audit, graph, drafts, errors); 'titles': titles are expected, message text is not (list, branches,
+// graph query); 'any': message text is expected (get, thread, search). The needles are whole strings taken from the fixtures
+// (the canary only guards the decoy files), so a field that leaks "just a sample" into a report is caught.
+function distinctTexts(fixtureDocs) {
+  const printable = (v) => typeof v === 'string' && /^[\x20-\x7e]{12,}$/.test(v);
+  const bodies = new Set();
+  const titles = new Set();
+  for (const doc of fixtureDocs) {
+    const conversations = Array.isArray(doc) ? doc : Array.isArray(doc?.conversations) ? doc.conversations : [doc];
+    for (const c of conversations) {
+      if (c === null || typeof c !== 'object') continue;
+      if (printable(c.title)) titles.add(c.title);
+      for (const node of Object.values(c.mapping ?? {})) {
+        const content = node?.message?.content;
+        for (const part of Array.isArray(content?.parts) ? content.parts : []) if (printable(part)) bodies.add(part);
+        if (printable(content?.text)) bodies.add(content.text);
+      }
+    }
+  }
+  return { bodies: [...bodies], titles: [...titles] };
+}
+const countIn = (needles, text) => needles.filter((n) => text.includes(n)).length;
+function leakCheck(text, what, level) {
+  if (level === 'any') return;
+  const bodies = countIn(st.bodies, text);
+  must(bodies === 0, `${what}: ${bodies} imported message text(s) appear in output that must not carry message text`);
+  if (level === 'none') {
+    const titles = countIn(st.titles, text);
+    must(titles === 0, `${what}: ${titles} conversation title(s) appear in output that must not carry titles`);
+  }
+}
+
 const FORMATS = ['json', 'markdown', 'compact', 'jsonl'];
 
 /** Parse and validate one run in the given format; returns what the format-specific assertions need. */
-function validate(format, r, what) {
+function validate(format, r, what, leak) {
   expectOk(r, what);
   must(r.stdout.length > 0, `${what}: stdout is empty`);
   noHazards(r.stdout, what);
+  leakCheck(r.stdout, what, leak);
   if (format === 'json') {
     const doc = parseJson(r.stdout, what);
     same(doc.ok, true, `${what} ok`);
@@ -456,7 +508,7 @@ function validate(format, r, what) {
 }
 
 /** Run one command in all four formats (two at a time) and hand the parsed results to `assertions`. */
-async function readCheck(label, args, assertions) {
+async function readCheck(label, args, leak, assertions) {
   const runs = {};
   await Promise.all(
     FORMATS.map(async (f) => {
@@ -464,7 +516,7 @@ async function readCheck(label, args, assertions) {
     }),
   );
   const parsed = {};
-  for (const f of FORMATS) parsed[f] = validate(f, runs[f], `${label} (${f})`);
+  for (const f of FORMATS) parsed[f] = validate(f, runs[f], `${label} (${f})`, leak);
   assertions(parsed, runs);
   return parsed;
 }
@@ -521,6 +573,7 @@ async function main() {
   // ---- 2. fixtures and archive --------------------------------------------------------------------------------------
   await check('fixtures: 13 synthetic files carry the marker; archive built with two canary decoys', async () => {
     const entries = [];
+    const docs = [];
     st.fixtureElementCounts = [];
     for (const [i, file] of FIXTURE_FILES.entries()) {
       const path = join(opts.fixtures, file);
@@ -529,6 +582,7 @@ async function main() {
       must(bytes.includes(MARKER), `fixture ${i + 1} lacks the synthetic marker`);
       must(!bytes.includes(CANARY_HEX), `fixture ${i + 1} contains the canary`);
       const parsed = JSON.parse(bytes.toString('utf8'));
+      docs.push(parsed);
       st.fixtureElementCounts.push(Array.isArray(parsed) ? parsed.length : 1);
       entries.push({ name: `conversations-${String(i + 1).padStart(3, '0')}.json`, data: bytes });
     }
@@ -539,6 +593,8 @@ async function main() {
     writeFileSync(st.zip, st.zipBytes);
     must(st.zipBytes.includes(CANARY), 'the canary decoy is not in the archive');
     same(st.fixtureElementCounts.reduce((a, b) => a + b, 0), EXPECTED.conversationsRead, 'conversation elements in the fixtures');
+    ({ bodies: st.bodies, titles: st.titles } = distinctTexts(docs));
+    must(st.bodies.length >= 50 && st.titles.length >= 20, `too few distinct fixture texts for the leak scan (${st.bodies.length} bodies, ${st.titles.length} titles)`);
   });
 
   // ---- 3. doctor ------------------------------------------------------------------------------------------------------
@@ -554,8 +610,10 @@ async function main() {
     const minimum = /(\d+\.\d+)/.exec(engines)?.[1];
     must(minimum !== undefined && String(doc.data.node.requiredRange).includes(minimum), 'doctor does not state the minimum Node of package.json');
     same(doc.data.network.used, false, 'doctor network.used');
+    leakCheck(r.stdout, 'doctor', 'none');
     const md = await cli(['doctor']);
     expectOk(md, 'doctor markdown');
+    leakCheck(md.stdout, 'doctor markdown', 'none');
     must(md.stdout.includes('Capability modes') && md.stdout.includes(minimum), 'doctor markdown lacks the modes or the minimum Node');
     const v = await cli(['--version']);
     expectOk(v, 'version');
@@ -568,6 +626,7 @@ async function main() {
   await check('cli: import stores the export (13 shards, pinned counts, database mode 0600, quiet stderr)', async () => {
     const r = await cli(['import', st.zip, '--db', st.db, '--format', 'json']);
     expectOk(r, 'import');
+    leakCheck(r.stdout, 'import', 'none'); // the report is counts, codes and ids: never message text, never a title
     const d = parseJson(r.stdout, 'import').data;
     same(d.alreadyImported, false, 'alreadyImported');
     same(d.provider, 'chatgpt', 'provider');
@@ -593,6 +652,7 @@ async function main() {
   await check('cli: importing the same archive again is alreadyImported with equal counts', async () => {
     const r = await cli(['import', st.zip, '--db', st.db, '--format', 'json']);
     expectOk(r, 'second import');
+    leakCheck(r.stdout, 'second import', 'none');
     const d = parseJson(r.stdout, 'second import').data;
     same(d.alreadyImported, true, 'alreadyImported');
     same(d.batchId, firstBatch, 'batch id');
@@ -609,8 +669,9 @@ async function main() {
   const sumRows = (rows, key = 'messages') => rows.reduce((a, r) => a + r[key], 0);
 
   await check('cli read: list (json, markdown, compact, jsonl)', () =>
-    readCheck('list', ['list'], (p) => {
+    readCheck('list', ['list'], 'titles', (p, runs) => {
       const d = p.json.doc.data;
+      must(countIn(st.titles, runs.json.stdout) >= 20, 'sensitivity of the leak scan: list shows fewer than 20 fixture titles');
       same(d.total, EXPECTED.conversationsStored, 'total conversations');
       same(d.items.length, EXPECTED.conversationsStored, 'items on the page');
       same(new Set(d.items.map((i) => i.conversationId)).size, EXPECTED.conversationsStored, 'distinct ids');
@@ -618,8 +679,9 @@ async function main() {
     }));
 
   await check('cli read: get <uuid> (json, markdown, compact, jsonl)', () =>
-    readCheck('get uuid', ['get', IDS.linear], (p) => {
+    readCheck('get uuid', ['get', IDS.linear], 'any', (p, runs) => {
       const d = p.json.doc.data;
+      must(countIn(st.bodies, runs.json.stdout) >= 2, 'sensitivity of the leak scan: get shows fewer than 2 fixture message texts');
       same(p.json.doc.completeness, 'exported_tree', 'completeness');
       deepSame(d.messages.map((m) => m.id), F01_MESSAGES, 'message ids');
       deepSame(d.messages.map((m) => m.authorRole), ['user', 'assistant'], 'roles');
@@ -629,7 +691,7 @@ async function main() {
     }));
 
   await check('cli read: get https://chatgpt.com/c/<uuid> returns the same thread as the bare uuid', async () => {
-    const byUrl = await readCheck('get url', ['get', `https://chatgpt.com/c/${IDS.linear}`], (p) => {
+    const byUrl = await readCheck('get url', ['get', `https://chatgpt.com/c/${IDS.linear}`], 'any', (p) => {
       deepSame(p.json.doc.data.messages.map((m) => m.id), F01_MESSAGES, 'message ids');
     });
     const byId = await cli(['get', IDS.linear, '--format', 'json']);
@@ -638,12 +700,12 @@ async function main() {
   });
 
   await check('cli read: get on the hostile fixture is safe in every format (no raw control or bidi characters)', () =>
-    readCheck('get hostile', ['get', IDS.hostile], (p) => {
+    readCheck('get hostile', ['get', IDS.hostile], 'any', (p) => {
       must(p.json.doc.data.messages.length >= 1, 'no messages');
     }));
 
   await check('cli read: search (json, markdown, compact, jsonl)', () =>
-    readCheck('search', ['search', 'answer', '--conversation', IDS.linear], (p) => {
+    readCheck('search', ['search', 'answer', '--conversation', IDS.linear], 'any', (p) => {
       const d = p.json.doc.data;
       same(d.items.length, 1, 'hits');
       same(d.items[0].messageId, F01_MESSAGES[1], 'hit message id');
@@ -652,7 +714,7 @@ async function main() {
     }));
 
   await check('cli read: branches (json, markdown, compact, jsonl)', () =>
-    readCheck('branches', ['branches', IDS.branching], (p) => {
+    readCheck('branches', ['branches', IDS.branching], 'titles', (p) => {
       const d = p.json.doc.data;
       same(d.branches.length, 3, 'branches');
       same(d.activeBranchId, F02_ACTIVE_BRANCH, 'active branch');
@@ -661,7 +723,7 @@ async function main() {
     }));
 
   await check('cli read: thread (json, markdown, compact, jsonl)', () =>
-    readCheck('thread', ['thread', IDS.branching], (p) => {
+    readCheck('thread', ['thread', IDS.branching], 'any', (p) => {
       const d = p.json.doc.data;
       same(d.branchId, F02_ACTIVE_BRANCH, 'branch id');
       same(d.messages.length, 4, 'messages');
@@ -669,17 +731,20 @@ async function main() {
     }));
 
   await check('cli read: stats --group-by model', () =>
-    readCheck('stats model', ['stats', '--group-by', 'model'], (p) => {
+    readCheck('stats model', ['stats', '--group-by', 'model'], 'none', (p) => {
       const d = p.json.doc.data;
       same(d.groupBy, 'model', 'groupBy');
       same(d.totals.messages, EXPECTED.visibleMessages, 'total messages');
       same(sumRows(d.rows), EXPECTED.visibleMessages, 'sum of rows');
       must(d.rows.some((r) => r.key === null && r.label === 'unknown (not supplied by source)'), 'no explicit "unknown" model group');
       must(d.rows.some((r) => r.key === 'synthetic-model-1'), 'the model the export states is missing');
+      // Exact groups: a model is counted only where the message itself names one. Every conversation carries a
+      // default_model_slug ("synthetic-default-model") that must never turn up as a group or move a message out of "unknown".
+      deepSame(Object.fromEntries(d.rows.map((r) => [String(r.key), r.messages])), Object.fromEntries(EXPECTED.modelRows.map(([k, n]) => [String(k), n])), 'messages per model group');
     }));
 
   await check('cli read: stats --group-by role', () =>
-    readCheck('stats role', ['stats', '--group-by', 'role'], (p) => {
+    readCheck('stats role', ['stats', '--group-by', 'role'], 'none', (p) => {
       const d = p.json.doc.data;
       same(d.totals.messages, EXPECTED.visibleMessages, 'total messages');
       same(sumRows(d.rows), EXPECTED.visibleMessages, 'sum of rows');
@@ -687,7 +752,7 @@ async function main() {
     }));
 
   await check('cli read: stats --group-by day', () =>
-    readCheck('stats day', ['stats', '--group-by', 'day'], (p) => {
+    readCheck('stats day', ['stats', '--group-by', 'day'], 'none', (p) => {
       const d = p.json.doc.data;
       same(d.totals.messages, EXPECTED.visibleMessages, 'total messages');
       same(sumRows(d.rows), EXPECTED.visibleMessages, 'sum of rows');
@@ -696,7 +761,7 @@ async function main() {
     }));
 
   await check('cli read: audit', () =>
-    readCheck('audit', ['audit'], (p) => {
+    readCheck('audit', ['audit'], 'none', (p) => {
       const d = p.json.doc.data;
       same(d.scanned.conversations, EXPECTED.conversationsStored, 'conversations scanned');
       same(d.scanned.messages, EXPECTED.auditedMessages, 'messages scanned');
@@ -704,6 +769,35 @@ async function main() {
       for (const check of ['missing_model', 'empty', 'untitled', 'tree_integrity', 'no_current_node']) must(d.findings.some((f) => f.check === check), `check ${check} is missing`);
       must(d.findings.find((f) => f.check === 'tree_integrity').count > 0, 'the broken-tree fixtures were not found');
     }));
+
+  await check('cli read: hidden messages stay hidden by default (get, search) and show only with --include-hidden', async () => {
+    const asJson = async (args, what) => {
+      const r = await cli([...args, '--format', 'json']);
+      expectOk(r, what);
+      return parseJson(r.stdout, what);
+    };
+    const plain = (await asJson(['get', IDS.contentTypes], 'get F04')).data;
+    same(plain.messages.length, EXPECTED.hiddenConversationVisible, 'messages of F04 by default');
+    same(plain.messages.filter((m) => m.hidden).length, 0, 'hidden messages shown by default');
+    same(plain.omittedHidden, EXPECTED.hiddenMessages, 'omitted hidden messages');
+    const all = (await asJson(['get', IDS.contentTypes, '--include-hidden'], 'get F04 --include-hidden')).data;
+    same(all.messages.length, EXPECTED.hiddenConversationAll, 'messages of F04 with --include-hidden');
+    same(all.messages.filter((m) => m.hidden).length, EXPECTED.hiddenMessages, 'hidden messages with --include-hidden');
+    for (const f of FORMATS.filter((x) => x !== 'json')) {
+      const r = await cli(['get', IDS.contentTypes, '--format', f]);
+      expectOk(r, `get F04 (${f})`);
+      must(!r.stdout.includes('synthetic system scaffolding'), `get F04 (${f}): hidden message text shown by default`);
+    }
+    const none = (await asJson(['search', HIDDEN_TERM], 'search hidden term')).data;
+    same(none.items.length, 0, 'hits for a term that exists only in a hidden message');
+    const shown = (await asJson(['search', HIDDEN_TERM, '--include-hidden'], 'search hidden term --include-hidden')).data;
+    same(shown.items.length, 1, 'hits with --include-hidden');
+    same(shown.items[0].messageId, HIDDEN_MESSAGE_ID, 'hidden hit message id');
+    const wide = (await asJson(['search', 'synthetic', '--limit', '200'], 'search synthetic')).data;
+    same(wide.items.length, EXPECTED.searchSynthetic, 'hits for "synthetic" by default');
+    const wideAll = (await asJson(['search', 'synthetic', '--limit', '200', '--include-hidden'], 'search synthetic --include-hidden')).data;
+    same(wideAll.items.length, EXPECTED.searchSyntheticHidden, 'hits for "synthetic" with --include-hidden');
+  });
 
   await check('cli read: read commands leave the database content unchanged', async () => {
     same(dbContentHash(st.db), importedHash, 'database content hash');
@@ -725,6 +819,25 @@ async function main() {
     expectError(await cli(['get', 'not-a-uuid', '--format', 'json']), 'malformed id', 2, 'INVALID_UUID');
   });
 
+  await check('cli errors: a missing import file exits 4, a missing database exits 5; neither creates a file or names an absolute path', async () => {
+    const missingZip = join(st.work, 'no-such-export.zip');
+    const neverCreated = join(st.work, 'never-created.sqlite');
+    const absentDb = join(st.work, 'absent.sqlite');
+    expectError(await cli(['import', missingZip, '--db', neverCreated, '--format', 'json']), 'missing import file', 4, 'IMPORT_INPUT_NOT_FOUND');
+    const importText = await cli(['import', missingZip, '--db', neverCreated]);
+    same(importText.code, 4, 'missing import file exit code (text)');
+    same(errorCodeOf(importText), 'IMPORT_INPUT_NOT_FOUND', 'missing import file error code (text)');
+    expectError(await cli(['list', '--db', absentDb, '--format', 'json']), 'missing database', 5, 'DB_NOT_FOUND');
+    const listText = await cli(['list', '--db', absentDb]);
+    same(listText.code, 5, 'missing database exit code (text)');
+    same(errorCodeOf(listText), 'DB_NOT_FOUND', 'missing database error code (text)');
+    for (const [what, r] of [['import (text)', importText], ['list (text)', listText]]) {
+      must(!r.stderr.includes(st.work) && !r.stderr.includes(tmpdir()), `${what}: the error names an absolute path`);
+      same(r.stdout, '', `${what} stdout`);
+    }
+    must(!existsSync(neverCreated) && !existsSync(absentDb), 'a failed command created a database file');
+  });
+
   // ---- 7. drafts and annotations ----------------------------------------------------------------------------------------
   const draftBody = `smoke draft body ${randomBytes(6).toString('hex')}`;
   const noteBody = `smoke note body ${randomBytes(6).toString('hex')}`;
@@ -735,9 +848,11 @@ async function main() {
     writeFileSync(noteFile, noteBody);
     const created = await cli(['draft', 'create', '--conversation', IDS.linear, '--input', draftFile, '--title', 'smoke']);
     expectOk(created, 'draft create');
+    leakCheck(created.stdout, 'draft create', 'none');
     must(created.stdout.includes('GCR never sends'), 'draft create output lacks "GCR never sends"');
     const listed = await cli(['draft', 'list', '--conversation', IDS.linear]);
     expectOk(listed, 'draft list');
+    leakCheck(listed.stdout, 'draft list', 'none');
     must(listed.stdout.includes('GCR never sends'), 'draft list output lacks "GCR never sends"');
     const json = await cli(['draft', 'list', '--conversation', IDS.linear, '--format', 'json']);
     expectOk(json, 'draft list json');
@@ -750,6 +865,7 @@ async function main() {
     same(d.items[0].manualContinuation.url, `https://chatgpt.com/c/${IDS.linear}`, 'manual continuation link');
     const note = await cli(['annotate', 'create', '--conversation', IDS.linear, '--input', noteFile, '--format', 'json']);
     expectOk(note, 'annotate create');
+    leakCheck(note.stdout, 'annotate create', 'none');
     const a = parseJson(note.stdout, 'annotate create').data;
     same(a.localOnly, true, 'annotation localOnly');
     same(a.annotation.version, 1, 'annotation version');
@@ -772,6 +888,7 @@ async function main() {
   await check('cli: graph build derives a graph from the messages', async () => {
     const r = await cli(['graph', 'build', '--format', 'json']);
     expectOk(r, 'graph build');
+    leakCheck(r.stdout, 'graph build', 'none');
     const d = parseJson(r.stdout, 'graph build').data;
     must(d.nodes > 0 && d.edges > 0 && d.entities > 0, 'the graph is empty');
     same(d.messagesScanned, EXPECTED.graphMessagesScanned, 'messages scanned');
@@ -780,6 +897,7 @@ async function main() {
   await check('cli: graph export writes an offline HTML file (mode 0600, one CSP meta, two inline scripts, no external loads)', async () => {
     const r = await cli(['graph', 'export', '--out', htmlPath, '--format', 'json']);
     expectOk(r, 'graph export');
+    leakCheck(r.stdout, 'graph export', 'none');
     same(statSync(htmlPath).mode & 0o777, 0o600, 'html file mode');
     const html = readFileSync(htmlPath, 'utf8');
     same((html.match(/http-equiv="Content-Security-Policy"/gi) ?? []).length, 1, 'CSP meta elements');
@@ -806,9 +924,64 @@ async function main() {
     same(statSync(htmlPath).mode & 0o777, 0o600, 'html file mode after --force');
   });
 
+  await check('cli: graph export never writes through a symbolic link (dangling or not, with or without --force) and checks its destination', async () => {
+    const victim = join(st.work, 'victim.html'); // must never come into existence
+    const dangling = join(st.work, 'dangling-link.html');
+    symlinkSync(victim, dangling);
+    expectError(await cli(['graph', 'export', '--out', dangling, '--format', 'json']), 'dangling link', 2, 'INVALID_ARGUMENT');
+    expectError(await cli(['graph', 'export', '--out', dangling, '--force', '--format', 'json']), 'dangling link with --force', 2, 'INVALID_ARGUMENT');
+    must(!existsSync(victim), 'the export was written through a dangling symbolic link');
+    must(lstatSync(dangling).isSymbolicLink(), 'the symbolic link was replaced by a file');
+    const precious = join(st.work, 'precious.html');
+    writeFileSync(precious, 'KEEP');
+    const fileLink = join(st.work, 'file-link.html');
+    symlinkSync(precious, fileLink);
+    expectError(await cli(['graph', 'export', '--out', fileLink, '--force', '--format', 'json']), 'link to a file with --force', 2, 'INVALID_ARGUMENT');
+    same(readFileSync(precious, 'utf8'), 'KEEP', 'the file behind the link');
+    must(lstatSync(fileLink).isSymbolicLink(), 'the link to a file was replaced');
+    expectError(await cli(['graph', 'export', '--out', join(st.work, 'graph.txt'), '--format', 'json']), 'wrong extension', 2, 'INVALID_ARGUMENT');
+    expectError(await cli(['graph', 'export', '--out', join(st.work, 'no-such-dir', 'graph.html'), '--format', 'json']), 'missing directory', 2, 'INVALID_ARGUMENT');
+    must(!existsSync(join(st.work, 'graph.txt')) && !existsSync(join(st.work, 'no-such-dir')), 'a refused export left a file or directory behind');
+  });
+
+  // ---- 8b. hostile characters in INLINE fields (title, model name) ---------------------------------------------------------
+  // The fixtures' hostile title is cleaned at import (NUL and lone surrogates), so on their own they never put a bidi
+  // override, an ANSI escape or a line separator into a one-line field. This extra conversation does, in its own database,
+  // so the pinned counts above stay as they are. The importer keeps such text as it was exported; every output must escape it.
+  const hostileDb = join(st.work, 'hostile.sqlite');
+  await check('cli read: hostile characters in a title, a model name and message text are escaped in every format of every read command', async () => {
+    const HOSTILE = '\u202e\u001b[31m\u2028\u0085\u{e0041}\u2066';
+    const base = JSON.parse(readFileSync(join(opts.fixtures, 'minimal-linear.json'), 'utf8'))[0];
+    const nodes = Object.values(base.mapping).filter((n) => n.message !== null);
+    base.title = `${MARKER} hostile inline ${HOSTILE} title`;
+    nodes[0].message.content.parts = [`hostilemarker user ${HOSTILE}`];
+    nodes[1].message.content.parts = [`hostilemarker assistant ${HOSTILE}`];
+    nodes[1].message.metadata.model_slug = `model${HOSTILE}`;
+    const file = join(st.work, 'hostile-conversations.json');
+    writeFileSync(file, JSON.stringify([base]));
+    expectOk(await cli(['import', file, '--db', hostileDb, '--format', 'json']), 'import of the hostile conversation');
+    withDb(hostileDb, (db) => {
+      const row = db.prepare('SELECT title FROM conversations').get();
+      must(row.title.includes('\u202e') && row.title.includes('\u001b'), 'the importer did not keep the hostile title, so escaping it proves nothing');
+    });
+    const commands = [['list'], ['get', IDS.linear], ['thread', IDS.linear], ['branches', IDS.linear], ['search', 'hostilemarker'], ['stats', '--group-by', 'model'], ['stats', '--group-by', 'conversation'], ['audit']];
+    for (const command of commands) {
+      const runs = await Promise.all(FORMATS.map((f) => cli([...command, '--db', hostileDb, '--format', f])));
+      for (const [i, f] of FORMATS.entries()) validate(f, runs[i], `hostile ${command.join(' ')} (${f})`, 'any');
+      if (command[0] === 'list') {
+        for (const f of ['markdown', 'compact']) must(/\\u\{?202e\}?/i.test(runs[FORMATS.indexOf(f)].stdout), `hostile list (${f}): the bidi override is not shown as a visible escape`);
+      }
+    }
+  });
+
   // ---- 9. MCP over real stdio ---------------------------------------------------------------------------------------------
   const approvedDir = join(st.work, 'approved');
+  const siblingDir = `${approvedDir}-evil`; // shares the string prefix of the approved root but is not inside it
   mkdirSync(approvedDir);
+  mkdirSync(siblingDir);
+  copyFileSync(st.zip, join(approvedDir, 'inside.zip'));
+  copyFileSync(st.zip, join(siblingDir, 'evil.zip'));
+  symlinkSync(st.zip, join(approvedDir, 'escape.zip')); // lives inside the root, points outside it
   const readOnlyDb = join(st.work, 'readonly-session.sqlite'); // a COPY: the session must not be able to touch the original
   const writableDb = join(st.work, 'writable-session.sqlite');
   let sessionBaseline = ''; // content hash of the database as the MCP sessions start (imported data, drafts, graph)
@@ -818,6 +991,31 @@ async function main() {
     copyFileSync(st.db, writableDb);
     same(dbContentHash(readOnlyDb), sessionBaseline, 'copy 1 content');
     same(dbContentHash(writableDb), sessionBaseline, 'copy 2 content');
+  });
+
+  await check('db: a local draft cannot be given any status but draft or archived (CHECK constraint), probed on a copy', async () => {
+    const probe = join(st.work, 'schema-probe.sqlite');
+    copyFileSync(st.db, probe);
+    try {
+      const db = new DatabaseSync(probe);
+      try {
+        must(Number(db.prepare('SELECT COUNT(*) AS n FROM local_drafts').get().n) === 1, 'the probe copy holds no draft');
+        for (const status of ['sent', 'queued', 'published']) {
+          let refused = false;
+          try {
+            db.exec(`UPDATE local_drafts SET status = '${status}'`);
+          } catch {
+            refused = true;
+          }
+          must(refused, `the database accepts the status "${status}" for a local draft`);
+        }
+        deepSame(db.prepare('SELECT DISTINCT status FROM local_drafts').all().map((r) => r.status), ['draft'], 'draft statuses after the attempts');
+      } finally {
+        db.close();
+      }
+    } finally {
+      for (const suffix of ['', '-wal', '-shm']) rmSync(probe + suffix, { force: true });
+    }
   });
 
   const openSession = async (dbPath, args = [], env = {}) => {
@@ -851,11 +1049,23 @@ async function main() {
     same(Boolean(res.isError), fromText.ok === false, 'isError versus envelope ok');
     return fromText;
   };
-  const call = async (session, name, args = {}) => envelope(await session.client.callTool({ name, arguments: args }, undefined, { timeout: 30_000 }));
+  const call = async (session, name, args = {}) => {
+    const res = await session.client.callTool({ name, arguments: args }, undefined, { timeout: 30_000 });
+    st.ledger.push(Buffer.from(JSON.stringify(res)));
+    return envelope(res);
+  };
+  const leakIn = (env, what, level) => leakCheck(JSON.stringify(env), what, level);
+  /** Like `call`, but a refusal is reported by tool name and error code instead of surfacing later as a missing field. */
+  const callOk = async (session, name, args = {}) => {
+    const env = await call(session, name, args);
+    must(env.ok === true, `${name} answered with error code ${show(env.error?.code)}`);
+    return env;
+  };
 
   let ro; // the read-only session
   await check('mcp: initialize over stdio (server name, version equals the CLI, instructions say UNTRUSTED DATA)', async () => {
-    ro = await openSession(readOnlyDb);
+    // Approved roots are configured here although writes are not: the import tool must still refuse (WRITE_FORBIDDEN).
+    ro = await openSession(readOnlyDb, [], { GCR_APPROVED_IMPORT_ROOTS: approvedDir });
     same(ro.client.getServerVersion()?.name, 'gcr', 'server name');
     same(ro.client.getServerVersion()?.version, st.version, 'server version equals the CLI version');
     must(ro.client.getServerCapabilities()?.tools !== undefined, 'the server does not advertise tools');
@@ -895,13 +1105,46 @@ async function main() {
 
   await check('mcp: every read tool answers ok with concrete values', async () => {
     must(ro, 'no session');
-    same((await call(ro, 'gcr_list', { limit: 5 })).data.total, EXPECTED.conversationsStored, 'gcr_list total');
-    same((await call(ro, 'gcr_branches', { conversation: IDS.branching })).data.branches.length, 3, 'gcr_branches branches');
-    same((await call(ro, 'gcr_thread', { conversation: IDS.branching })).data.messages.length, 4, 'gcr_thread messages');
-    same((await call(ro, 'gcr_stats', { groupBy: 'role' })).data.totals.messages, EXPECTED.visibleMessages, 'gcr_stats total');
-    same((await call(ro, 'gcr_audit', {})).data.scanned.messages, EXPECTED.auditedMessages, 'gcr_audit messages scanned');
-    must((await call(ro, 'gcr_graph_query', { term: 'synthetic' })).data.nodes.length > 0, 'gcr_graph_query found nothing');
-    same((await call(ro, 'gcr_doctor', {})).data.ok, true, 'gcr_doctor ok');
+    const listed = await callOk(ro, 'gcr_list', { limit: 5 });
+    same(listed.data.total, EXPECTED.conversationsStored, 'gcr_list total');
+    leakIn(listed, 'gcr_list', 'titles');
+    const branched = await callOk(ro, 'gcr_branches', { conversation: IDS.branching });
+    same(branched.data.branches.length, 3, 'gcr_branches branches');
+    leakIn(branched, 'gcr_branches', 'titles');
+    same((await callOk(ro, 'gcr_thread', { conversation: IDS.branching })).data.messages.length, 4, 'gcr_thread messages');
+    const byRole = await callOk(ro, 'gcr_stats', { groupBy: 'role' });
+    same(byRole.data.totals.messages, EXPECTED.visibleMessages, 'gcr_stats total');
+    leakIn(byRole, 'gcr_stats', 'none');
+    const byModel = await callOk(ro, 'gcr_stats', { groupBy: 'model' });
+    deepSame(Object.fromEntries(byModel.data.rows.map((r) => [String(r.key), r.messages])), Object.fromEntries(EXPECTED.modelRows.map(([k, n]) => [String(k), n])), 'gcr_stats messages per model group');
+    const audited = await callOk(ro, 'gcr_audit', {});
+    same(audited.data.scanned.messages, EXPECTED.auditedMessages, 'gcr_audit messages scanned');
+    leakIn(audited, 'gcr_audit', 'none');
+    const queried = await callOk(ro, 'gcr_graph_query', { term: 'synthetic' });
+    must(queried.data.nodes.length > 0, 'gcr_graph_query found nothing');
+    leakIn(queried, 'gcr_graph_query', 'titles');
+    const doctored = await callOk(ro, 'gcr_doctor', {});
+    same(doctored.data.ok, true, 'gcr_doctor ok');
+    leakIn(doctored, 'gcr_doctor', 'none');
+  });
+
+  await check('mcp: hidden messages stay hidden by default (gcr_get, gcr_thread, gcr_search) and show only with includeHidden', async () => {
+    must(ro, 'no session');
+    const plain = await call(ro, 'gcr_get', { conversation: IDS.contentTypes });
+    same(plain.data.thread.messages.length, EXPECTED.hiddenConversationVisible, 'gcr_get messages of F04 by default');
+    same(plain.data.thread.messages.filter((m) => m.hidden).length, 0, 'gcr_get hidden messages by default');
+    same(plain.data.thread.omittedHidden, EXPECTED.hiddenMessages, 'gcr_get omitted hidden messages');
+    const all = await call(ro, 'gcr_get', { conversation: IDS.contentTypes, includeHidden: true });
+    same(all.data.thread.messages.length, EXPECTED.hiddenConversationAll, 'gcr_get messages of F04 with includeHidden');
+    same(all.data.thread.messages.filter((m) => m.hidden).length, EXPECTED.hiddenMessages, 'gcr_get hidden messages with includeHidden');
+    const thread = await call(ro, 'gcr_thread', { conversation: IDS.contentTypes });
+    same(thread.data.messages.filter((m) => m.hidden).length, 0, 'gcr_thread hidden messages by default');
+    same((await call(ro, 'gcr_search', { query: HIDDEN_TERM })).data.items.length, 0, 'gcr_search hits for a term that exists only in a hidden message');
+    const shown = await call(ro, 'gcr_search', { query: HIDDEN_TERM, includeHidden: true });
+    same(shown.data.items.length, 1, 'gcr_search hits with includeHidden');
+    same(shown.data.items[0].messageId, HIDDEN_MESSAGE_ID, 'gcr_search hidden hit message id');
+    same((await call(ro, 'gcr_search', { query: 'synthetic', limit: 200 })).data.items.length, EXPECTED.searchSynthetic, 'gcr_search hits for "synthetic" by default');
+    same((await call(ro, 'gcr_search', { query: 'synthetic', limit: 200, includeHidden: true })).data.items.length, EXPECTED.searchSyntheticHidden, 'gcr_search hits for "synthetic" with includeHidden');
   });
 
   await check('mcp: in the default read-only mode every write tool is refused (WRITE_FORBIDDEN / IMPORT_PATH_NOT_ALLOWED) and nothing changes', async () => {
@@ -912,9 +1155,13 @@ async function main() {
     same(draft.error.code, 'WRITE_FORBIDDEN', 'draft error code');
     const note = await call(ro, 'gcr_update_local_annotation', { conversation: IDS.linear, body: 'refused' });
     same(note.error?.code, 'WRITE_FORBIDDEN', 'annotation error code');
-    const imported = await call(ro, 'gcr_import_export', { path: st.zip });
-    same(imported.ok, false, 'import ok');
-    must(['IMPORT_PATH_NOT_ALLOWED', 'WRITE_FORBIDDEN'].includes(imported.error.code), 'import was not refused with a path or write error');
+    // With an approved root configured but no --allow-local-writes: a path outside the root is a path error; a path inside is a write error.
+    const outside = await call(ro, 'gcr_import_export', { path: st.zip });
+    same(outside.ok, false, 'import outside the root ok');
+    same(outside.error.code, 'IMPORT_PATH_NOT_ALLOWED', 'import outside the root error code');
+    const inside = await call(ro, 'gcr_import_export', { path: join(approvedDir, 'inside.zip') });
+    same(inside.ok, false, 'import inside the root ok');
+    same(inside.error.code, 'WRITE_FORBIDDEN', 'import inside the root error code (writes are off)');
     same(dbContentHash(readOnlyDb), before, 'database content hash');
   });
 
@@ -923,6 +1170,7 @@ async function main() {
     await ro.close();
     same(ro.transportErrors.length, 0, `transport errors seen by the SDK client (${[...new Set(ro.transportErrors)].join(', ')})`);
     const text = Buffer.concat(ro.stderr).toString('utf8');
+    leakCheck(text, 'read-only session stderr', 'none');
     if (text !== '') {
       must(!/ExperimentalWarning|\(node:\d+\)/.test(text), 'a Node warning reached stderr');
       for (const line of lines(text)) {
@@ -998,9 +1246,16 @@ async function main() {
     same(outside.error.code, 'IMPORT_PATH_NOT_ALLOWED', 'outside path error code');
     const traversal = await call(rw, 'gcr_import_export', { path: `${approvedDir}/../export.zip` });
     same(traversal.error?.code, 'IMPORT_PATH_NOT_ALLOWED', 'traversal error code');
-    // Positive control: the denial above is not the tool being broken. The same bytes inside the root are accepted
+    // A sibling directory that merely starts with the root's name, a symlink inside the root that points out of it, and a
+    // file that does not exist: the same refusal, never the file's content.
+    const sibling = await call(rw, 'gcr_import_export', { path: join(siblingDir, 'evil.zip') });
+    same(sibling.error?.code, 'IMPORT_PATH_NOT_ALLOWED', 'sibling directory with the same name prefix: error code');
+    const escaped = await call(rw, 'gcr_import_export', { path: join(approvedDir, 'escape.zip') });
+    same(escaped.error?.code, 'IMPORT_PATH_NOT_ALLOWED', 'symlink that leaves the root: error code');
+    const absent = await call(rw, 'gcr_import_export', { path: join(approvedDir, 'no-such.zip') });
+    same(absent.error?.code, 'IMPORT_PATH_NOT_ALLOWED', 'missing file inside the root: error code');
+    // Positive control: the denials above are not the tool being broken. The same bytes inside the root are accepted
     // (and are recognised as already imported, because the copy of the database holds that batch).
-    copyFileSync(st.zip, join(approvedDir, 'inside.zip'));
     const inside = await call(rw, 'gcr_import_export', { path: join(approvedDir, 'inside.zip') });
     same(inside.ok, true, 'inside path ok');
     same(inside.data.alreadyImported, true, 'inside path alreadyImported');
@@ -1011,21 +1266,14 @@ async function main() {
     must(rw, 'no session');
     await rw.close();
     same(rw.transportErrors.length, 0, `transport errors seen by the SDK client (${[...new Set(rw.transportErrors)].join(', ')})`);
-    same(Buffer.concat(rw.stderr).toString('utf8'), '', 'stderr of the writes-enabled session');
+    const rwErr = Buffer.concat(rw.stderr).toString('utf8');
+    leakCheck(rwErr, 'writes-enabled session stderr', 'none');
+    same(rwErr, '', 'stderr of the writes-enabled session');
   });
 
-  await check('mcp: raw stdio, every stdout line is a JSON-RPC message, ids match, stderr is clean, exit code 0', async () => {
-    const frames = [
-      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'gcr-ci-smoke-raw', version: '0.0.0' } } },
-      { jsonrpc: '2.0', method: 'notifications/initialized' },
-      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
-      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'gcr_get', arguments: { conversation: IDS.hostile } } },
-      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'gcr_search', arguments: { query: 'synthetic', limit: 50 } } },
-      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'gcr_create_local_draft', arguments: { conversation: IDS.linear, body: 'refused' } } },
-      { jsonrpc: '2.0', id: 6, method: 'no/such/method' },
-      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'gcr_get', arguments: { conversation: IDS.absent } } },
-    ];
-    const r = await runNode(MCP_JS, ['--db', readOnlyDb], { stdin: `${frames.map((f) => JSON.stringify(f)).join('\n')}\n` });
+  /** Spawns the MCP server on `dbPath`, feeds it the frames on stdin and validates every byte it wrote to stdout. */
+  const rawMcp = async (dbPath, frames) => {
+    const r = await runNode(MCP_JS, ['--db', dbPath], { stdin: `${frames.map((f) => JSON.stringify(f)).join('\n')}\n` });
     same(r.timedOut, false, 'timed out');
     same(r.code, 0, 'server exit code after stdin ended');
     must(r.stdoutBytes.length > 0, 'stdout is empty');
@@ -1038,6 +1286,7 @@ async function main() {
     must(text.endsWith('\n'), 'stdout does not end with a newline');
     const rows = text.slice(0, -1).split('\n');
     const ids = [];
+    const messages = [];
     for (const [i, line] of rows.entries()) {
       let msg;
       try {
@@ -1048,19 +1297,58 @@ async function main() {
       must(msg !== null && typeof msg === 'object' && msg.jsonrpc === '2.0', `stdout line ${i + 1} is not a JSON-RPC 2.0 message`);
       must('id' in msg ? 'result' in msg || 'error' in msg : typeof msg.method === 'string', `stdout line ${i + 1} is neither a response nor a notification`);
       if ('id' in msg) ids.push(msg.id);
+      messages.push(msg);
     }
-    deepSame([...ids].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7], 'response ids');
-    const byId = new Map(rows.map((l) => JSON.parse(l)).filter((m) => 'id' in m).map((m) => [m.id, m]));
-    same(byId.get(6).error.code, -32601, 'unknown method error code');
-    same(byId.get(5).result.isError, true, 'refused draft isError');
-    same(byId.get(7).result.structuredContent.error.code, 'NOT_IN_LOCAL_EXPORT', 'absent conversation error code');
-    same(byId.get(3).result.structuredContent.ok, true, 'hostile conversation ok');
+    deepSame([...ids].sort((a, b) => a - b), frames.filter((f) => 'id' in f).map((f) => f.id), 'response ids');
     must(!/[\u2028\u2029\u0085]/.test(text), 'a raw line separator (U+2028, U+2029 or U+0085) is on the wire');
+    leakCheck(r.stderr, 'raw session stderr', 'none');
     if (r.stderr !== '') {
       must(!/ExperimentalWarning|\(node:\d+\)/.test(r.stderr), 'a Node warning reached stderr');
       for (const line of lines(r.stderr)) must(/^\{.*"level":/.test(line), 'stderr holds a line that is not a structured log entry');
     }
+    return { r, text, byId: new Map(messages.filter((m) => 'id' in m).map((m) => [m.id, m])) };
+  };
+  const initFrames = [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'gcr-ci-smoke-raw', version: '0.0.0' } } },
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+  ];
+  const toolFrame = (id, name, args) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
+
+  await check('mcp: raw stdio, every stdout line is a JSON-RPC message, ids match, stderr is clean, exit code 0', async () => {
+    const frames = [
+      ...initFrames,
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      toolFrame(3, 'gcr_get', { conversation: IDS.hostile }),
+      toolFrame(4, 'gcr_search', { query: 'synthetic', limit: 50 }),
+      toolFrame(5, 'gcr_create_local_draft', { conversation: IDS.linear, body: 'refused' }),
+      { jsonrpc: '2.0', id: 6, method: 'no/such/method' },
+      toolFrame(7, 'gcr_get', { conversation: IDS.absent }),
+      toolFrame(8, 'gcr_import_export', { path: st.zip }),
+    ];
+    const { byId } = await rawMcp(readOnlyDb, frames);
+    same(byId.get(6).error.code, -32601, 'unknown method error code');
+    same(byId.get(5).result.isError, true, 'refused draft isError');
+    same(byId.get(7).result.structuredContent.error.code, 'NOT_IN_LOCAL_EXPORT', 'absent conversation error code');
+    same(byId.get(3).result.structuredContent.ok, true, 'hostile conversation ok');
+    same(byId.get(8).result.structuredContent.error.code, 'IMPORT_PATH_NOT_ALLOWED', 'import with no approved roots error code');
     same(dbContentHash(readOnlyDb), sessionBaseline, 'database content hash after the raw session');
+  });
+
+  await check('mcp: raw stdio on a database with a hostile title, model name and message text still carries only JSON-RPC lines and no raw line separators', async () => {
+    must(existsSync(hostileDb), 'the hostile database does not exist');
+    const frames = [
+      ...initFrames,
+      toolFrame(2, 'gcr_list', {}),
+      toolFrame(3, 'gcr_get', { conversation: IDS.linear }),
+      toolFrame(4, 'gcr_search', { query: 'hostilemarker' }),
+      toolFrame(5, 'gcr_branches', { conversation: IDS.linear }),
+      toolFrame(6, 'gcr_thread', { conversation: IDS.linear }),
+      toolFrame(7, 'gcr_stats', { groupBy: 'model' }),
+    ];
+    const { byId } = await rawMcp(hostileDb, frames);
+    for (const id of [2, 3, 4, 5, 6, 7]) same(byId.get(id).result.structuredContent.ok, true, `hostile database, response ${id} ok`);
+    same(byId.get(4).result.structuredContent.data.items.length, 2, 'hostile database: hits for the marker word');
+    must(byId.get(2).result.structuredContent.data.items[0].title.includes('\u202e'), 'the hostile title did not survive import, so the escaping above proves nothing');
   });
 
   // ---- 10. the canary, the guard ---------------------------------------------------------------------------------------------
@@ -1078,6 +1366,49 @@ async function main() {
   });
   await check('canary: absent from the exported HTML', async () => {
     must(!anyIn(readFileSync(htmlPath)), 'the canary is in the exported HTML');
+  });
+  await check('canary: absent from every file in the sandbox except the input archive and its byte-identical copies', async () => {
+    const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isSymbolicLink() ? [] : e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]));
+    let scanned = 0;
+    for (const file of walk(st.work)) {
+      const bytes = readFileSync(file);
+      if (bytes.equals(st.zipBytes)) continue; // the archive (and the copies the smoke made of it) holds the decoys by design
+      scanned++;
+      must(!anyIn(bytes), `the canary is in ${basename(file)}`);
+    }
+    must(scanned >= 10, `only ${scanned} files were scanned`);
+  });
+  await check('fs: the product left only the databases, drafts and exports it was asked for (HOME and TMPDIR stay empty, no stray files)', async () => {
+    same(readdirSync(st.home).length, 0, 'entries the product created in HOME');
+    same(readdirSync(st.tmp).length, 0, 'entries the product created in TMPDIR');
+    const databases = ['smoke', 'readonly-session', 'writable-session'].flatMap((n) => [`${n}.sqlite`, `${n}.sqlite-wal`, `${n}.sqlite-shm`]);
+    const expected = new Set([
+      ...databases,
+      ...['home', 'tmp', 'approved', 'approved-evil', 'export.zip', 'draft.md', 'note.txt', 'graph.html'],
+      ...['guard.log', 'guard-loaded.log', 'control.log', 'control-loaded.log'],
+      ...['dangling-link.html', 'file-link.html', 'precious.html'],
+      ...['hostile.sqlite', 'hostile.sqlite-wal', 'hostile.sqlite-shm', 'hostile-conversations.json'],
+    ]);
+    const stray = readdirSync(st.work).filter((n) => !expected.has(n));
+    must(stray.length === 0, `${stray.length} unexpected entr${stray.length === 1 ? 'y' : 'ies'} in the working directory: ${stray.map(show).join(', ')}`);
+    deepSame(readdirSync(approvedDir).sort(), ['escape.zip', 'inside.zip'], 'files in the approved root');
+    deepSame(readdirSync(siblingDir), ['evil.zip'], 'files in the sibling directory');
+  });
+  await check('output: no absolute path of the sandbox, the temp or home directory, the repository or the build appears in any captured output', async () => {
+    const all = Buffer.concat(st.ledger);
+    const kinds = [
+      ['the sandbox', st.work],
+      ['the sandbox (real path)', realpathSync(st.work)],
+      ['the temp directory', tmpdir()],
+      ['the home directory', homedir()],
+      ['the repository', repoRoot],
+      ['the build', opts.dist],
+    ];
+    for (const [what, dir] of kinds) {
+      if (dir.length < 5) continue; // "/" or "C:\" would match everything
+      must(!all.includes(Buffer.from(dir)), `an absolute path of ${what} appears in the captured output`);
+    }
+    must(all.length > 100_000, `only ${all.length} bytes of output were captured`);
   });
   await check('guard: no product process attempted to use the network (guard log is empty)', async () => {
     const attempts = readLines(st.guardLog);
@@ -1098,6 +1429,7 @@ try {
   await main();
 } catch (e) {
   results.push({ name: 'smoke: runner', ok: false });
+  if (process.env.GCR_SMOKE_DEBUG === '1') process.stderr.write(`${e?.stack ?? e}\n`); // opt-in: a stack holds absolute paths
   console.log(`FAIL smoke: runner: unexpected ${e?.name ?? 'error'}${typeof e?.code === 'string' ? ` (${e.code})` : ''}`);
 } finally {
   await Promise.allSettled(openSessions.map((s) => s.close()));

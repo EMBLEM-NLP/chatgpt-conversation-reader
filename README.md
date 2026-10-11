@@ -157,7 +157,8 @@ error[NOT_IN_LOCAL_EXPORT]: The conversation is not present in the locally impor
 exit code: 3
 ```
 
-The words "(active branch)" and "(current node)" inside the search snippets are part of the invented fixture text, not GCR annotations.
+The words "(active branch)" inside the search snippets are part of the invented fixture text, not a GCR annotation.
+A larger end-to-end run over all 13 fixtures, driving the built CLI and the built MCP server with a network guard active, is `npm run smoke` (`node scripts/ci-smoke.mjs`): `SMOKE OK (41 checks)` on 2026-10-11 with Node 22.22.0 and with Node 22.16.0.
 The task-oriented walk-through (branches without a `current_node`, sharded exports, search syntax, MCP, troubleshooting) is [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 
 ## Status: capability modes A to E
@@ -176,11 +177,11 @@ Source: `gcr doctor` (run 2026-10-11, Node 22.22.0, Linux), whose wording is quo
 
 | Tested (synthetic data only) | NOT tested / NOT verified |
 |---|---|
-| Compiled TypeScript test suite on **Node 22.22.0**: 6,568 tests, 6,566 pass, 0 fail, 2 skipped (both skip because the run was as `root`, where file permissions are not enforced); run of 2026-10-11 | **A real ChatGPT export** (never available). Field names, shards, manifest, asset naming and drift are community reports only |
-| Same suite on **Node 22.16.0** (the declared minimum): see [CHANGELOG.md](CHANGELOG.md) for the numbers of the final run | **Node 24 and newer**; Node below 22.16.0 is refused by design (verified: 22.13.1 reports `FTS5 NOT available`) |
-| `npm run typecheck` and `npm run build` | **The GitHub Actions workflow has never run on GitHub** (`.github/workflows/gcr-ci.yml` was only executed step by step locally) |
+| Compiled TypeScript test suite on **Node 22.22.0**: 6,750 tests, 6,748 pass, 0 fail, 2 skipped (both skip because the run was as `root`, where file permissions are not enforced); commit `1341059`, 2026-10-11 | **A real ChatGPT export** (never available). Field names, shards, manifest, asset naming and drift are community reports only |
+| Same suite on **Node 22.16.0** (the declared minimum): 6,750 tests, 6,748 pass, 0 fail, 2 skipped, same commit. Earlier runs on a tree that was still being edited had transient failures (see [CHANGELOG.md](CHANGELOG.md)) | **Node 24 and newer**; Node below 22.16.0 is refused by design (verified: 22.13.1 reports `FTS5 NOT available`) |
+| `npm run typecheck`, `npm run build`, and `node scripts/ci-smoke.mjs` (`SMOKE OK (41 checks)` on Node 22.22.0 and 22.16.0: built CLI and MCP server driven on synthetic data with a network guard) | **The GitHub Actions workflow has never run on GitHub** (`.github/workflows/gcr-ci.yml` was only executed step by step locally) |
 | The MCP server through the real SDK client over stdio (`gcr_*` tools, read-only default, write refusal) | **VS Code, Claude Desktop and Codex themselves**: the config snippets follow those clients' documented shape as the authors knew it |
-| Privacy scan of the working tree (`node scripts/privacy-scan.mjs --root .`) and `npm audit --omit=dev --audit-level=high` (0 vulnerabilities, 2026-10-11, ran against the npm registry) | **OpenAI Terms of Use, Usage Policies and help-center pages: not readable from the sandbox, so the platform policy review is NOT PERFORMED.** Nothing in this repository quotes or paraphrases an OpenAI clause as fact |
+| Privacy scan of the working tree (`node scripts/privacy-scan.mjs --root .`: clean) and `npm audit --omit=dev --audit-level=high` (0 vulnerabilities, 2026-10-11, ran against the npm registry). **The history scan (`--history`, a CI step) reports 1 finding in an old commit and would fail CI** (see [CHANGELOG.md](CHANGELOG.md)) | **OpenAI Terms of Use, Usage Policies and help-center pages: not readable from the sandbox, so the platform policy review is NOT PERFORMED.** Nothing in this repository quotes or paraphrases an OpenAI clause as fact |
 | Graph HTML generated, scanned for network references, and read for its structure | Graph HTML in a real browser or with a screen reader; Windows and macOS; encryption at rest (none exists); permission-denied paths (the suite ran as root) |
 
 The baseline GCR v0.1.1 named in the task was **never available** (ADR-0001). GCR 0.2.0-dev.0 is a clean-room implementation of
@@ -189,9 +190,9 @@ The baseline GCR v0.1.1 named in the task was **never available** (ADR-0001). GC
 ## Privacy summary
 
 * Everything stays in one local SQLite file that you choose (`--db`, `$GCR_DB`, or `./.gcr/gcr.sqlite`). New files are created with mode `0600`.
-* No network code exists in `src/` (a test scans the sources); GCR never contacts chatgpt.com, never reads cookies or browser data, never sends a message.
+* No network code exists in `src/` (a tripwire test scans the sources; it is not a proof); GCR never contacts chatgpt.com, never reads cookies or browser data, never sends a message.
 * Imported text is **untrusted data**. It is quoted in output, never executed, and never allowed to steer GCR or an MCP client's tools.
-* Logs, errors and import reports carry codes, counts, ids and basenames, never message text or absolute paths.
+* Logs, errors and import reports are designed to carry only codes, counts, ids and basenames, never message text or absolute paths (tests exist for this; the author of this README did not audit them one by one).
 * GCR has **no encryption at rest**. Keep exports and databases outside Git on an encrypted disk, and do not upload them to a coding agent, CI or a hosted service.
 * `node scripts/privacy-scan.mjs --root .` (after `npm run build`) fails if databases, archives, raw exports or secrets are in the working tree.
   Checklist before sharing anything: [docs/USER_GUIDE.md section k](docs/USER_GUIDE.md#k-privacy-checklist-before-sharing-anything).
@@ -266,7 +267,8 @@ needs `GCR_APPROVED_IMPORT_ROOTS`. Twelve tools are registered (`gcr_list`, `gcr
 | [docs/PR_NOTES.md](docs/PR_NOTES.md) | Ready-to-paste PR descriptions for M0 to M4 derived from the real git history; no PR has been opened |
 | [docs/REPO_RUNBOOK.md](docs/REPO_RUNBOOK.md) | The supplied GitHub and Codex runbook, kept verbatim (it says Node 22.13; ADR-0012 supersedes that) |
 
-`@@DOC_INDEX_EXTRA@@`
+Also present, listed here because they came after the index above was written: [docs/COVERAGE.md](docs/COVERAGE.md) (test coverage summary by the built-in V8 coverage, synthetic tests only) and
+[docs/WARNING_CODES.md](docs/WARNING_CODES.md) (catalogue of the warning codes the import, branch, search and analysis layers emit). The acceptance record that `SPEC.md` section 10 names (ACCEPTANCE.md under docs/) was **not present** in the repository when this README was written (2026-10-11, about 13:35 UTC).
 
 ## License status
 

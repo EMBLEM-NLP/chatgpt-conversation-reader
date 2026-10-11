@@ -179,6 +179,17 @@ exit=4
 ### Strict mode and warnings
 
 By default a damaged conversation becomes a **warning** and the import continues (`warnings[].code`, `count`, up to 5 `sampleIds`). `--strict` aborts and stores nothing on the first problem.
+Example with `fixtures/chatgpt/identity-collisions.json` (the same conversation id appears twice):
+
+```text
+$ gcr import conversations.json --db ./lenient.sqlite --format compact      # 4 read, 3 stored, warning DUPLICATE_CONVERSATION, exit 0
+$ gcr import conversations.json --strict --db ./strict.sqlite
+error[IMPORT_PARSE_ERROR]: A conversation id occurs more than once in the input.
+  remedy: Re-run without --strict to import what can be read (the problem is then recorded as a warning), or obtain a fresh export.
+exit=4        (no database file was created)
+```
+
+Empty (`{}`), `null` and scalar entries are skipped with a warning even under `--strict` (checked with `fixtures/chatgpt/nulls-and-wrappers.json`: exit 0 both ways).
 The `formatProfile` in the report lists observed facts (layout, whether `children` were present, role counts, how many messages state a model); read it before you trust statistics.
 
 ---
