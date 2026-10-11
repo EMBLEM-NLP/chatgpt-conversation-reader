@@ -443,7 +443,7 @@ try { gcr.get(someReference); } catch (e) {
   settles, are unaffected.)
 * **Several handles.** Handles are independent connections. Two handles writing to one file contend through SQLite's own lock (5 s busy timeout, then `DB_ERROR` `busy`); use one writer.
 * **`close()`** is idempotent. A mutator that is running finishes first; mutators still queued reject with `DB_ERROR` (`reason: "closed"`). Every method after `close()` fails with that error.
-* **Read-only handles** (`readOnly: true`) never create, migrate or write: every mutator rejects with `WRITE_FORBIDDEN`; reads (including existing drafts) work.
+* **Read-only handles** (`readOnly: true`) never create the database, migrate it or write to it (SQLite itself may add the `-wal` / `-shm` side files of a WAL database, see Limitations): every mutator rejects with `WRITE_FORBIDDEN`; reads (including existing drafts) work.
 
 ## Public surface and stability
 

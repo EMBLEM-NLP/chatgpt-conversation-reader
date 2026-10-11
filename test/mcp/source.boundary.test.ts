@@ -61,7 +61,7 @@ describe('src/mcp source boundaries', () => {
   });
 
   it('has the expected files', () => {
-    for (const f of ['server.ts', 'tools.ts', 'envelope.ts', 'approved-roots.ts', 'aliases.ts', 'entry.ts', 'registry.ts', 'stdout-guard.ts', 'stdio-bootstrap.ts', 'sqlite-warning.ts']) assert.ok(sources.has(f), f);
+    for (const f of ['server.ts', 'tools.ts', 'envelope.ts', 'approved-roots.ts', 'aliases.ts', 'entry.ts', 'registry.ts', 'stdout-guard.ts', 'stdio-bootstrap.ts']) assert.ok(sources.has(f), f);
   });
 
   it('imports no network, process-spawning, evaluation or module-loader builtin, and only reviewed packages', () => {
@@ -79,7 +79,7 @@ describe('src/mcp source boundaries', () => {
         ...[...code.matchAll(/^(?:import|export)\s[^;]*?\bfrom\s*['"]([^'"]+)['"]\s*;/gm)].map((m) => m[1] as string),
         ...[...code.matchAll(/\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1] as string),
       ];
-      assert.ok(specifiers.length > 0 || file === 'sqlite-warning.ts', `${file} has imports`);
+      assert.ok(specifiers.length > 0 || file === 'stdout-guard.ts', `${file} has imports`);
       for (const spec of specifiers) {
         assert.ok(!forbidden.test(spec), `${file} imports ${spec}`);
         if (spec.startsWith('.')) assert.ok(/^\.\.?\//.test(spec) && spec.endsWith('.js'), `${file}: relative imports use .js: ${spec}`);
@@ -124,10 +124,8 @@ describe('src/mcp source boundaries', () => {
     const code = stripComments(sources.get('stdio-bootstrap.ts') as string);
     const specifiers = [...code.matchAll(/^import\s[^;]*?\bfrom\s*['"]([^'"]+)['"]\s*;/gm)].map((m) => m[1]);
     assert.deepEqual(specifiers.sort(), ['./stdout-guard.js', 'node:fs', 'node:url']);
-    for (const f of ['stdout-guard.ts', 'sqlite-warning.ts']) {
-      const specs = [...stripComments(sources.get(f) as string).matchAll(/^import\s[^;]*?\bfrom\s*['"]([^'"]+)['"]\s*;/gm)].map((m) => m[1] as string);
-      assert.ok(specs.every((s) => s.startsWith('node:')), `${f} depends on nothing but node builtins`);
-    }
+    const guardSpecs = [...stripComments(sources.get('stdout-guard.ts') as string).matchAll(/^import\s[^;]*?\bfrom\s*['"]([^'"]+)['"]\s*;/gm)].map((m) => m[1] as string);
+    assert.deepEqual(guardSpecs, ['node:stream'], 'the guard depends on nothing but a node builtin');
   });
 
   it('the server module has no I/O at import time: no top-level statement other than declarations', () => {

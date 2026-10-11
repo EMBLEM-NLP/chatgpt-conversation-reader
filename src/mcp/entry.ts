@@ -10,7 +10,6 @@ import { TOOL_VERSION } from '../version.js';
 import { parseApprovedRoots } from './approved-roots.js';
 import { parseMaxResultBytes } from './envelope.js';
 import type { createGcrMcpServer } from './server.js';
-import { installSqliteWarningFilter } from './sqlite-warning.js';
 import { installStdoutGuard } from './stdout-guard.js';
 
 /**
@@ -101,6 +100,10 @@ function delay(ms: number): Promise<void> {
  */
 export async function runMcpServer(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const guard = installStdoutGuard();
+  // The shared filter (src/suppress-warnings.ts: it drops ONLY the node:sqlite ExperimentalWarning). Imported dynamically, here,
+  // for two reasons: importing it has the side effect of installing it, which `entry.ts` must not have when merely imported;
+  // and it has to be in place BEFORE `node:sqlite` loads (see below).
+  const { installSqliteWarningFilter } = await import('../suppress-warnings.js');
   installSqliteWarningFilter();
 
   let args: McpArgs;

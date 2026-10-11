@@ -12,6 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { GCR_APPLICATION_ID } from '../../src/db/schema.js';
 import { GcrError } from '../../src/errors.js';
+import { peekOpenRefusal } from '../../src/sdk/doctor.js';
 import { Gcr } from '../../src/sdk/gcr.js';
 import { ID, chat, conversationsJson, emptyDb, expectGcr, fixedClock, importBuilders, makeTempDir, removeDir, standardDb, thrown, writeText } from './sdk.helpers.test.js';
 
@@ -90,6 +91,36 @@ describe('a failed read-write open does not touch the file', () => {
       const before = readFileSync(junk);
       expectGcr(thrown(() => Gcr.open({ dbPath: junk })), 'DB_ERROR');
       assert.ok(before.equals(readFileSync(junk)));
+    });
+  });
+});
+
+describe('peekOpenRefusal (the read-only look Gcr.open takes before a read-write open)', () => {
+  it('names exactly the files the open would refuse, and says nothing about anything else', async () => {
+    await withDir(async (dir) => {
+      const foreign = join(dir, 'foreign.sqlite');
+      makeFile(foreign, 'CREATE TABLE t (x)');
+      const foreignId = join(dir, 'foreign-id.sqlite');
+      makeFile(foreignId, 'PRAGMA application_id = 7', 'PRAGMA user_version = 1');
+      const newer = join(dir, 'newer.sqlite');
+      makeFile(newer, `PRAGMA application_id = ${GCR_APPLICATION_ID}`, 'PRAGMA user_version = 7');
+      const own = join(dir, 'own.sqlite');
+      Gcr.open({ dbPath: own }).close();
+      const zero = join(dir, 'zero.sqlite');
+      await writeFile(zero, '');
+      const junk = join(dir, 'junk.sqlite');
+      await writeFile(junk, 'not sqlite at all '.repeat(100));
+      const emptyDatabase = join(dir, 'empty-db.sqlite');
+      makeFile(emptyDatabase, 'PRAGMA user_version = 0');
+      await mkdir(join(dir, 'adir'));
+
+      assert.deepEqual(peekOpenRefusal(foreign), { kind: 'foreign' });
+      assert.deepEqual(peekOpenRefusal(foreignId), { kind: 'foreign' });
+      assert.deepEqual(peekOpenRefusal(newer), { kind: 'newer', fileVersion: 7 });
+      for (const fine of [own, zero, junk, emptyDatabase, join(dir, 'adir'), join(dir, 'missing.sqlite'), ':memory:', '', 'file:x.sqlite', 'a\0b']) {
+        assert.equal(peekOpenRefusal(fine), null, `no verdict for ${JSON.stringify(fine).slice(0, 40)}`);
+      }
+      assert.equal(peekOpenRefusal(5 as never), null);
     });
   });
 });

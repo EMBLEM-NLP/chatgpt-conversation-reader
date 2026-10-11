@@ -101,7 +101,10 @@ export function renderCommandHelp(spec: CommandSpec): string {
   const out: string[] = [`${name} - ${spec.summary}`, '', 'Usage:', ...usageLines(spec)];
   if (spec.details !== undefined && spec.details.length > 0) {
     out.push('');
-    for (const d of spec.details) out.push(...wrap(d, WIDTH, ''));
+    spec.details.forEach((d, i) => {
+      if (i > 0) out.push('');
+      out.push(...wrap(d, WIDTH, ''));
+    });
   }
   if (spec.positionals.length > 0) {
     out.push('', 'Arguments:', ...twoColumns(spec.positionals.map((p) => [p.variadic === true ? `<${p.name}>...` : `<${p.name}>`, p.description] as const)));
@@ -114,7 +117,7 @@ export function renderCommandHelp(spec: CommandSpec): string {
     out.push(...wrap(ex.note, WIDTH, '      '));
   }
   out.push('', 'Exit codes:', ...exitCodeLines(spec.errors, spec.exitNotes));
-  out.push('', 'stdout carries only the result; notes and errors go to stderr. GCR never contacts chatgpt.com.');
+  out.push('', ...wrap('stdout carries only the result; notes and errors go to stderr. GCR never contacts chatgpt.com.', WIDTH, ''));
   return `${out.join('\n')}\n`;
 }
 
@@ -128,7 +131,7 @@ export function renderGroupHelp(group: GroupSpec): string {
     'Commands:',
     ...twoColumns(group.children.map((c) => [c.path.slice(1).join(' '), c.summary] as const), COMMAND_COLUMN),
     '',
-    `Run "gcr help ${group.name} <command>" for the options, examples and exit codes of one command.`,
+    ...wrap(`Run "gcr help ${group.name} <command>" for the options, examples and exit codes of one command.`, WIDTH, ''),
   ];
   return `${out.join('\n')}\n`;
 }
@@ -172,7 +175,7 @@ export function renderRootHelp(entries: readonly RootEntry[]): string {
     out.push(...wrap(note, WIDTH, '      '));
   }
   out.push('', 'Exit codes:', ...exitCodeLines([], ['The full table, per error code, is in docs/CLI_REFERENCE.md; each command lists the codes it can return.']));
-  out.push('', 'Run "gcr help <command>" for the options, examples and exit codes of one command.');
+  out.push('', ...wrap('Run "gcr help <command>" for the options, examples and exit codes of one command.', WIDTH, ''));
   return `${out.join('\n')}\n`;
 }
 

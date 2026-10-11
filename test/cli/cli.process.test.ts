@@ -290,9 +290,15 @@ describe('source scan of src/cli and src/suppress-warnings.ts', () => {
   it('imports only an allow-list of Node built-ins, the two declared dependencies (none are needed) and relative modules: no network, no child_process', () => {
     const builtins = new Set(['node:fs', 'node:fs/promises', 'node:path', 'node:util', 'node:crypto', 'node:process']);
     const forbidden = /^(node:)?(https?|http2|net|tls|dns|dgram|quic|child_process|cluster|worker_threads|vm|inspector|repl|module|test|zlib|readline|os)(\/.*)?$/;
+    let total = 0;
     for (const file of cliFiles) {
       const text = readFileSync(file, 'utf8');
-      const specs = [...text.matchAll(/(?:\bfrom|\bimport\s*\(|\bimport)\s*['"]([^'"]+)['"]/g)].map((m) => m[1] ?? '');
+      const specs = [
+        ...[...text.matchAll(/^\s*(?:import|export)\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]/gm)].map((m) => m[1] ?? ''), // import ... from 'x' / export ... from 'x'
+        ...[...text.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm)].map((m) => m[1] ?? ''), // import 'x'
+        ...[...text.matchAll(/\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1] ?? ''), // import('x')
+      ];
+      total += specs.length;
       for (const spec of specs) {
         const where = `${relative(REPO_ROOT, file)} imports "${spec}"`;
         assert.equal(forbidden.test(spec), false, `${where}: forbidden module`);
@@ -302,6 +308,7 @@ describe('source scan of src/cli and src/suppress-warnings.ts', () => {
       assert.equal(/\brequire\s*\(/.test(text), false, `${relative(REPO_ROOT, file)} uses require()`);
       assert.equal(/\b(fetch|WebSocket|XMLHttpRequest|EventSource|sendBeacon)\b\s*[(.]/.test(text.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')), false, `${relative(REPO_ROOT, file)} uses a network global`);
     }
+    assert.ok(total >= 40, `the scan found only ${total} imports: is the regex still right?`);
   });
 
   it('no console.*, and process.stdout/stderr only in the one output module', () => {

@@ -110,6 +110,11 @@ describe('smoke: the real SDK client over the real child process', () => {
     assert.match(stderr, /"msg":"mcp_ready","writes":false,"importRoots":0/);
     assert.match(stderr, /"msg":"mcp_shutdown","reason":"stdin_end"/);
     for (const forbidden of ['quokka', 'Café', INJECTION.user, fx.dir, 'GCR-SYNTHETIC-FIXTURE']) assert.ok(!stderr.includes(forbidden), `stderr must not contain ${JSON.stringify(forbidden)}`);
+    assert.ok(!/ExperimentalWarning/.test(stderr), 'the node:sqlite ExperimentalWarning is filtered');
+    for (const line of stderr.split('\n').filter((l) => l !== '')) {
+      const entry = JSON.parse(line) as { level: string; msg: string };
+      assert.ok(typeof entry.level === 'string' && typeof entry.msg === 'string', 'every stderr line of a clean session is a structured log line');
+    }
     assert.equal(dbContentHash(fx.dbPath), before, 'a read-only server leaves the database unchanged');
   });
 });
