@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { GcrError } from '../../src/errors.js';
 import { Gcr, normalizeError } from '../../src/sdk/gcr.js';
-import { CALLS, ID, assertCode, assertRejectCode, chat, expectGcr, fixedClock, importBuilders, makeTempDir, rejected, removeDir, standardDb, thrown } from './sdk.helpers.test.js';
+import { CALLS, ID, assertCode, assertRejectCode, chat, conversationsJson, expectGcr, fixedClock, importBuilders, makeTempDir, rejected, removeDir, standardDb, thrown, writeText } from './sdk.helpers.test.js';
 
 /** The raw node:sqlite connection behind a handle (test-only reach into a private field to simulate a crash). */
 function rawConnection(gcr: Gcr): DatabaseSync {
@@ -69,6 +69,12 @@ describe('a connection that was closed behind the facade\'s back', () => {
       for (const c of CALLS) {
         if (c.kind === 'read') {
           const e = expectGcr(thrown(() => c.run(t.gcr)), 'DB_ERROR');
+          assert.equal(e.details?.['reason'], 'closed', c.name);
+        } else if (c.name === 'importExport') {
+          // The table's import points at a file that does not exist: the input is checked before the database is touched.
+          await assertRejectCode(Promise.resolve().then(() => c.run(t.gcr) as Promise<unknown>), 'IMPORT_INPUT_NOT_FOUND');
+          const real = await writeText(t.dir, 'closed/conversations.json', conversationsJson([chat(ID.empty, 'closed', [['q', 'a']])]));
+          const e = await assertRejectCode(t.gcr.importExport({ source: { kind: 'path', path: real } }), 'DB_ERROR');
           assert.equal(e.details?.['reason'], 'closed', c.name);
         } else {
           const e = await assertRejectCode(Promise.resolve().then(() => c.run(t.gcr) as Promise<unknown>), 'DB_ERROR');
@@ -219,7 +225,6 @@ describe('errors raised by caller-supplied callbacks', () => {
     const dir = await makeTempDir();
     const gcr = Gcr.open({ dbPath: ':memory:', clock: fixedClock });
     try {
-      const { writeText, conversationsJson } = await import('./sdk.helpers.test.js');
       const path = await writeText(dir, 'p/conversations.json', conversationsJson([chat(ID.linear, 'cb', [['q', 'a']])]));
       for (const thrownValue of ['a string', 7, null, undefined, { message: 'obj' }]) {
         const e = await rejected(

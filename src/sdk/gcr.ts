@@ -538,7 +538,10 @@ function conversationFilter(v: unknown): string | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== 'string' || v.length === 0 || v.length > 512 || v.includes('\0')) throw invalidArgument('conversationId', 'expected a non-empty string without NUL bytes (max 512 characters)');
   if (isUuid(v)) return v.toLowerCase();
-  if (/^[\t\n\f\r ]*[A-Za-z][A-Za-z0-9+.-]*:/.test(v)) return parseConversationRef(v).conversationId;
+  // Only an http(s) link is read as a link (and then must be the exact chatgpt.com/c/<uuid> form, with the domain layer's
+  // errors). Any other text is a RAW stored id, even one that contains a colon ("col:quokka"): treating every "word:" prefix
+  // as a URL scheme would make such ids unsearchable and turn an id filter into a URL error.
+  if (/^[\t\n\f\r ]*https?:/i.test(v)) return parseConversationRef(v).conversationId;
   return v;
 }
 
@@ -1066,6 +1069,7 @@ export class Gcr {
    * interleaved). Every item carries `kind` so a client can tell which is which.
    */
   search(opts: SearchOptions & { scope?: 'messages' }): ResultEnvelope<Page<MessageSearchItem>>;
+  search(opts: SearchOptions & { scope: 'titles' }): ResultEnvelope<Page<TitleSearchItem>>;
   search(opts: SearchOptions): ResultEnvelope<Page<SearchItem>>;
   search(opts: SearchOptions): ResultEnvelope<Page<SearchItem>> {
     return this.read(() => {

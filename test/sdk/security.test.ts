@@ -203,7 +203,10 @@ describe('imported text is DATA', () => {
       assert.ok(!e.message.includes('IGNORE'));
       assert.ok(!(e.remedy ?? '').includes('IGNORE'));
       assertCode(() => gcr.get(hostile), 'INVALID_UUID');
-      assertCode(() => gcr.get(`https://chatgpt.com/c/${hostile}`), 'INVALID_UUID');
+      // inside a link the id must be one clean path segment; this text has slashes, so the domain layer refuses it as an unsupported shape
+      const viaLink = expectGcr(thrown(() => gcr.get(`https://chatgpt.com/c/${hostile}`)), 'UNSUPPORTED_URL');
+      assert.ok(!JSON.stringify(viaLink.toEnvelope()).includes('IGNORE'), 'the link text is never echoed');
+      assertCode(() => gcr.get(`https://chatgpt.com/c/${INJECTION.replace(/[ /]/g, '-')}`), 'INVALID_UUID');
     } finally {
       gcr.close();
     }
@@ -276,8 +279,14 @@ describe('nothing identifying leaks from the facade', () => {
       outputs.push(missingImport instanceof Error && 'toEnvelope' in missingImport ? (missingImport as unknown as { toEnvelope: () => unknown }).toEnvelope() : String(missingImport));
       for (const o of outputs) {
         const wire = JSON.stringify(o instanceof Error && 'toEnvelope' in o ? (o as unknown as { toEnvelope: () => unknown }).toEnvelope() : o);
-        assert.ok(!wire.includes(dir) && !wire.includes('very-private-export') && !wire.includes('private-db-name'), wire.slice(0, 200));
+        assert.ok(!wire.includes(dir) && !wire.includes('very-private-export'), wire.slice(0, 200));
+        // The doctor report (and only it) names the database by its BASENAME, which is allowed; no other output mentions the file.
+        const isDoctor = typeof o === 'object' && o !== null && 'modes' in o;
+        if (!isDoctor) assert.ok(!wire.includes('private-db-name'), wire.slice(0, 200));
       }
+      const report = gcr.doctor();
+      assert.equal(report.database?.label, 'private-db-name.sqlite');
+      assert.ok(!JSON.stringify(report).includes(dir), 'the doctor report holds the basename only, never the directory');
     } finally {
       gcr.close();
       await removeDir(dir);

@@ -66,7 +66,9 @@ describe('prompt-injection text is data', () => {
     }
     const titleHit = gcr.search({ query: 'instructions', scope: 'titles' });
     assert.equal(titleHit.data.items.length, 1);
-    assert.equal(titleHit.data.items[0]?.title, title(TITLE_INJECTION));
+    const first = titleHit.data.items[0];
+    assert.equal(first?.kind, 'title');
+    assert.equal(first?.kind === 'title' ? first.title : null, title(TITLE_INJECTION));
   });
 
   it('the text cannot forge the highlight markers or terminal escapes in snippets', () => {

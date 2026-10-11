@@ -190,6 +190,21 @@ describe('get: references', () => {
     assert.deepEqual(expectGcr(thrown(() => t.gcr.get(missing)), 'NOT_IN_LOCAL_EXPORT').details, { conversationId: missing });
   });
 
+  it('getByUrl accepts ONLY an exact chatgpt.com link, answers like get, and refuses everything else with the domain error codes', () => {
+    const viaUrl = t.gcr.getByUrl(`https://chatgpt.com/c/${ID.linear}/?x=1#y`);
+    assertEnvelopeShape(viaUrl);
+    assert.deepEqual(viaUrl.data, t.gcr.get(ID.linear).data);
+    assert.equal(t.gcr.getByUrl(`https://chatgpt.com/c/${ID.branched}`, { branch: t.fx.branched.a2 }).data.thread?.selectionPolicy, 'explicit_branch');
+    assertCode(() => t.gcr.getByUrl(ID.linear), 'INVALID_URL');
+    assertCode(() => t.gcr.getByUrl(`https://chatgpt.com/share/${ID.linear}`), 'UNSUPPORTED_URL');
+    assertCode(() => t.gcr.getByUrl(`https://chat.openai.com/c/${ID.linear}`), 'UNSUPPORTED_URL');
+    assertCode(() => t.gcr.getByUrl('https://chatgpt.com/c/not-a-uuid'), 'INVALID_UUID');
+    assertCode(() => t.gcr.getByUrl(7 as never), 'INVALID_ARGUMENT');
+    const e = expectGcr(thrown(() => t.gcr.getByUrl(`https://chatgpt.com/c/${syntheticUuid(0x57)}?token=SECRET`)), 'NOT_IN_LOCAL_EXPORT');
+    assert.deepEqual(e.details, { conversationId: syntheticUuid(0x57), provider: 'chatgpt' });
+    assert.ok(!JSON.stringify(e.toEnvelope()).includes('SECRET'));
+  });
+
   it('every read that takes a reference reports NOT_IN_LOCAL_EXPORT the same way', () => {
     const missing = syntheticUuid(0x56);
     assertCode(() => t.gcr.branches(missing), 'NOT_IN_LOCAL_EXPORT');
@@ -423,6 +438,14 @@ describe('search', () => {
     assert.equal(t.gcr.search({ query: 'quokka', conversationId: ID.linear.toUpperCase() }).data.items.length, 2);
     assert.equal(t.gcr.search({ query: 'quokka', createdAfter: '2999-01-01T00:00:00Z' }).data.items.length, 0);
     assert.equal(t.gcr.search({ query: 'quokka', createdBefore: '2000-01-01T00:00:00Z' }).data.items.length, 0);
+  });
+
+  it('a conversationId filter is a raw id unless it is an http(s) link: ids with a colon filter (to nothing), bad links keep their URL errors', () => {
+    assert.deepEqual(t.gcr.search({ query: 'quokka', conversationId: 'col:quokka' }).data.items, []);
+    assert.deepEqual(t.gcr.search({ query: 'quokka', conversationId: 'urn:uuid:not-stored' }).data.items, []);
+    assertCode(() => t.gcr.search({ query: 'quokka', conversationId: `https://chatgpt.com/share/${ID.linear}` }), 'UNSUPPORTED_URL');
+    assertCode(() => t.gcr.search({ query: 'quokka', conversationId: `http://chatgpt.com/c/${ID.linear}` }), 'UNSUPPORTED_URL');
+    assertCode(() => t.gcr.search({ query: 'quokka', conversationId: 'https://chatgpt.com/c/not-a-uuid' }), 'INVALID_UUID');
   });
 
   it('hidden messages are excluded unless includeHidden', () => {
