@@ -37,7 +37,12 @@ const MAX_QUERY_TERMS = 32;
 const MAX_QUERY_TOKENS = 128;
 const MAX_FILTER_CHARS = 512;
 const MAX_OFFSET = 10_000_000;
-const MAX_CURSOR_CHARS = 4096;
+/**
+ * Longest accepted cursor. A cursor carries three identifiers of up to 512 UTF-16 units each (conversation id, message id,
+ * account label); as UTF-8 JSON that is at most ~4.8 KB, i.e. ~6.4k base64url characters. The limit must stay above that, or
+ * a cursor this module issued itself would be refused on the next page.
+ */
+const MAX_CURSOR_CHARS = 8192;
 
 export const SNIPPET_MAX_CHARS = 160;
 const SNIPPET_LEAD_CHARS = 40;
@@ -49,6 +54,13 @@ const SNIPPET_SCAN_SPAN = 640;
  */
 const SNIPPET_SOURCE_CHARS = 200_000;
 const SNIPPET_SCAN_LIMIT = SNIPPET_SOURCE_CHARS;
+/**
+ * Total number of characters that ONE page of search hits may scan while looking for the first match to highlight (the sum
+ * over all hits of the position reached). Without it a page of 200 hits on 190k-character messages scanned ~38M code
+ * points (5-11 s). Hits are processed in page order; once the budget is spent the remaining hits still appear, with the
+ * start of the text as their snippet and no highlight. Typical hits (match within the first few KB) cost almost nothing.
+ */
+export const SNIPPET_PAGE_SCAN_BUDGET = 2_000_000;
 const MARK_START = '\u0001';
 const MARK_END = '\u0002';
 const ELLIPSIS = '…';
@@ -66,7 +78,7 @@ export interface SearchQuery {
   channel?: string;
   /** true: only messages with an explicit model slug; false: only messages without one. */
   hasModel?: boolean;
-  /** Inclusive lower bound on message created_at (ISO-8601 UTC). Messages without a timestamp never match a bound. */
+  /** Inclusive lower bound on message created_at (ISO-8601 UTC), compared as INSTANTS (".000Z" and "Z" spellings agree). Messages without a timestamp never match a bound. */
   createdAfter?: string;
   /** EXCLUSIVE upper bound on message created_at (ISO-8601 UTC). */
   createdBefore?: string;
@@ -412,22 +424,31 @@ function renderWindow(text: string, ws: number, regions: readonly Region[], maxL
  * Deterministic and pure.
  */
 export function buildSnippet(text: string, terms: readonly QueryTerm[], maxLen: number = SNIPPET_MAX_CHARS): string {
-  if (text === '') return '';
+  return buildSnippetScan(text, terms, maxLen, SNIPPET_SCAN_LIMIT).snippet;
+}
+
+/**
+ * buildSnippet with an explicit scan limit (characters examined while looking for the first match; 0 = do not look) that
+ * also reports how many characters it examined, so a caller can enforce a budget over many snippets.
+ */
+function buildSnippetScan(text: string, terms: readonly QueryTerm[], maxLen: number, scanLimit: number): { snippet: string; scanned: number } {
+  if (text === '') return { snippet: '', scanned: 0 };
   const budget = Math.max(8, Math.floor(maxLen));
-  const first = terms.length === 0 ? [] : findRegions(text, terms, 0, SNIPPET_SCAN_LIMIT, true);
+  const limit = Math.max(0, Math.min(scanLimit, SNIPPET_SCAN_LIMIT));
+  const first = terms.length === 0 || limit === 0 ? [] : findRegions(text, terms, 0, limit, true);
   const hit = first[0];
-  if (hit === undefined) return renderWindow(text, 0, [], budget);
+  if (hit === undefined) return { snippet: renderWindow(text, 0, [], budget), scanned: Math.min(limit, text.length) };
   const ws = chooseWindowStart(text, hit.start);
   // The first hit is always included, even if re-scanning from a window start that fell inside a word misses it.
   const regions = mergeRegions([hit, ...findRegions(text, terms, ws, ws + SNIPPET_SCAN_SPAN, false).filter((r) => r.start >= ws)]);
-  return renderWindow(text, ws, regions, budget);
+  return { snippet: renderWindow(text, ws, regions, budget), scanned: hit.end + SNIPPET_SCAN_SPAN };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Cursor (keyset) encoding
 // ---------------------------------------------------------------------------------------------------------------
 
-/** rank, created_at IS NULL, coalesce(created_at,''), conversation_id, message_id, provider, account_label, source_batch */
+/** rank, created_at IS NULL, canonical created_at instant ('' when NULL), conversation_id, message_id, provider, account_label, source_batch */
 type CursorKey = [number, number, string, string, string, string, string, string];
 
 function fingerprint(parts: readonly unknown[]): string {
@@ -462,8 +483,8 @@ function decodeCursor(raw: unknown, fp: string): CursorKey {
   return [rank, nullFlag, created as string, conv as string, msg as string, provider as string, account as string, batch as string];
 }
 
-function cursorKeyOf(hit: SearchHit): CursorKey {
-  return [hit.rank, hit.createdAt === null ? 1 : 0, hit.createdAt ?? '', hit.conversationId, hit.messageId, hit.provider, hit.accountLabel, hit.batchId];
+function cursorKeyOf(hit: SearchHit, createdKey: string): CursorKey {
+  return [hit.rank, hit.createdAt === null ? 1 : 0, createdKey, hit.conversationId, hit.messageId, hit.provider, hit.accountLabel, hit.batchId];
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -475,16 +496,25 @@ const HEAD_JOIN =
   'JOIN conversation_heads ch ON ch.provider = m.provider AND ch.account_label = m.account_label ' +
   'AND ch.conversation_id = m.conversation_id AND ch.source_batch = m.source_batch ';
 
+/**
+ * created_at as a canonical instant string `YYYY-MM-DDTHH:MM:SS.fffZ`. Stored values may be spelled with or without the
+ * ".fff" part (validate.ts allows both); compared as raw strings "00.500Z" would sort BEFORE "00Z" (because "." < "Z") and
+ * range filters would be off by up to a second. strftime() normalizes every spelling; NULL stays NULL.
+ */
+const CANON_INSTANT = "strftime('%Y-%m-%dT%H:%M:%fZ', ";
+const CREATED_KEY = `COALESCE(${CANON_INSTANT}m.created_at), '')`;
+
 const MESSAGE_ORDER =
-  'ORDER BY h.rank ASC, (m.created_at IS NULL) ASC, m.created_at ASC, m.conversation_id ASC, m.message_id ASC, ' +
+  `ORDER BY h.rank ASC, (m.created_at IS NULL) ASC, ${CREATED_KEY} ASC, m.conversation_id ASC, m.message_id ASC, ` +
   'm.provider ASC, m.account_label ASC, m.source_batch ASC ';
 
 const CURSOR_PREDICATE =
-  'AND (h.rank, (m.created_at IS NULL), COALESCE(m.created_at, \'\'), m.conversation_id, m.message_id, m.provider, m.account_label, m.source_batch) ' +
+  `AND (h.rank, (m.created_at IS NULL), ${CREATED_KEY}, m.conversation_id, m.message_id, m.provider, m.account_label, m.source_batch) ` +
   '> (?, ?, ?, ?, ?, ?, ?, ?) ';
 
-function hitFromRow(row: Row, terms: readonly QueryTerm[]): SearchHit {
-  return {
+function hitFromRow(row: Row, terms: readonly QueryTerm[], scanLimit: number): { hit: SearchHit; scanned: number } {
+  const snippet = buildSnippetScan(rowString(row, 'text'), terms, SNIPPET_MAX_CHARS, scanLimit);
+  const hit: SearchHit = {
     provider: rowString(row, 'provider') as Provider,
     accountLabel: rowString(row, 'account_label'),
     conversationId: rowString(row, 'conversation_id'),
@@ -495,10 +525,11 @@ function hitFromRow(row: Row, terms: readonly QueryTerm[]): SearchHit {
     channel: rowStringOrNull(row, 'channel'),
     createdAt: rowStringOrNull(row, 'created_at'),
     hidden: rowNumber(row, 'hidden') === 1,
-    snippet: buildSnippet(rowString(row, 'text'), terms),
+    snippet: snippet.snippet,
     rank: rowNumber(row, 'rank'),
     batchId: rowString(row, 'source_batch'),
   };
+  return { hit, scanned: snippet.scanned };
 }
 
 /**
@@ -547,15 +578,16 @@ export function searchMessages(db: DatabaseSync, q: SearchQuery): Page<SearchHit
   if (channel !== undefined) add('AND m.channel = ? ', channel);
   if (hasModel === true) add('AND m.model_slug IS NOT NULL ');
   if (hasModel === false) add('AND m.model_slug IS NULL ');
-  if (createdAfter !== undefined) add('AND m.created_at >= ? ', createdAfter);
-  if (createdBefore !== undefined) add('AND m.created_at < ? ', createdBefore);
+  // Instants, not strings (see CANON_INSTANT). Rows without created_at give NULL and therefore never match a bound.
+  if (createdAfter !== undefined) add(`AND ${CANON_INSTANT}m.created_at) >= ${CANON_INSTANT}?) `, createdAfter);
+  if (createdBefore !== undefined) add(`AND ${CANON_INSTANT}m.created_at) < ${CANON_INSTANT}?) `, createdBefore);
   if (cursor !== null) add(CURSOR_PREDICATE, ...cursor);
 
   const sql =
     'WITH h AS MATERIALIZED (SELECT rowid AS rid, bm25(messages_fts) AS rank FROM messages_fts WHERE messages_fts MATCH ?) ' +
     'SELECT m.provider AS provider, m.account_label AS account_label, m.conversation_id AS conversation_id, c.title AS title, ' +
     'm.message_id AS message_id, m.author_role AS author_role, m.model_slug AS model_slug, m.channel AS channel, ' +
-    'm.created_at AS created_at, m.hidden AS hidden, substr(m.text, 1, ?) AS text, h.rank AS rank, m.source_batch AS source_batch ' +
+    `m.created_at AS created_at, ${CREATED_KEY} AS created_key, m.hidden AS hidden, substr(m.text, 1, ?) AS text, h.rank AS rank, m.source_batch AS source_batch ` +
     'FROM h JOIN messages m ON m.rowid = h.rid ' +
     'JOIN conversations c ON c.provider = m.provider AND c.account_label = m.account_label AND c.conversation_id = m.conversation_id AND c.source_batch = m.source_batch ' +
     (allBatches ? '' : HEAD_JOIN) +
@@ -564,14 +596,23 @@ export function searchMessages(db: DatabaseSync, q: SearchQuery): Page<SearchHit
 
   const rows = runFtsQuery(compiled.mode, () => db.prepare(sql).all(...params));
   const hasMore = rows.length > limit;
-  const items = (hasMore ? rows.slice(0, limit) : rows).map((r) => hitFromRow(r, compiled.terms));
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  // Snippet work is budgeted per page (see SNIPPET_PAGE_SCAN_BUDGET); hits are served in page order.
+  let scanBudget = SNIPPET_PAGE_SCAN_BUDGET;
+  const items: SearchHit[] = [];
+  for (const r of pageRows) {
+    const { hit, scanned } = hitFromRow(r, compiled.terms, Math.min(SNIPPET_SCAN_LIMIT, scanBudget));
+    scanBudget = Math.max(0, scanBudget - scanned);
+    items.push(hit);
+  }
   const last = items[items.length - 1];
+  const lastRow = pageRows[pageRows.length - 1];
   return {
     items,
     limit,
     offset,
     nextOffset: hasMore && cursor === null ? offset + items.length : null,
-    nextCursor: hasMore && last !== undefined ? encodeCursor(fp, cursorKeyOf(last)) : null,
+    nextCursor: hasMore && last !== undefined && lastRow !== undefined ? encodeCursor(fp, cursorKeyOf(last, rowString(lastRow, 'created_key'))) : null,
   };
 }
 

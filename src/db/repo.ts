@@ -186,6 +186,21 @@ function validateBatchMeta(b: unknown): ImportBatchMeta {
   };
 }
 
+/**
+ * Roll back whatever transaction is open on `db`, quietly. Deliberately NOT guarded by `db.isTransaction`: that property
+ * only exists from Node 22.16 while `engines` allows 22.13, and `undefined` would silently skip the rollback and keep the
+ * write lock for the life of the connection. ROLLBACK without an open transaction is a harmless SQLite error.
+ * Only call this after this code's own BEGIN succeeded (never to clean up after a failed BEGIN: that could roll back a
+ * transaction that belongs to the caller).
+ */
+function rollbackQuietly(db: DatabaseSync): void {
+  try {
+    db.exec('ROLLBACK');
+  } catch {
+    /* no transaction was open (already rolled back), or the connection is gone: the first failure is the one worth reporting */
+  }
+}
+
 /** JSON text for a column, or null for "absent". Non-serializable values (BigInt, cycles) are a caller bug, not data. */
 function jsonOrNull(field: string, v: unknown): string | null {
   if (v === undefined) return null;
@@ -393,7 +408,7 @@ export class Repository {
         if (res.changes === 0) {
           // Same conversation id twice in one stream: keep the first, skip the rest, say so.
           duplicateCount++;
-          if (duplicates.length < MAX_DUPLICATE_IDS_REPORTED) duplicates.push(rec.id);
+          if (duplicates.length < MAX_DUPLICATE_IDS_REPORTED && !duplicates.includes(rec.id)) duplicates.push(rec.id);
           continue;
         }
         conversations++;
@@ -432,13 +447,7 @@ export class Repository {
         messages: { stored: nodes, newlyInserted: nodes, structural },
       };
     } catch (e) {
-      if (!committed && db.isTransaction) {
-        try {
-          db.exec('ROLLBACK');
-        } catch {
-          /* the first failure is the one worth reporting */
-        }
-      }
+      if (!committed) rollbackQuietly(db);
       throw isSqliteError(e) ? toDbError(e) : e;
     }
   }
@@ -524,6 +533,7 @@ export class Repository {
 
   /** Conversations at their head batch (or every snapshot with includeAllBatches), with `total`. */
   listConversations(opts: ListConversationsOptions = {}): Page<ConversationSummary> {
+    if (typeof opts !== 'object' || opts === null) throw badArg('options', 'expected an object');
     const provider = optString('provider', opts.provider);
     const accountLabel = optString('accountLabel', opts.accountLabel);
     const sort = opts.sort === undefined ? 'updated_desc' : oneOf('sort', opts.sort, ['updated_desc', 'created_desc', 'title_asc'] as const);
@@ -635,6 +645,10 @@ export class Repository {
     if (IMPORTS_IN_FLIGHT.has(db)) throw new GcrError('DB_ERROR', 'An import is in progress on this database connection.');
     try {
       db.exec('BEGIN IMMEDIATE');
+    } catch (e) {
+      throw toDbError(e); // a failed BEGIN has nothing to roll back; never touch a transaction that is not ours
+    }
+    try {
       db.exec("INSERT INTO messages_fts (messages_fts) VALUES ('delete-all')");
       db.exec("INSERT INTO conversations_fts (conversations_fts) VALUES ('delete-all')");
       const insertMessage = db.prepare('INSERT INTO messages_fts (rowid, search_text) VALUES (?, ?)');
@@ -652,13 +666,7 @@ export class Repository {
       db.exec('COMMIT');
       return { messages, conversations };
     } catch (e) {
-      if (db.isTransaction) {
-        try {
-          db.exec('ROLLBACK');
-        } catch {
-          /* report the original failure */
-        }
-      }
+      rollbackQuietly(db);
       throw toDbError(e);
     }
   }

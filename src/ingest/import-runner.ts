@@ -14,8 +14,10 @@
  *    as an async generator inside ONE transaction. If a file no longer hashes to its pass-1 digest (it changed between
  *    the passes) the generator throws and the transaction rolls back: a half-changed input can never be stored.
  *
- * Duplicate resolution (docs/IMPORT_GUIDE.md): conversations with the same id (conversation_id ?? id ?? uuid, UUIDs
- * lower-cased like the adapters do) may occur in several shards. The winner is chosen by this total order:
+ * Duplicate resolution (docs/IMPORT_GUIDE.md): conversations with the same id may occur in several shards. Only objects
+ * the adapters accept as conversations take part, keyed like their adapter keys them (ChatGPT shape: conversation_id ?? id;
+ * Claude shape: uuid; UUIDs lower-cased), so a stray object that carries the same id can never displace a real conversation.
+ * The winner is chosen by this total order:
  *   1. greatest update time (update_time seconds, or updated_at for Claude; missing = lowest)
  *   2. greatest element size in source bytes
  *   3. earliest file order (plain conversations.json first, then numeric shard order)

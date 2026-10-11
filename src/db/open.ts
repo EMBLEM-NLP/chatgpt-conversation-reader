@@ -224,8 +224,16 @@ export function openDatabase(path: string, opts: OpenOptions = {}): GcrDatabase 
   }
 }
 
-/** Close a handle (idempotent). Accepts the GcrDatabase or a bare DatabaseSync. */
+/**
+ * Close a handle (idempotent). Accepts the GcrDatabase or a bare DatabaseSync. `db.isOpen` is deliberately not consulted: it
+ * only exists from Node 22.15 (`engines` allows 22.13), where `undefined` would turn this function into a silent no-op and
+ * leak the connection. Closing a closed database raises ERR_INVALID_STATE, which is the "already closed" answer.
+ */
 export function closeDatabase(handle: GcrDatabase | DatabaseSync): void {
   const db = handle instanceof DatabaseSync ? handle : handle.db;
-  if (db.isOpen) db.close();
+  try {
+    db.close();
+  } catch (e) {
+    if ((e as { code?: unknown } | null)?.code !== 'ERR_INVALID_STATE') throw e;
+  }
 }

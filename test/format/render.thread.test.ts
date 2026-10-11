@@ -140,8 +140,11 @@ None.
   });
 
   it('compact', () => {
+    // The "# omitted:" line was added by the adversarial review: the fixture drops 2 hidden messages and 1 structural root,
+    // and a compact rendering that does not say so presents a partial branch as the whole one (FR-09).
     const expected = `# Synthetic title | chatgpt | exported_tree | conv-1-a0
 # source: provenance=official_chatgpt_export | account=default | batch=b_synthetic00000001 | imported=2025-02-01 00:00:00 UTC (UTC+00:00) | tool=gcr ${TOOL_VERSION} | tz=UTC | selection=source_current_node | conversation=conv-1
+# omitted: 2 hidden message(s), 1 structural node(s)
 [user] Hello there
 [assistant] Hi!
   Second line
@@ -276,7 +279,12 @@ describe('renderThread hidden and structural messages', () => {
   it('an empty selection says so instead of printing an empty section', () => {
     const md = render(thread([ROOT]), { format: 'markdown' });
     assert.ok(md.includes('No messages to show.'));
-    assert.equal(render(thread([ROOT]), { format: 'compact' }).split('\n').length, 3, 'header + source line + trailing newline only');
+    // Adversarial review: the compact output used to be just header + source line, i.e. it did not say WHY nothing was shown.
+    // It now states what was left out (FR-09), so the structural root is reported on a third comment line.
+    const compact = render(thread([ROOT]), { format: 'compact' }).split('\n');
+    assert.equal(compact.length, 4, 'header + source line + omitted note + trailing newline only');
+    assert.equal(compact[2], '# omitted: 0 hidden message(s), 1 structural node(s)');
+    assert.equal(render(thread([]), { format: 'compact' }).split('\n').length, 3, 'nothing omitted: header + source line + trailing newline only');
   });
 });
 

@@ -375,7 +375,13 @@ function noticeFor(completeness: Overall, context: NoticeContext): string | null
 /** `sourceLabel` is contractually a basename; if an upstream bug hands over a path, only its last segment is ever shown (privacy). */
 function basenameOnly(label: string | null): string | null {
   if (label === null) return null;
-  const last = label.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '';
+  // Index scan, not `replace(/[\\/]+$/, '')`: that unanchored regex is quadratic on a long run of separators followed by a name.
+  const isSeparator = (ch: string | undefined): boolean => ch === '/' || ch === '\\';
+  let end = label.length;
+  while (end > 0 && isSeparator(label[end - 1])) end--;
+  let start = end;
+  while (start > 0 && !isSeparator(label[start - 1])) start--;
+  const last = label.slice(start, end);
   return last === '' ? null : last;
 }
 
@@ -437,6 +443,8 @@ interface CompactParts {
   header: string;
   /** Second line: "# source: ..." */
   sourceLine: string;
+  /** Optional "# ..." comment lines between the NOTICE and the body (for example what was left out of the output). */
+  notes?: string[];
   body: string[];
 }
 
@@ -488,7 +496,8 @@ function markdownDocument(doc: Doc): string {
   const notice = noticeFor(doc.completeness, doc.noticeContext);
   if (notice !== null) paragraphs.push(notice);
   if (parts.meta.length > 0) paragraphs.push(parts.meta.join('\n'));
-  paragraphs.push(...parts.blocks.filter((b) => b !== ''));
+  // A loop, not `push(...blocks)`: spreading hundreds of thousands of arguments overflows the call stack (RangeError).
+  for (const block of parts.blocks) if (block !== '') paragraphs.push(block);
   paragraphs.push('## Warnings');
   paragraphs.push(doc.warnings.length === 0 ? 'None.' : doc.warnings.map(mdWarning).join('\n'));
   return `${paragraphs.join('\n\n')}\n`;
@@ -499,7 +508,8 @@ function compactDocument(doc: Doc): string {
   const lines = [parts.header, parts.sourceLine];
   const notice = noticeFor(doc.completeness, doc.noticeContext);
   if (notice !== null) lines.push(notice);
-  lines.push(...parts.body);
+  for (const note of parts.notes ?? []) lines.push(note);
+  for (const line of parts.body) lines.push(line); // a loop, not `push(...body)`: a huge message would overflow the call stack
   if (doc.warnings.length > 0) lines.push(`# warnings: ${doc.warnings.map(compactWarning).join('; ')}`);
   return `${lines.join('\n')}\n`;
 }
@@ -661,24 +671,29 @@ function textWithMarker(text: string, removed: number): string {
   return text === '' ? truncationMarker(removed) : `${text}\n${truncationMarker(removed)}`;
 }
 
-function shapeBlock(block: ContentBlock, ro: ResolvedOptions): Record<string, unknown> {
+/** `cut` is true when maxMessageChars shortened this block (text cut, or oversized metadata replaced): the caller must announce it. */
+function shapeBlock(block: ContentBlock, ro: ResolvedOptions): { shaped: Record<string, unknown>; cut: boolean } {
   const out: Record<string, unknown> = { type: block.type };
+  let cut = false;
   if (block.text !== undefined) {
     const capped = capCodePoints(block.text, ro.maxChars);
     out['text'] = textWithMarker(capped.text, capped.removed);
+    if (capped.removed > 0) cut = true;
   }
   if (block.metadata !== undefined) {
     const metadata = toJsonValue(block.metadata);
     // With a per-message cap in force, oversized provenance blobs (raw thoughts, unknown parts) are summarized, not copied.
     const size = Number.isFinite(ro.maxChars) ? JSON.stringify(metadata ?? null).length : 0;
+    if (size > ro.maxChars) cut = true;
     out['metadata'] = size > ro.maxChars ? { omitted: true, reason: 'exceeds maxMessageChars', chars: size } : metadata;
   }
-  return out;
+  return { shaped: out, cut };
 }
 
-function shapeMessage(view: MessageView, ro: ResolvedOptions): Record<string, unknown> {
+function shapeMessage(view: MessageView, ro: ResolvedOptions): { shaped: Record<string, unknown>; blockCut: boolean } {
   const m = view.message;
-  return {
+  const blocks = m.blocks.map((b) => shapeBlock(b, ro));
+  const shaped = {
     id: m.id,
     parentId: m.parentId,
     nodeKind: m.nodeKind,
@@ -695,7 +710,7 @@ function shapeMessage(view: MessageView, ro: ResolvedOptions): Record<string, un
     ordinal: m.ordinal,
     text: textWithMarker(view.exactText, view.exactRemoved),
     ...(view.exactRemoved > 0 ? { truncatedChars: view.exactRemoved } : {}),
-    blocks: m.blocks.map((b) => shapeBlock(b, ro)),
+    blocks: blocks.map((b) => b.shaped),
     attachments: m.attachments.map((a) => ({
       id: a.id,
       name: a.name,
@@ -705,6 +720,7 @@ function shapeMessage(view: MessageView, ro: ResolvedOptions): Record<string, un
       presentInExportAs: a.presentInExportAs,
     })),
   };
+  return { shaped, blockCut: blocks.some((b) => b.cut) };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -817,12 +833,16 @@ export function renderThread(result: ThreadResult, source: SourceSummary, opts: 
   const src = shapeSource(source);
   const selection = selectThreadMessages(result, ro);
   const views = selection.shown.map((m) => viewMessage(m, ro));
-  const truncated = views.filter((v) => removedFor(v, ro) > 0);
+  // Blocks (and their metadata) exist only in JSON/JSONL; the human formats never print them, so nothing is cut there.
+  const machine = ro.format === 'json' || ro.format === 'jsonl';
+  const shapedViews = machine ? views.map((v) => shapeMessage(v, ro)) : [];
+  // A message counts as truncated when its text OR any of its blocks was shortened: a cut must never go unannounced.
+  const truncated = views.filter((v, i) => removedFor(v, ro) > 0 || shapedViews[i]?.blockCut === true);
   const warnings = shapeWarnings(result.warnings);
   if (truncated.length > 0) {
     warnings.push({
       code: 'MESSAGE_TRUNCATED',
-      message: `${truncated.length} message(s) were cut to maxMessageChars=${ro.maxChars}; each cut is marked "[truncated N chars]" in the text.`,
+      message: `${truncated.length} message(s) were cut to maxMessageChars=${ro.maxChars}; each cut is marked "[truncated N chars]" in the message or block text, and oversized block metadata is replaced by an omitted marker.`,
       ids: truncated.slice(0, 100).map((v) => v.message.id),
     });
   }
@@ -835,7 +855,7 @@ export function renderThread(result: ThreadResult, source: SourceSummary, opts: 
     selectionPolicy: result.selectionPolicy,
     omittedHidden: selection.omittedHidden,
     omittedStructural: selection.omittedStructural,
-    messages: views.map((v) => shapeMessage(v, ro)),
+    messages: shapedViews.map((s) => s.shaped),
   };
   const { messages: shapedMessages, ...threadHeader } = data;
 
@@ -878,6 +898,11 @@ export function renderThread(result: ThreadResult, source: SourceSummary, opts: 
         return {
           header: `# ${cField(title)} | ${cField(conv.provider, 40)} | ${cField(completeness, 40)} | ${cField(result.branchId, 120)}`,
           sourceLine: `${compactSourceLine([src], ro)} | selection=${cField(result.selectionPolicy, 40)} | conversation=${cField(conv.conversationId, 120)}`,
+          // FR-09: a thread with messages left out must say so in every format (markdown and JSON carry the counts too).
+          notes:
+            selection.omittedHidden + selection.omittedStructural > 0
+              ? [`# omitted: ${selection.omittedHidden} hidden message(s), ${selection.omittedStructural} structural node(s)`]
+              : [],
           body: views.flatMap(compactMessageLines),
         };
       },
@@ -991,12 +1016,21 @@ function snippetForJson(raw: string): { text: string; matches: Array<[number, nu
   return { text, matches };
 }
 
+const WHITESPACE_CHAR = /\s/;
+
+/** Splits text into leading whitespace, the rest, and trailing whitespace in one linear scan (`/\s*$/` is quadratic on a long inner run). */
+function splitEdgeWhitespace(text: string): { lead: string; core: string; trail: string } {
+  let from = 0;
+  while (from < text.length && WHITESPACE_CHAR.test(text.charAt(from))) from++;
+  let to = text.length;
+  while (to > from && WHITESPACE_CHAR.test(text.charAt(to - 1))) to--;
+  return { lead: text.slice(0, from), core: text.slice(from, to), trail: text.slice(to) };
+}
+
 function mdSnippet(raw: string): string {
   const out = splitSnippet(raw).map((seg) => {
     if (!seg.match) return mdInline(seg.text, CELL_MAX);
-    const lead = /^\s*/.exec(seg.text)?.[0] ?? '';
-    const trail = /\s*$/.exec(seg.text.slice(lead.length))?.[0] ?? '';
-    const core = seg.text.slice(lead.length, seg.text.length - trail.length);
+    const { lead, core, trail } = splitEdgeWhitespace(seg.text);
     // `**` must hug non-space characters to render as emphasis, so edge whitespace stays outside the markers.
     return core === '' ? mdInline(seg.text, CELL_MAX) : `${mdInline(lead)}**${mdInline(core, CELL_MAX)}**${mdInline(trail)}`;
   });
@@ -1250,9 +1284,14 @@ function mdDataBlocks(value: unknown, heading = 'Data'): string[] {
   return blocks;
 }
 
+/**
+ * Flattened `path: value` lines. The path comes from untrusted data (stats keys are model slugs, role strings, ...), so every
+ * line is indented by two spaces, exactly like message continuation lines: column 0 stays reserved for our own structural
+ * lines ("# ...", "NOTICE: ...", "# warnings: ...") and a key such as "# warnings" or "[system] ..." cannot forge one.
+ */
 function compactDataLines(value: unknown): string[] {
   const flat = flatRows(value);
-  const lines = flat.rows.map(([path, text]) => `${cField(path ?? '', 160)}: ${cField(text ?? '', 300)}`);
+  const lines = flat.rows.map(([path, text]) => `  ${cField(path ?? '', 160)}: ${cField(text ?? '', 300)}`);
   if (flat.limited) lines.push(`# output limited to the first ${MAX_FLAT_ROWS} values`);
   return lines;
 }
@@ -1395,7 +1434,8 @@ export function renderEnvelope<T>(env: ResultEnvelope<T> | ErrorEnvelope, opts: 
   // The producer states an overall completeness, but a source that is weaker than that statement must not be hidden by it:
   // any disagreement becomes "mixed" (which prints the NOTICE).
   const completeness = env.completeness === 'mixed' ? 'mixed' : combineCompleteness([env.completeness, ...sources.map((s) => s.completeness)]);
-  const data: unknown = env.data;
+  // `data: undefined` (a void result) would make JSON.stringify drop the key; the documented shape always has `data`.
+  const data: unknown = env.data === undefined ? null : env.data;
   const items: unknown[] = Array.isArray(data) ? data : [data];
   const ids = env.ids ?? {};
   return finish(

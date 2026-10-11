@@ -19,6 +19,9 @@
  *  - `(UTC+HH:MM)` is the offset in effect AT THAT INSTANT. It is what makes local times unambiguous: the repeated
  *    01:xx hour of a fall-back transition shows once with (UTC-04:00) and once with (UTC-05:00). Historic local-mean-time
  *    offsets that are not whole minutes keep their seconds: "(UTC-04:56:02)".
+ *  - The year is the ISO-8601 ASTRONOMICAL year (1 BC is 0000, 2 BC is -0001): four digits, with a leading "-" before year
+ *    0000. That is reachable: "0001-01-01T00:00:00Z" (the zero value of Go/.NET time types) is still 1 BC in New York, and a
+ *    numeric input offset can move an instant before year 0000.
  *
  * How the offset is obtained: `Intl` is asked only for the LOCAL wall-clock fields of the instant (plus the short name);
  * the offset is then `local - utc`, computed with integer calendar arithmetic. So the offset can never disagree with the
@@ -145,6 +148,8 @@ function zoneFormatter(tz: unknown): Intl.DateTimeFormat {
       numberingSystem: 'latn',
       // h23, not hour12:false: some engines print midnight as "24" with the latter.
       hourCycle: 'h23',
+      // Without the era, Intl prints 1 BC as "1" and 2 BC as "2": the year the arithmetic below needs is not recoverable.
+      era: 'short',
       year: 'numeric',
       month: 'numeric',
       day: 'numeric',
@@ -192,8 +197,13 @@ function formatOffset(offsetSeconds: number): string {
   return `UTC${sign}${pad(hh, 2)}:${pad(mm, 2)}${ss === 0 ? '' : `:${pad(ss, 2)}`}`;
 }
 
+/** `0005`, `2025`, `-0001` (astronomical numbering); years beyond 9999 keep all their digits. */
+function formatYear(year: number): string {
+  return year < 0 ? `-${pad(-year, 4)}` : pad(year, 4);
+}
+
 function layout(year: number, month: number, day: number, hour: number, minute: number, second: number, name: string, offsetSeconds: number): string {
-  return `${pad(year, 4)}-${pad(month, 2)}-${pad(day, 2)} ${pad(hour, 2)}:${pad(minute, 2)}:${pad(second, 2)} ${name} (${formatOffset(offsetSeconds)})`;
+  return `${formatYear(year)}-${pad(month, 2)}-${pad(day, 2)} ${pad(hour, 2)}:${pad(minute, 2)}:${pad(second, 2)} ${name} (${formatOffset(offsetSeconds)})`;
 }
 
 /** Plain ICU abbreviations only; "GMT+5:30"-style names carry no information beyond the offset. */
@@ -220,7 +230,7 @@ export function formatUtc(iso: string | null): string {
   const rem = secs - dayCount * 86_400;
   const { year, month, day } = civilFromDays(dayCount);
   const hms = `${pad(Math.floor(rem / 3600), 2)}:${pad(Math.floor((rem % 3600) / 60), 2)}:${pad(rem % 60, 2)}`;
-  return `${pad(year, 4)}-${pad(month, 2)}-${pad(day, 2)}T${hms}${millis === 0 ? '' : `.${pad(millis, 3)}`}Z`;
+  return `${formatYear(year)}-${pad(month, 2)}-${pad(day, 2)}T${hms}${millis === 0 ? '' : `.${pad(millis, 3)}`}Z`;
 }
 
 /**
@@ -246,7 +256,9 @@ export function formatInTimeZone(isoUtc: string | null, tz: string): string {
 
   const fields = new Map<string, string>();
   for (const part of formatter.formatToParts(secs * MS_PER_SECOND)) fields.set(part.type, part.value);
-  const year = Number(fields.get('year'));
+  // Intl numbers years within their era ("1 BC", "2 BC"); the arithmetic needs astronomical years (1 BC = 0, 2 BC = -1).
+  const eraYear = Number(fields.get('year'));
+  const year = /^B/i.test(fields.get('era') ?? '') ? 1 - eraYear : eraYear;
   const month = Number(fields.get('month'));
   const day = Number(fields.get('day'));
   const hour = Number(fields.get('hour'));

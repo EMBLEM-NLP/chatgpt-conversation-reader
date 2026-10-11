@@ -35,11 +35,23 @@ const CJK_CLASS = String.raw`\p{Script_Extensions=Han}\p{Script_Extensions=Hirag
 /** Characters unicode61 (as configured in schema.ts) treats as part of a token. */
 const TOKEN_CLASS = String.raw`\p{L}\p{N}\p{Co}\p{Mn}\p{Mc}`;
 
-const CJK_ONE = new RegExp(`^[${CJK_CLASS}]$`, 'u');
+/**
+ * A CJK code point that is also a TOKEN character. Script_Extensions alone is too wide: it also covers CJK punctuation and
+ * symbols that merely share the extension (U+3002 "。", U+3001 "、", U+300C "「", U+30FB "・", U+00B7 "·", U+A700 ...).
+ * Those are separators for the tokenizer (they never appear in the index), so treating them as one-character tokens made
+ * quoted phrases and snippet highlighting look for tokens that do not exist ("好世" in "你好。世界" got no highlight).
+ */
+const CJK_TOKEN = `(?=[${TOKEN_CLASS}])[${CJK_CLASS}]`;
+const CJK_ONE = new RegExp(`^${CJK_TOKEN}$`, 'u');
+/** Every script-extension match, punctuation included: splitCjk may put (harmless) spaces around separators as well. */
 const CJK_GLOBAL = new RegExp(`[${CJK_CLASS}]`, 'gu');
 const TOKEN_ONE = new RegExp(`^[${TOKEN_CLASS}]$`, 'u');
-/** One CJK code point, or a maximal run of non-CJK token characters. */
-const TOKEN_PIECES = new RegExp(`[${CJK_CLASS}]|(?:(?![${CJK_CLASS}])[${TOKEN_CLASS}])+`, 'gu');
+/** One CJK token code point, or a maximal run of non-CJK token characters. */
+const TOKEN_PIECES = new RegExp(`${CJK_TOKEN}|(?:(?!${CJK_TOKEN})[${TOKEN_CLASS}])+`, 'gu');
+/** Runs of characters that are NOT token characters (separators for the JS tokenizer). */
+const NON_TOKEN_RUNS = new RegExp(`[^${TOKEN_CLASS}]+`, 'gu');
+/** Same, but ASCII is left alone: raw FTS5 queries need their ASCII syntax characters. */
+const NON_ASCII_NON_TOKEN_RUNS = new RegExp(`[^${TOKEN_CLASS}\\x00-\\x7F]+`, 'gu');
 /** A word (maximal run of token characters, CJK included) optionally followed by an immediate `*`. */
 const WORD_WITH_STAR = new RegExp(`([${TOKEN_CLASS}]+)(\\*)?`, 'gu');
 
@@ -93,9 +105,21 @@ export function splitCjk(s: string): string {
   return s.replace(CJK_GLOBAL, ' $& ');
 }
 
-/** The exact string stored in the FTS index for a message body or a title. Original text is never modified in the tables. */
+/**
+ * The exact string stored in the FTS index for a message body or a title. Original text is never modified in the tables.
+ *
+ * Every character that is not a token character (see TOKEN_CLASS) is replaced by a space BEFORE SQLite tokenizes the text.
+ * Why: the FTS5 tokenizer decides "word character or separator" with Unicode tables that are older than the Unicode
+ * version of this runtime. Characters added later (currency signs such as "₽" "₿" "₺", emoji such as "🤖" "🥰" "🫶", the
+ * bidi isolates U+2066-2069, ...) and unassigned code points count as LETTERS to SQLite, so "100₽" was indexed as the single
+ * token "100₽" and a search for "100" - or for "thanks" in "thanks🤖" - found nothing. After this pass the only non-space
+ * characters SQLite ever sees are the ones the JS tokenizer (queries, snippets) also treats as token characters, so both
+ * sides split words identically. ASCII text needs no pass: SQLite handles ASCII exactly like JS.
+ */
 export function buildSearchText(s: string): string {
-  return splitCjk(normalizeForSearch(s));
+  const folded = normalizeForSearch(s);
+  if (ASCII_ONLY.test(folded)) return folded;
+  return splitCjk(folded.replace(NON_TOKEN_RUNS, ' '));
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -175,7 +199,9 @@ export function tokenizeQuery(q: string): string[] {
  * an UNQUOTED CJK bareword becomes an implicit AND of its characters (use quotes for adjacency).
  */
 export function prepareRawQuery(q: string): string {
-  const folded = foldText(q, false);
+  // Non-ASCII symbols/emoji/unassigned code points become separators exactly like in the indexed text (see buildSearchText);
+  // ASCII is untouched because it carries the FTS5 syntax. No FTS5 syntax character is non-ASCII once NFKC has run.
+  const folded = foldText(q, false).replace(NON_ASCII_NON_TOKEN_RUNS, ' ');
   return folded.replace(CJK_GLOBAL, (m: string, offset: number, whole: string) => (whole.charAt(offset + m.length) === '*' ? ` ${m}` : ` ${m} `));
 }
 

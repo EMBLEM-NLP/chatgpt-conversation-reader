@@ -219,6 +219,12 @@ function schemaTooNew(fileVersion: number, supported: number): GcrError {
   });
 }
 
+/** SQLITE_BUSY (5) / SQLITE_LOCKED (6) by primary result code. (open.ts owns the general mapping but imports this file.) */
+function isLockContention(e: unknown): boolean {
+  const code = (e as { errcode?: unknown } | null)?.errcode;
+  return typeof code === 'number' && ((code & 0xff) === 5 || (code & 0xff) === 6);
+}
+
 function notGcrDatabase(): GcrError {
   return new GcrError('DB_ERROR', 'The file is a SQLite database but not a GCR database; refusing to use or modify it.', {
     remedy: 'Choose a different --db path. GCR never writes into databases it did not create.',
@@ -249,6 +255,8 @@ export function applyMigrations(db: DatabaseSync, migrations: ReadonlyArray<Migr
 
   const from = readUserVersion(db);
   if (from > latest) throw schemaTooNew(from, latest);
+  // GCR never writes a negative user_version, so one can only come from another application (or a damaged header).
+  if (from < 0) throw notGcrDatabase();
 
   if (from === 0) {
     // A brand-new file has no objects. A non-empty file with version 0 belongs to some other application: never
@@ -263,6 +271,18 @@ export function applyMigrations(db: DatabaseSync, migrations: ReadonlyArray<Migr
     if (m.version <= current) continue;
     try {
       db.exec('BEGIN IMMEDIATE');
+    } catch (e) {
+      // Nothing was started, so there is nothing to roll back (and no transaction of the caller's may be touched).
+      if (isLockContention(e)) {
+        throw new GcrError('DB_ERROR', 'The database is busy (locked by another process).', {
+          remedy: 'Close other programs using the database file, then retry.',
+          details: { reason: 'busy' },
+          cause: e,
+        });
+      }
+      throw migrationFailed(m, current, e);
+    }
+    try {
       const inTxn = readUserVersion(db);
       if (inTxn >= m.version) {
         db.exec('ROLLBACK'); // somebody else migrated while we waited for the lock
@@ -280,18 +300,23 @@ export function applyMigrations(db: DatabaseSync, migrations: ReadonlyArray<Migr
       current = m.version;
     } catch (e) {
       try {
-        if (db.isTransaction) db.exec('ROLLBACK');
+        // Not guarded by `db.isTransaction` (Node >= 22.16 only): our BEGIN succeeded, so there is a transaction to undo.
+        db.exec('ROLLBACK');
       } catch {
-        /* the original failure is the one worth reporting; the connection is discarded by the caller */
+        /* already rolled back, or the original failure is the one worth reporting; the connection is discarded by the caller */
       }
-      throw new GcrError('DB_MIGRATION_FAILED', `Migration to schema version ${m.version} (${m.name}) failed and was rolled back.`, {
-        remedy: 'The database was left at its previous version. Report the issue (without attaching private data).',
-        details: { fromVersion: current, toVersion: m.version },
-        cause: e,
-      });
+      throw migrationFailed(m, current, e);
     }
   }
   return { from, to: current };
+}
+
+function migrationFailed(m: Migration, fromVersion: number, cause: unknown): GcrError {
+  return new GcrError('DB_MIGRATION_FAILED', `Migration to schema version ${m.version} (${m.name}) failed and was rolled back.`, {
+    remedy: 'The database was left at its previous version. Report the issue (without attaching private data).',
+    details: { fromVersion, toVersion: m.version },
+    cause,
+  });
 }
 
 /**
@@ -303,6 +328,7 @@ export function assertCompatible(db: DatabaseSync): void {
   if (appId !== 0 && appId !== GCR_APPLICATION_ID) throw notGcrDatabase();
   const v = readUserVersion(db);
   if (v > SCHEMA_VERSION) throw schemaTooNew(v, SCHEMA_VERSION);
+  if (v < 0) throw notGcrDatabase();
   if (v < SCHEMA_VERSION) {
     throw new GcrError('DB_ERROR', v === 0 ? 'The database has not been initialized.' : `The database schema (version ${v}) needs migration to version ${SCHEMA_VERSION}.`, {
       remedy: 'Open the database once in read-write mode (for example by running an import) to initialize or migrate it.',

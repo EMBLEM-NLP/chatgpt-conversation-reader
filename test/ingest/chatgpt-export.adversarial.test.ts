@@ -611,6 +611,30 @@ describe('A15 docs/IMPORT_FORMAT.md describes the code that exists (drift guard)
   });
 });
 
+describe('A16 an asset pointer never lends its id to an unrelated file name', () => {
+  const idsFor = (pointer: string, names: string[] = []): { id: string | null; present: string | null } => {
+    const b = new ConversationBuilder({ id: syntheticUuid(1) });
+    b.multimodal(b.root(), [parts.image(pointer)], 'user', { id: 'm' });
+    const r = rec(b.text(), 0, adapterContext({ availableAssetNames: new Set(names) }));
+    const a = byId(r, 'm').attachments[0];
+    return { id: a?.id ?? null, present: a?.presentInExportAs ?? null };
+  };
+
+  it('a trailing path after the file id is not the id: file-service://file-ABC/foo.png is file-ABC', () => {
+    assert.deepEqual(idsFor('file-service://file-ABC/foo.png', ['foo.png']), { id: 'file-ABC', present: null }, 'an unrelated file called foo.png is not "the asset"');
+    assert.deepEqual(idsFor('file-service://file-ABC/foo.png', ['foo.png', 'file-ABC-photo.png']), { id: 'file-ABC', present: 'file-ABC-photo.png' });
+    assert.equal(idsFor('file-service://user-1/file-ABC/foo.png').id, 'file-ABC');
+    assert.equal(idsFor('sediment://hash/file_00000000000000000000000000000009#p_2.jpg').id, 'file_00000000000000000000000000000009');
+  });
+
+  it('the documented forms still resolve as before', () => {
+    assert.equal(idsFor('sediment://file_0000000000000000000000000000000f').id, 'file_0000000000000000000000000000000f');
+    assert.equal(idsFor('file-service://dir/sub/file-XYZ').id, 'file-XYZ');
+    assert.equal(idsFor('sediment://deadbeefhash#file_0000000000000000000000000000000e#p_2.jpg').id, 'file_0000000000000000000000000000000e');
+    assert.equal(idsFor('sediment://').id, null);
+  });
+});
+
 describe('A11 the asset lookup is validated against the live container, and only when it is needed', () => {
   const withAttachment = (id: string, extra = ''): string =>
     `{"id":"c","mapping":{"m":{"id":"m","parent":null,"children":[],"message":{"id":"m","author":{"role":"user"},"content":{"content_type":"text","parts":["x"]},"metadata":{"attachments":[{"id":"${id}"${extra}}]}}}},"current_node":"m"}`;

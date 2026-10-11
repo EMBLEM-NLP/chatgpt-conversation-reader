@@ -781,7 +781,20 @@ async function discoverZip(path: string, label: string, limits: ImportLimits, op
     const c = newCollected();
     const nestedQueue: Array<{ name: string; size: number }> = [];
     let entriesSeen = 0;
-    scanReader(outer, c, '', 0, nestedQueue, (n) => (entriesSeen += n));
+    // maxEntries bounds ONE archive; every archive that is opened adds its parsed entries (and, for the inner ones, asset
+    // names) to memory, so all archives together get a small multiple of it - otherwise hundreds of cheap inner archives would
+    // keep hundreds of times the documented number of entries alive.
+    const entryCap = limits.maxEntries * NESTED_AGGREGATE_FACTOR;
+    const countEntries = (n: number): void => {
+      entriesSeen += n;
+      if (entriesSeen > entryCap) {
+        throw new GcrError('IMPORT_LIMIT_EXCEEDED', 'The outer archive and the nested archives together hold more entries than the configured limit allows.', {
+          remedy: REMEDY_NESTING,
+          details: { reason: 'TOO_MANY_ENTRIES', limit: 'maxEntries', max: entryCap, scope: 'all archives together' },
+        });
+      }
+    };
+    scanReader(outer, c, '', 0, nestedQueue, countEntries);
 
     // Nested archives, one level: inflated into memory under maxNestedZipBytes; every byte is charged to the shared pool.
     nestedQueue.sort((x, y) => cmp(x.name, y.name));
@@ -801,7 +814,7 @@ async function discoverZip(path: string, label: string, limits: ImportLimits, op
       }
       readers.push(inner);
       const deeper: Array<{ name: string; size: number }> = [];
-      scanReader(inner, c, `${nz.name}!/`, 1, deeper, (n) => (entriesSeen += n));
+      scanReader(inner, c, `${nz.name}!/`, 1, deeper, countEntries);
       if (deeper.length > 0) {
         throw new GcrError('IMPORT_UNSUPPORTED_FORMAT', 'A nested archive contains another archive of conversations; GCR opens only ONE level of nested ZIPs.', {
           remedy: REMEDY_NESTING,

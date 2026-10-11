@@ -51,7 +51,7 @@ describe('finding 1: the database handle is validated (INVALID_ARGUMENT, never a
     });
   }
 
-  it('a handle error wins over nothing else: bad options on a good handle are still reported as the options', () => {
+  it('bad options on a good handle are still reported as INVALID_ARGUMENT about the options', () => {
     const { db } = fresh();
     expectGcr(() => computeStats(db, { groupBy: 'nope' as StatsGroupBy }), 'INVALID_ARGUMENT', 'groupBy');
   });

@@ -1012,9 +1012,14 @@ function fileIdFromPointer(pointer: string): string | null {
   const m = POINTER_SCHEME_RE.exec(pointer);
   const rest = m === null ? pointer : (m[1] ?? '');
   const segments = rest.split('#');
-  const pick = segments.find((s) => s.startsWith('file-') || s.startsWith('file_')) ?? segments[0] ?? '';
-  const last = pick.slice(pick.lastIndexOf('/') + 1);
-  return isSafeId(last) ? last : null;
+  // The id is the first path component, in any '#' segment, that looks like a file id (`file-...` / `file_...`). WHY not "whatever
+  // follows the last slash": `file-service://file-ABC/foo.png` would otherwise get the id `foo.png` and could then be "found" as an
+  // unrelated container file of that name. Only when no component looks like a file id is the last component of the first segment
+  // used (the form `weird-pointer-without-scheme`).
+  const fileLike = segments.flatMap((s) => s.split('/')).find((c) => c.startsWith('file-') || c.startsWith('file_'));
+  const first = segments[0] ?? '';
+  const chosen = fileLike ?? first.slice(first.lastIndexOf('/') + 1);
+  return isSafeId(chosen) ? chosen : null;
 }
 
 function addPointer(mc: MsgCtx, pointer: unknown, size: unknown): void {

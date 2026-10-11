@@ -205,6 +205,29 @@ describe('node ids: parsing and injectivity', () => {
   });
 });
 
+describe('defects found by review: attachment names that differ only in lone surrogates', () => {
+  // attachments_json keeps a lone surrogate as the JSON escape; the build used to try to insert two entities that SQLite
+  // stores as the same row, and failed with DB_ERROR (UNIQUE constraint) for the whole graph.
+  const attachment = (name: string) => ({ id: null, name, mimeType: null, sizeBytes: null, assetPointer: null, presentInExportAs: null });
+
+  it('the build succeeds and treats them as one file name', async () => {
+    const { db, repo } = fresh();
+    const withAttachments = (id: string, names: string[]): ConversationRecord => {
+      const c = chain(id, ['hello world']);
+      const m = c.messages.find((x) => x.nodeKind === 'message');
+      assert.ok(m !== undefined);
+      m.attachments = names.map(attachment);
+      return c;
+    };
+    await importAll(repo, [withAttachments('c1', ['f\ud800', 'f\ud801']), withAttachments('c2', ['f\ud800'])]);
+    const r = buildGraph(db, { minEntityConversations: 1 });
+    assert.deepEqual(r.warnings.filter((w) => w.code !== 'EVIDENCE_TRUNCATED'), []);
+    const names = rows(db, "SELECT value, normalized FROM entities WHERE kind = 'file_name'");
+    assert.deepEqual(names, [{ value: 'f\u{FFFD}', normalized: 'f\u{FFFD}' }]);
+    assert.equal(scalar(db, "SELECT count(*) AS n FROM entity_mentions m JOIN entities e USING (entity_id) WHERE e.kind = 'file_name'"), 2);
+  });
+});
+
 describe('pathological inputs', () => {
   it('a message with 100 000 URLs yields at most 64 URL entities, no secrets, a truncation warning and a bounded build', async () => {
     const { db, repo } = fresh();

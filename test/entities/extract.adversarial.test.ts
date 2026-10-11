@@ -74,6 +74,29 @@ describe('defects found by review: secrets next to URL-shaped text that is not a
   });
 });
 
+describe('http(s) URLs nested in URL-shaped text of another scheme', () => {
+  it('are still extracted (sanitised), while the outer secrets and the nested secrets stay out of every entity', () => {
+    const text = 'ftp://mirror.example/p?u=http://nested.example/q?sig=zqxnested#zqxfrag end';
+    const e = extractEntities({ text });
+    assert.deepEqual(ofKind(e, 'url'), ['nested.example/q']);
+    assert.equal(JSON.stringify(e).includes('zqx'), false);
+  });
+
+  it('a glued scheme followed by a comma-joined http URL still yields that URL', () => {
+    const e = extractEntities({ text: 'xhttp://first.example/a,http://second.example/b?t=zqxone' });
+    assert.deepEqual(ofKind(e, 'url'), ['second.example/b']);
+    assert.equal(JSON.stringify(e).includes('zqx'), false);
+  });
+
+  it('many nested separators inside one run stay linear', () => {
+    const text = 'a://' + 'b://'.repeat(250_000);
+    const t0 = process.cpuUsage();
+    extractEntities({ text }, { maxTextChars: 2 << 20 });
+    const used = process.cpuUsage(t0);
+    assert.ok((used.user + used.system) / 1000 < 1000);
+  });
+});
+
 describe('defects found by review: the text cap must also bound NFKC compatibility expansion', () => {
   // U+FDFA expands to 18 UTF-16 units under NFKC. The cap used to be applied before normalisation only, so a text of
   // N such characters was processed as 18 * N units whatever maxTextChars said.
@@ -98,6 +121,45 @@ describe('defects found by review: the text cap must also bound NFKC compatibili
   it('text that does not expand is unaffected (ASCII, accents, fullwidth)', () => {
     const e = extractEntities({ text: 'caf\u00e9 \uFF21\uFF22\uFF23\uFF24 plain' }, { maxTextChars: 40 });
     assert.deepEqual(ofKind(e, 'keyword'), ['abcd', 'caf\u{E9}', 'plain']);
+  });
+});
+
+describe('defects found by review: every extracted string is well-formed UTF-16', () => {
+  // attachments_json stores names as JSON, where a lone surrogate survives as the escape "\ud800" and comes back as a
+  // lone surrogate when the graph is built. SQLite stores such a string as U+FFFD, so two names that differ only in their
+  // lone surrogates were distinct entities in memory but ONE row in the database: the build died with a UNIQUE violation.
+  const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  const attachment = (name: string) => ({ id: null, name, mimeType: null, sizeBytes: null, assetPointer: null, presentInExportAs: null });
+
+  it('file names with lone surrogates are repaired, and names that differ only in them are ONE entity', () => {
+    const e = extractEntities({ text: '', attachments: [attachment('f\ud800'), attachment('f\ud801'), attachment('a\udc00b'), attachment('\ud800')] });
+    for (const x of e) assert.equal(LONE.test(x.value + x.normalized), false, JSON.stringify(x));
+    const names = e.filter((x) => x.kind === 'file_name');
+    assert.deepEqual(names.map((x) => [x.normalized, x.count]), [['f\u{FFFD}', 2], ['\u{FFFD}', 1], ['a\u{FFFD}b', 1]].sort((a, b) => (b[1] as number) - (a[1] as number) || ((a[0] as string) < (b[0] as string) ? -1 : 1)));
+  });
+
+  it('cutting an over-long file name never splits a surrogate pair', () => {
+    for (const prefix of ['', 'x']) {
+      const e = extractEntities({ text: '', attachments: [attachment(prefix + '\u{1F600}'.repeat(400))] });
+      const name = e.find((x) => x.kind === 'file_name');
+      assert.ok(name !== undefined);
+      assert.ok(name.value.length <= 255);
+      assert.equal(LONE.test(name.value), false, `prefix ${JSON.stringify(prefix)}`);
+    }
+  });
+
+  it('URL paths and text with lone surrogates never produce a malformed entity', () => {
+    const e = extractEntities({ text: 'see http://a.example/p\ud800 and http://a.example/p\ud801 and \udc00 words\ud800here' });
+    for (const x of e) assert.equal(LONE.test(x.value + x.normalized), false, JSON.stringify(x));
+    assert.deepEqual(e.filter((x) => x.kind === 'url').map((x) => [x.normalized, x.count]), [['a.example/p\u{FFFD}', 2]]);
+  });
+
+  it('normalizeNfkc replaces lone surrogates with U+FFFD and leaves valid pairs alone', () => {
+    assert.equal(normalizeNfkc('a\ud800b'), 'a\u{FFFD}b');
+    assert.equal(normalizeNfkc('\udc00'), '\u{FFFD}');
+    assert.equal(normalizeNfkc('\ud800\ud800'), '\u{FFFD}\u{FFFD}');
+    assert.equal(normalizeNfkc('\u{1F600}\ud800'), '\u{1F600}\u{FFFD}');
+    assert.equal(normalizeNfkc('x\u{1F600}y'), 'x\u{1F600}y');
   });
 });
 

@@ -615,15 +615,16 @@ describe('renderEnvelope (generic)', () => {
     assert.ok(md.endsWith('## Warnings\n\n- `W1`: careful\n'));
     const compact = renderEnvelope(failure, { format: 'compact' });
     assert.ok(compact.startsWith('# error | - | unknown | AMBIGUOUS_CONVERSATION\n'));
-    assert.ok(compact.includes('\nmessage: several matches\nremedy: pass --account\ndetails.count: 2\n'));
+    // Data lines are indented by two spaces (adversarial review): column 0 is reserved for structural lines, so a data key can never forge one.
+    assert.ok(compact.includes('\n  message: several matches\n  remedy: pass --account\n  details.count: 2\n'));
     assert.ok(compact.endsWith('# warnings: W1: careful\n'));
   });
 
   it('compact: header, source line, flattened data lines', () => {
     const expected = `# result | chatgpt | exported_tree | object
 ${SOURCE_COMPACT}
-a.b[0]: 1
-a.b[1]: 2
+  a.b[0]: 1
+  a.b[1]: 2
 `;
     assert.equal(renderEnvelope(ok({ a: { b: [1, 2] } }), { format: 'compact' }), expected);
     assert.ok(renderEnvelope(ok([1, 2, 3]), { format: 'compact' }).startsWith('# result | chatgpt | exported_tree | 3 items\n'));

@@ -16,7 +16,7 @@ import { getHeapStatistics, setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import type { AdapterOutcome, ConversationSourceAdapter } from '../../src/ingest/adapter.js';
 import { GcrError } from '../../src/errors.js';
-import { runImport } from '../../src/ingest/import-runner.js';
+import { peekElement, runImport } from '../../src/ingest/import-runner.js';
 import type { ImportOptions } from '../../src/ingest/import-runner.js';
 import { getAdapter } from '../../src/ingest/registry.js';
 import { OMIT, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
@@ -161,6 +161,35 @@ describe('duplicate resolution only considers conversations', () => {
   });
 });
 
+describe('a duplicate winner that cannot be normalized (documented limitation: the loser is not tried)', () => {
+  // The winner is decided from identity metadata alone (a validity check would cost a full parse of every element in pass 1).
+  // What must hold: the loss is never silent.
+  it('is reported twice over (ELEMENT_PARSE_FAILED + DUPLICATE_CONVERSATION naming the winner) and refused by --strict', async () => {
+    const t = freshRepo();
+    try {
+      const good = chatConv(1, { title: 'GOOD', updateTime: T0 }).text();
+      const broken = JSON.stringify({ id: syntheticUuid(1), conversation_id: syntheticUuid(1), update_time: T0 + 100, mapping: '@@' }).replace('"@@"', 'BROKEN');
+      const body = `[${good},${broken}]`;
+      const r = await runImport(t.repo, { source: stream(body), clock: fixedClock });
+      assert.equal(r.conversations.stored, 0);
+      assert.equal(r.conversations.failed, 1);
+      assert.equal(r.warnings.find((w) => w.code === 'ELEMENT_PARSE_FAILED')?.count, 1);
+      const dup = r.warnings.find((w) => w.code === 'DUPLICATE_CONVERSATION');
+      assert.equal(dup?.count, 1);
+      assert.match(t.repo.getBatch(r.batchId)?.warnings.find((w) => w.code === 'DUPLICATE_CONVERSATION')?.message ?? '', /kept conversations\.json#1, skipped conversations\.json#0/);
+      const t2 = freshRepo();
+      try {
+        await assert.rejects(runImport(t2.repo, { source: stream(body), strict: true, clock: fixedClock }), expectCode('IMPORT_PARSE_ERROR', 'DUPLICATE_CONVERSATION'));
+        assert.equal(count(t2.db, 'source_batches'), 0);
+      } finally {
+        t2.close();
+      }
+    } finally {
+      t.close();
+    }
+  });
+});
+
 /** Small deterministic PRNG so a failing seed can be replayed. */
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -277,6 +306,23 @@ describe('duplicate resolution: randomized differential check of the documented 
       assert.ok((stored?.ids?.length ?? 99) <= 5);
     } finally {
       t2.close();
+    }
+  });
+});
+
+describe('provider detection', () => {
+  // DEFECT (minor): every non-empty object counted as one of only 20 sniffing attempts, so 20+ stray objects in front of the
+  // first conversation made the whole import fail with PROVIDER_UNDETECTED although conversations followed.
+  it('any number of stray objects before the first conversation does not exhaust detection', async () => {
+    const t = freshRepo();
+    try {
+      const strays = Array.from({ length: 60 }, (_, i) => JSON.stringify({ stray: i })).join(',');
+      const r = await runImport(t.repo, { source: stream(`[${strays},${chatConv(1).text()}]`), clock: fixedClock });
+      assert.equal(r.provider, 'chatgpt');
+      assert.equal(r.conversations.stored, 1);
+      assert.equal(r.warnings.find((w) => w.code === 'NOT_A_CONVERSATION')?.count, 60);
+    } finally {
+      t.close();
     }
   });
 });
@@ -877,5 +923,207 @@ describe('no absolute path or content in any outcome', () => {
     } finally {
       t.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Differential fuzzing of the two hand-written scanners against JSON.parse
+// ---------------------------------------------------------------------------------------------------------------------
+
+type Rnd = { next: () => number; pick: (n: number) => number };
+function makeRnd(seed: number): Rnd {
+  const next = mulberry32(seed);
+  return { next, pick: (n) => Math.floor(next() * n) };
+}
+
+const NASTY_CHARS = ['"', '\\', '{', '}', '[', ']', ',', ':', ' ', '\n', '\t', '/', '\u00e9', '\u65e5', '\ud83d\ude00', '\u2028', '\u0001', 'a', 'Z', '0', '\u007f'];
+
+/** A JSON string literal with random content and a random mix of raw characters and \u escapes. */
+function randomJsonString(r: Rnd, maxLen = 12): string {
+  let raw = '';
+  const n = r.pick(maxLen + 1);
+  for (let i = 0; i < n; i++) raw += NASTY_CHARS[r.pick(NASTY_CHARS.length)] as string;
+  let out = '"';
+  for (const ch of raw) {
+    const cp = ch.codePointAt(0) as number;
+    if (ch === '"') out += '\\"';
+    else if (ch === '\\') out += '\\\\';
+    else if (cp < 0x20 || r.pick(5) === 0) out += cp > 0xffff ? `\\u${(0xd800 + ((cp - 0x10000) >> 10)).toString(16)}\\u${(0xdc00 + ((cp - 0x10000) & 0x3ff)).toString(16)}` : `\\u${cp.toString(16).padStart(4, '0')}`;
+    else out += ch;
+  }
+  return out + '"';
+}
+
+const WS = ['', '', ' ', '\n', '\t', ' \r\n  '];
+const ws = (r: Rnd): string => WS[r.pick(WS.length)] as string;
+
+const NUMBERS = ['0', '-0', '1', '-17', '3.5', '1760000000.123456', '1e3', '1E-3', '2.5e+2', '1e999', '9007199254740993', '123456789012345678901234567890'];
+
+function randomValue(r: Rnd, depth: number): string {
+  const k = r.pick(depth >= 3 ? 5 : 7);
+  switch (k) {
+    case 0:
+      return randomJsonString(r);
+    case 1:
+      return NUMBERS[r.pick(NUMBERS.length)] as string;
+    case 2:
+      return 'null';
+    case 3:
+      return r.pick(2) === 0 ? 'true' : 'false';
+    case 4:
+      return randomJsonString(r, 30);
+    case 5: {
+      const n = r.pick(4);
+      return `[${ws(r)}${Array.from({ length: n }, () => randomValue(r, depth + 1)).join(`${ws(r)},${ws(r)}`)}${ws(r)}]`;
+    }
+    default:
+      return randomObject(r, depth + 1, false);
+  }
+}
+
+const IDENTITY_KEYS = ['id', 'conversation_id', 'uuid', 'update_time', 'updated_at', 'mapping', 'conversations', 'chat_messages'];
+
+function randomObject(r: Rnd, depth: number, identity: boolean): string {
+  const n = r.pick(7);
+  const members: string[] = [];
+  for (let i = 0; i < n; i++) {
+    let key: string;
+    if (identity && r.pick(3) > 0) {
+      key = JSON.stringify(IDENTITY_KEYS[r.pick(IDENTITY_KEYS.length)]);
+      if (r.pick(6) === 0) key = key.replace(/^"([a-z])/, (_m, c: string) => `"\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`); // a key spelled with an escape
+    } else key = randomJsonString(r, 8);
+    const value = identity && key.includes('update_time') && r.pick(2) === 0 ? NUMBERS[r.pick(NUMBERS.length)] as string : randomValue(r, depth);
+    members.push(`${ws(r)}${key}${ws(r)}:${ws(r)}${value}`);
+  }
+  return `{${members.join(',')}${ws(r)}}`;
+}
+
+describe('differential fuzzing against JSON.parse', () => {
+  it('peekElement agrees with JSON.parse on identity fields, markers and the wrapper position (duplicate keys: last wins), 4000 random objects', () => {
+    let withDuplicates = 0;
+    for (let seed = 1; seed <= 4000; seed++) {
+      const r = makeRnd(seed);
+      const text = randomObject(r, 0, true);
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const p = peekElement(text);
+      const keys = Object.keys(parsed);
+      if (keys.length === 0) {
+        assert.equal(p.kind, 'empty_object', `seed ${seed}`);
+        continue;
+      }
+      assert.equal(p.kind, 'object', `seed ${seed}`);
+      assert.equal(p.malformed, false, `seed ${seed}: ${text.slice(0, 120)}`);
+      const str = (v: unknown): string | null => (typeof v === 'string' && v.length <= 4096 ? v : null);
+      assert.equal(p.conversationId, str(parsed['conversation_id']), `seed ${seed} conversation_id`);
+      assert.equal(p.id, str(parsed['id']), `seed ${seed} id`);
+      assert.equal(p.uuid, str(parsed['uuid']), `seed ${seed} uuid`);
+      assert.equal(p.hasMapping, Object.hasOwn(parsed, 'mapping'), `seed ${seed} mapping`);
+      assert.equal(p.conversationsIsArray, Array.isArray(parsed['conversations']), `seed ${seed} conversations`);
+      assert.equal(p.chatMessagesIsArray, Array.isArray(parsed['chat_messages']), `seed ${seed} chat_messages`);
+      if (p.conversationsIsArray) assert.equal(text[p.conversationsAt], '[', `seed ${seed} conversationsAt`);
+      else assert.equal(p.conversationsAt, -1, `seed ${seed}`);
+      const ut = parsed['update_time'];
+      if (typeof ut === 'number' && Number.isFinite(ut) && p.updateMs !== null) assert.equal(p.updateMs, ut * 1000, `seed ${seed} update_time`);
+      if (typeof ut !== 'number' && !(typeof parsed['updated_at'] === 'string')) assert.equal(p.updateMs, null, `seed ${seed}: no time`);
+      if (typeof ut === 'number' && Number.isFinite(ut)) assert.notEqual(p.updateMs, null, `seed ${seed}: a finite update_time is read`);
+      if (new Set(Object.keys(parsed)).size < (text.match(/"(id|uuid)"\s*:/g) ?? []).length) withDuplicates++;
+    }
+    assert.ok(withDuplicates > 0, 'the generator really produced duplicate identity keys');
+  });
+
+  it('a wrapper is split exactly where JSON.parse sees its members: counts of scalars, empty objects and other objects, 400 random wrappers', async () => {
+    for (let seed = 1; seed <= 400; seed++) {
+      const r = makeRnd(10_000 + seed);
+      const n = r.pick(10);
+      const members: string[] = [];
+      const expected = { nonObject: 0, empty: 0, notConversation: 0 };
+      for (let i = 0; i < n; i++) {
+        let m: string;
+        if (r.pick(2) === 0) m = randomValue(r, 1);
+        else m = randomObject(r, 1, false).replace(/"(mapping|chat_messages|conversations)"/g, '"x$1"');
+        members.push(m);
+        const v = JSON.parse(m) as unknown;
+        if (typeof v !== 'object' || v === null || Array.isArray(v)) expected.nonObject++;
+        else if (Object.keys(v).length === 0) expected.empty++;
+        else expected.notConversation++;
+      }
+      const good = chatConv(1).text();
+      const all = [good, ...members];
+      const body = `${ws(r)}{${ws(r)}"conversations"${ws(r)}:${ws(r)}[${ws(r)}${all.join(`${ws(r)},${ws(r)}`)}${ws(r)}]${ws(r)}}${ws(r)}`;
+      JSON.parse(body); // the generator only builds valid JSON
+      const t = freshRepo();
+      try {
+        const rep = await runImport(t.repo, { source: stream(body), clock: fixedClock });
+        assert.equal(rep.conversations.read, all.length, `seed ${seed}: members found`);
+        assert.equal(rep.conversations.stored, 1, `seed ${seed}`);
+        const c = (code: string): number => rep.warnings.find((w) => w.code === code)?.count ?? 0;
+        assert.equal(c('NON_OBJECT_ENTRY'), expected.nonObject, `seed ${seed} non-object`);
+        assert.equal(c('EMPTY_CONVERSATION_ENTRY'), expected.empty, `seed ${seed} empty`);
+        assert.equal(c('NOT_A_CONVERSATION'), expected.notConversation, `seed ${seed} other objects`);
+        assert.equal(rep.conversations.failed, 0, `seed ${seed}`);
+      } finally {
+        t.close();
+      }
+    }
+  });
+});
+
+describe('mutation fuzzing of whole inputs', () => {
+  it('180 seeds x (wrapper JSON, array JSON, sharded ZIP with manifest): success stores exactly one batch, failure is a GcrError that is never INTERNAL_ERROR and stores nothing', async () => {
+    const wrapperBase = Buffer.from(`{"conversations":[${chatConv(1).text()},${chatConv(2, { updateTime: null }).text()},{},null,${chatConv(1, { title: 'dup' }).text()}]}`);
+    const arrayBase = Buffer.from(arrayOf([chatConv(1), chatConv(2), chatConv(3)]));
+    const zipBase = zipOf(
+      {
+        'conversations-1.json': arrayBase.toString('utf8'),
+        'conversations-2.json': wrapperBase.toString('utf8'),
+        'export_manifest.json': '{"version":1,"logical_files":{"conversations.json":{"files":["conversations-1.json","conversations-2.json"]}}}',
+      },
+      'store',
+    );
+    let successes = 0;
+    let failures = 0;
+    await withTempDir(async (dir) => {
+      for (let seed = 1; seed <= 180; seed++) {
+        const r = mulberry32(seed);
+        const pick = (n: number): number => Math.floor(r() * n);
+        for (const [kind, base] of [['stream', wrapperBase], ['stream', arrayBase], ['zip', zipBase]] as const) {
+          let cur = Buffer.from(base);
+          for (let k = 1 + pick(4); k > 0; k--) {
+            const at = pick(cur.length);
+            const op = pick(5);
+            if (op === 0) {
+              cur = Buffer.from(cur);
+              cur[at] = pick(256);
+            } else if (op === 1) cur = Buffer.concat([cur.subarray(0, at), cur.subarray(at + 1 + pick(20))]);
+            else if (op === 2) cur = Buffer.concat([cur.subarray(0, at), Buffer.from([pick(256), pick(256)]), cur.subarray(at)]);
+            else if (op === 3) cur = cur.subarray(0, at + 1);
+            else cur = Buffer.concat([cur.subarray(0, at), cur.subarray(Math.max(0, at - 30), at), cur.subarray(at)]);
+          }
+          const t = freshRepo();
+          try {
+            let source: ImportOptions['source'];
+            if (kind === 'stream') source = stream(cur);
+            else {
+              await writeFile(join(dir, 'm.zip'), cur);
+              source = pathSource(join(dir, 'm.zip'));
+            }
+            try {
+              await runImport(t.repo, { source, clock: fixedClock, strict: seed % 3 === 0 });
+              successes++;
+              assert.equal(count(t.db, 'source_batches'), 1, `seed ${seed} ${kind}: a success stores exactly one batch`);
+            } catch (e) {
+              failures++;
+              assert.ok(e instanceof GcrError, `seed ${seed} ${kind}: only GcrError may escape`);
+              assert.notEqual(e.code, 'INTERNAL_ERROR', `seed ${seed} ${kind}: an unexpected exception (a bug)`);
+              assert.equal(count(t.db, 'source_batches'), 0, `seed ${seed} ${kind}: a failure stores nothing`);
+              assert.equal(count(t.db, 'conversations'), 0, `seed ${seed} ${kind}`);
+            }
+          } finally {
+            t.close();
+          }
+        }
+      }
+    });
+    assert.ok(successes > 50 && failures > 50, `both outcomes were exercised (${successes} ok, ${failures} failed)`);
   });
 });

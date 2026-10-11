@@ -144,14 +144,19 @@ export function exceedsTextCap(text: string, maxTextChars: number): boolean {
 const ASCII_ONLY = /^[\x00-\x7f]*$/;
 /** A combining mark that follows at least 8 other marks. Lookbehind width is fixed (8), so this is linear. */
 const MARK_RUN_TAIL = /(?<=\p{M}{8})\p{M}/gu;
+/** A UTF-16 surrogate that is not half of a valid pair (no `u` flag: the pattern works on code units). One-unit look-around: linear. */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
 /**
  * NFKC with a guard against ICU's quadratic reordering of long combining-mark runs ("Zalgo" text): marks beyond the
- * eighth in a row are dropped first. Pure-ASCII text (the common case) is returned untouched.
+ * eighth in a row are dropped first. Lone surrogates (malformed UTF-16, e.g. from a JSON "\\ud800" escape) become U+FFFD,
+ * which is what SQLite stores for them: an entity string must be identical in memory and in the database, otherwise two
+ * strings that differ only in their lone surrogates are two entities here and one row there. Pure-ASCII text (the common
+ * case) is returned untouched.
  */
 export function normalizeNfkc(s: string): string {
   if (ASCII_ONLY.test(s)) return s;
-  return s.replace(MARK_RUN_TAIL, '').normalize('NFKC');
+  return s.replace(MARK_RUN_TAIL, '').replace(LONE_SURROGATE, '\ufffd').normalize('NFKC');
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -385,16 +390,20 @@ function otherSchemeSecrets(text: string, authStart: number, runEnd: number, out
 
 /**
  * Find http(s) URLs (and blank the secrets of other URL-shaped text, see otherSchemeSecrets). Every "://" is examined
- * once: the scheme is the maximal run of scheme characters in front of it (at most MAX_SCHEME_CHARS), and the candidate
- * consumes its whole run (up to the next URL-terminating character) whether it is accepted or not, so no character is
- * inspected more than a constant number of times: linear in the text length even for "http://http://http://..." or one
- * gigantic run.
+ * once: the scheme is the maximal run of scheme characters in front of it (at most MAX_SCHEME_CHARS). An http(s)
+ * candidate consumes its whole run (up to the next URL-terminating character) whether it is accepted or not, so nested
+ * "http://" inside its query string is never examined; text with any other scheme is only blanked once per run and
+ * scanning continues INSIDE it, so an http(s) URL nested in it (as in "ftp://h/p?u=http://x.example/") is still found.
+ * The end of a run is computed once and reused for the "://" inside it, so no character is inspected more than a
+ * constant number of times: linear in the text length even for "http://http://http://..." or one gigantic run.
  */
 function scanUrls(text: string): UrlScan {
   const hits: UrlHit[] = [];
   const rejected: Range[] = [];
   if (text.length < 4) return { hits, rejected };
   let from = 0;
+  let runEndCache = -1; // exclusive end of the run found for the last "://" (valid for every "://" before it)
+  let secretsDoneUntil = -1; // otherSchemeSecrets already blanked the run that ends here
   for (;;) {
     const sep = text.indexOf('://', from);
     if (sep < 0) break;
@@ -406,20 +415,31 @@ function scanUrls(text: string): UrlScan {
       from = sep + 3; // "://" without a scheme in front of it
       continue;
     }
-    URL_END.lastIndex = sep + 3;
-    const t = URL_END.exec(text);
-    const runEnd = t === null ? text.length : t.index;
-    from = runEnd; // continue AFTER the run: nested "http://" inside a query string is never examined
+    let runEnd: number;
+    if (sep + 3 < runEndCache) {
+      runEnd = runEndCache; // nested in the run found earlier: no URL-terminating character lies in between
+    } else {
+      URL_END.lastIndex = sep + 3;
+      const t = URL_END.exec(text);
+      runEnd = t === null ? text.length : t.index;
+      runEndCache = runEnd;
+    }
     if (runEnd - start > MAX_URL_CHARS) {
       rejected.push([start, runEnd]);
+      from = runEnd;
       continue;
     }
     // Only a scheme that is exactly "http" or "https" starts a URL: "xhttp://" and "git+https://" are other schemes.
     const schemeLen = sep - start;
     if (schemeLen < 4 || schemeLen > 5 || !/^https?$/i.test(text.slice(start, sep))) {
-      otherSchemeSecrets(text, sep + 3, runEnd, rejected);
+      if (sep + 3 >= secretsDoneUntil) {
+        otherSchemeSecrets(text, sep + 3, runEnd, rejected);
+        secretsDoneUntil = runEnd;
+      }
+      from = sep + 3;
       continue;
     }
+    from = runEnd; // continue AFTER an http(s) run: nested "http://" inside a query string is never examined
     const core = trimUrlTail(text.slice(start, runEnd));
     const parsed = parseUrlCandidate(core, start);
     if (parsed === null) {
@@ -669,7 +689,7 @@ function fileNameOf(raw: unknown): string | null {
   const parts = cleaned.split(/[\\/]/);
   const base = (parts[parts.length - 1] ?? '').trim();
   if (base.length === 0 || base === '.' || base === '..') return null;
-  return base.length > MAX_FILE_NAME_CHARS ? base.slice(0, MAX_FILE_NAME_CHARS) : base;
+  return capText(base, MAX_FILE_NAME_CHARS); // surrogate-safe cut
 }
 
 // ---------------------------------------------------------------------------------------------------------------

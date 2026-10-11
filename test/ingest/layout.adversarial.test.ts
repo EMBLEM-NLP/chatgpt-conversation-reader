@@ -15,6 +15,7 @@ import { runInNewContext } from 'node:vm';
 import { GcrError } from '../../src/errors.js';
 import { discoverInput } from '../../src/ingest/layout.js';
 import { DEFAULT_IMPORT_LIMITS } from '../../src/ingest/limits.js';
+import { buildZip as buildZipOf } from '../helpers/zip-builder.js';
 import { withTempDir } from '../helpers/tmp.js';
 import { writeFileIn } from './import-runner.helpers.test.js';
 
@@ -163,6 +164,44 @@ describe('an extracted ZIP-in-ZIP export (folder of part archives)', () => {
     await withTempDir(async (dir) => {
       await writeFileIn(dir, 'readme.txt', 'x');
       await assert.rejects(discoverInput({ kind: 'path', path: dir }, DEFAULT_IMPORT_LIMITS), (e: unknown) => e instanceof GcrError && /conversations\.json/.test(e.remedy ?? '') && e.details?.['nestedArchivesInFolder'] === 0);
+    });
+  });
+});
+
+describe('nested archives share the entry-count budget too', () => {
+  // DEFECT: maxEntries was enforced per archive only. An outer ZIP holding hundreds of inner archives of ~maxEntries entries each
+  // (every one cheap to build) made the reader keep hundreds of times the documented number of entries (and asset names) alive.
+  let salt = 0;
+  const inner = (entries: number, withConversations: boolean) => {
+    salt++;
+    return buildZipOf([...(withConversations ? [{ name: 'conversations.json', data: '[]' }] : []), ...Array.from({ length: entries }, (_, i) => ({ name: `asset-${salt}-${i}.bin`, data: 'x' }))]);
+  };
+  const outerOf = (parts: Buffer[]): Buffer => buildZipOf(parts.map((p, i) => ({ name: `Conversations__part-${i + 1}.zip`, data: p, method: 'store' as const })));
+  const limits = { ...DEFAULT_IMPORT_LIMITS, maxEntries: 100 };
+
+  it('up to 4 x maxEntries entries over the outer and all inner archives are fine', async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, 'o.zip'), outerOf([inner(90, true), inner(90, false), inner(90, false), inner(90, false)]));
+      const d = await discoverInput({ kind: 'path', path: join(dir, 'o.zip') }, limits);
+      try {
+        assert.equal(d.files.length, 1);
+        assert.equal(d.assetNames.size, 360);
+      } finally {
+        await d.close();
+      }
+    });
+  });
+
+  it('more than that is IMPORT_LIMIT_EXCEEDED (TOO_MANY_ENTRIES) with the extract-and-import remedy, before the names pile up', async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, 'o.zip'), outerOf([inner(90, true), ...Array.from({ length: 5 }, () => inner(90, false))]));
+      await assert.rejects(discoverInput({ kind: 'path', path: join(dir, 'o.zip') }, limits), (e: unknown) => {
+        assert.ok(e instanceof GcrError);
+        assert.equal(e.code, 'IMPORT_LIMIT_EXCEEDED');
+        assert.equal(e.details?.['reason'], 'TOO_MANY_ENTRIES');
+        assert.match(e.remedy ?? '', /Extract the inner/);
+        return true;
+      });
     });
   });
 });
