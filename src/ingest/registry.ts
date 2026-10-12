@@ -75,7 +75,7 @@ export const DEFAULT_MAX_DETECT_CHARS = 64 * 1024 * 1024;
 
 /**
  * The reason of a detection that was SKIPPED (not failed) because the element is over the sniffing limit (ATK-08b). Exported so
- * that the import runner can tell this case from "no marker found" without parsing prose: an element this large DOES have a
+ * that the import runner can tell this case apart from the plain no-marker case without parsing prose: an element this large DOES have a
  * mapping (or chat_messages), nobody looked, and the operator must pass the provider. Still contains "sniffing limit".
  */
 export const SNIFF_SKIPPED_TOO_LARGE = 'The element is too large to sniff (longer than the sniffing limit); pass the provider explicitly with --provider chatgpt|claude.';

@@ -72,7 +72,7 @@ const groupA: Mutation[] = [
     );
   },
   // the SQL layer returns hidden messages by default (the CLI renderer filters again, MCP does not)
-  (dist) => replaceInFile(join(dist, 'db', 'search.js'), "if (!includeHidden)\n        add('AND m.hidden = 0 ');", "if (false)\n        add('AND m.hidden = 0 ');"),
+  (dist) => replaceInFile(join(dist, 'db', 'search.js'), "if (!f.includeHidden)\n        add('AND m.hidden = 0 ');", "if (false)\n        add('AND m.hidden = 0 ');"),
   // the draft status column admits "sent"
   (dist) => {
     replaceInFile(join(dist, 'db', 'schema.js'), "CHECK (status IN ('draft','archived'))", "CHECK (status IN ('draft','archived','sent'))");

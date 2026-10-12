@@ -1402,7 +1402,11 @@ async function main() {
     const { byId } = await rawMcp(hostileDb, frames);
     for (const id of [2, 3, 4, 5, 6, 7]) same(byId.get(id).result.structuredContent.ok, true, `hostile database, response ${id} ok`);
     same(byId.get(4).result.structuredContent.data.items.length, 2, 'hostile database: hits for the marker word');
-    must(byId.get(2).result.structuredContent.data.items[0].title.includes('\u202e'), 'the hostile title did not survive import, so the escaping above proves nothing');
+    // Since the fix wave (ATK-04) an MCP result shows these characters as visible \uXXXX text in the text block AND in structuredContent;
+    // the C0 escape (ESC) is plain JSON and comes back as the real character once the JSON is parsed.
+    const hostileTitle = byId.get(2).result.structuredContent.data.items[0].title;
+    must(hostileTitle.includes('\\u202e'), 'the hostile title did not survive import, or the bidi override is not shown as a visible escape in the MCP result');
+    must(!/[\u007f-\u009f\u2028\u2029\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069\u{e0000}-\u{e007f}]/u.test(hostileTitle), 'the MCP result carries a raw bidi, C1, separator or TAG character');
   });
 
   // ---- 10. the canary, the guard ---------------------------------------------------------------------------------------------
