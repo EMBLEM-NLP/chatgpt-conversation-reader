@@ -14,6 +14,7 @@
  *   --date <text>       date label recorded in the report and the doc (default "unknown"; the script never reads the clock)
  *   --doc <file>        with --write-doc: write there instead of docs/PERFORMANCE.md (tests use it)
  *   --dist <dir>        compiled product to measure (default ./dist)
+ *   --no-scaling-large  skip the import of five times the data (the 5x run takes about five times as long as the main import)
  *
  * What is measured (everything through the compiled product, nothing mocked):
  *   1. import      `gcr import` in a CHILD process: wall time, messages/s, peak RSS (process.resourceUsage().maxRSS, read by a tiny
@@ -23,7 +24,8 @@
  *   4. searches    200 varied queries through the SDK in a measurement worker process: words, prefixes, phrases, CJK, hostile
  *   5. get/thread  100 pseudo-random conversations each, with the expected active-thread length checked
  *   6. stats       every --group-by value; audit; and `gcr graph build` in a child process (wall time, peak RSS)
- *   7. scaling     the import of one fifth of the data (peak RSS and rate), to show memory does not grow with the export
+ *   7. scaling     the import of one fifth AND of five times the data in their own databases (peak RSS and rate), to show memory
+ *                  does not grow with the export; a growth above 1.6x in peak RSS for 5x the data is a WARN (use --no-scaling-large to skip the 5x run)
  *
  * Exit status: non-zero ONLY on correctness failures (wrong stored counts, a thread of the wrong length, a query that
  * must hit but does not, a network attempt recorded by the guard ...). Speed never changes the exit status; results worse
@@ -47,6 +49,8 @@ const SCHEMA = 'gcr-perf-baseline/1';
 const MESSAGES_PER_CONVERSATION = 100;
 const SHARDS = 5;
 const MIB = 1024 * 1024;
+/** NFR-05 shape check: peak RSS may grow by at most this factor when the data grows 5x (measured on this code base: about 1.05x). */
+const SCALING_RSS_GROWTH_LIMIT = 1.6;
 
 /** The NFR-05 baseline targets. They are justified in docs/PERFORMANCE.md (the template below). */
 const BUDGETS = {
@@ -62,13 +66,13 @@ const BUDGETS = {
 
 function usage(code) {
   process.stderr.write(
-    'usage: node scripts/perf-baseline.mjs [--messages N] [--seed N] [--json] [--keep-db] [--write-doc] [--date <text>] [--doc <file>] [--dist <dir>]\n',
+    'usage: node scripts/perf-baseline.mjs [--messages N] [--seed N] [--json] [--keep-db] [--write-doc] [--date <text>] [--doc <file>] [--dist <dir>] [--no-scaling-large]\n',
   );
   process.exit(code);
 }
 
 function parseArgs(argv) {
-  const opts = { messages: 50_000, seed: 20_261_011, json: false, keepDb: false, writeDoc: false, date: 'unknown', doc: join(repoRoot, 'docs', 'PERFORMANCE.md'), dist: join(repoRoot, 'dist'), worker: null };
+  const opts = { messages: 50_000, seed: 20_261_011, json: false, keepDb: false, writeDoc: false, date: 'unknown', doc: join(repoRoot, 'docs', 'PERFORMANCE.md'), dist: join(repoRoot, 'dist'), scalingLarge: true, worker: null };
   const intArg = (name, text, min, max) => {
     if (!/^\d{1,12}$/.test(text ?? '') || Number(text) < min || Number(text) > max) {
       process.stderr.write(`perf-baseline: ${name} needs an integer from ${min} to ${max}\n`);
@@ -91,6 +95,7 @@ function parseArgs(argv) {
       }
     } else if (a === '--doc' && argv[i + 1] !== undefined) opts.doc = resolve(argv[++i]);
     else if (a === '--dist' && argv[i + 1] !== undefined) opts.dist = resolve(argv[++i]);
+    else if (a === '--no-scaling-large') opts.scalingLarge = false;
     else if (a === '--worker' && argv[i + 1] !== undefined) opts.worker = argv[++i]; // internal: the measurement worker
     else if (a === '--worker-db' || a === '--worker-params') opts[a === '--worker-db' ? 'workerDb' : 'workerParams'] = resolve(argv[++i] ?? '');
     else usage(2);
@@ -595,24 +600,40 @@ async function main(opts) {
     expect(graph.data.nodes > 0 && graph.data.edges > 0, 'graph build: the graph is empty');
     expect(graph.data.messagesScanned === opts.messages, `graph build: scanned ${graph.data.messagesScanned} messages, expected ${opts.messages}`);
 
-    // ---- scaling probe: one fifth of the data in its own database -----------------------------------------------------------------
+    // ---- scaling probe: one fifth and five times the data, each in its own database ----------------------------------------------
+    // Why two extra points: a probe from 10,000 to 50,000 messages showed 1.15x RSS and hid a real defect (the importer retained the
+    // text of every conversation through sliced key strings, SPEC-01 of the final review). That retention only costs tens of MiB at
+    // 50,000 messages and hundreds at 500,000; the 5x run makes such a leak visible as a ratio.
     let scaling = null;
     if (opts.messages >= 10_000) {
-      progress('scaling probe (one fifth of the data)');
+      const probeImport = async (messages, tag) => {
+        progress(`scaling probe: ${fmt(messages)} messages`);
+        const exp = generateExport({ messages, seed: opts.seed });
+        const zip = join(work, `${tag}.zip`);
+        writeFileSync(zip, zipOf(exp));
+        const run = await cli(['import', zip], join(work, `${tag}.sqlite`), tag);
+        const stored = run.data.messages?.stored - run.data.messages?.structural;
+        expect(stored === messages, `scaling probe (${tag}): ${stored} messages stored, expected ${messages}`);
+        rmSync(zip, { force: true });
+        rmSync(join(work, `${tag}.sqlite`), { force: true });
+        return { messages, peakRssMiB: run.peakRssMiB, messagesPerSecond: Math.round(messages / (run.wallMs / 1000)) };
+      };
       const smallMessages = Math.floor(opts.messages / 5 / MESSAGES_PER_CONVERSATION) * MESSAGES_PER_CONVERSATION;
-      const small = generateExport({ messages: smallMessages, seed: opts.seed });
-      const smallZip = join(work, 'small.zip');
-      writeFileSync(smallZip, zipOf(small));
-      const smallRun = await cli(['import', smallZip], join(work, 'small.sqlite'), 'small');
-      expect(smallRun.data.messages?.stored - smallRun.data.messages?.structural === smallMessages, `scaling probe: ${smallRun.data.messages?.stored - smallRun.data.messages?.structural} messages stored, expected ${smallMessages}`);
+      const small = await probeImport(smallMessages, 'small');
+      const xl = opts.scalingLarge ? await probeImport(opts.messages * 5, 'xl') : null;
       scaling = {
         smallMessages,
-        smallPeakRssMiB: smallRun.peakRssMiB,
-        smallMessagesPerSecond: Math.round(smallMessages / (smallRun.wallMs / 1000)),
+        smallPeakRssMiB: small.peakRssMiB,
+        smallMessagesPerSecond: small.messagesPerSecond,
         largeMessages: opts.messages,
         largePeakRssMiB: imported.peakRssMiB,
-        rssGrowth: smallRun.peakRssMiB > 0 ? round(imported.peakRssMiB / smallRun.peakRssMiB, 2) : null,
+        rssGrowth: small.peakRssMiB > 0 ? round(imported.peakRssMiB / small.peakRssMiB, 2) : null,
         dataGrowth: round(opts.messages / smallMessages, 2),
+        xlMessages: xl === null ? null : xl.messages,
+        xlPeakRssMiB: xl === null ? null : xl.peakRssMiB,
+        xlMessagesPerSecond: xl === null ? null : xl.messagesPerSecond,
+        xlRssGrowth: xl === null || imported.peakRssMiB <= 0 ? null : round(xl.peakRssMiB / imported.peakRssMiB, 2),
+        xlDataGrowth: xl === null ? null : round(xl.messages / opts.messages, 2),
       };
     }
 
@@ -682,6 +703,10 @@ async function main(opts) {
     // without SQLite's dbstat the whole file is judged instead (stricter). The whole-file ratio is reported either way.
     const indexRatio = summary.database.ftsRatioToRawText ?? summary.database.ratioToRawText;
     budget(summary.database.ftsRatioToRawText === null ? 'database size / raw text' : 'FTS index size / raw text', `<= ${BUDGETS.databaseToTextRatio}`, indexRatio, indexRatio <= BUDGETS.databaseToTextRatio, 'x');
+    // Memory shape (NFR-05): five times the data must not cost anywhere near five times the memory.
+    if (scaling !== null && scaling.xlRssGrowth !== null && scaling.xlRssGrowth > SCALING_RSS_GROWTH_LIMIT) {
+      summary.warnings.push(`memory grows with the export: ${scaling.xlDataGrowth}x the data cost ${scaling.xlRssGrowth}x the peak RSS (limit ${SCALING_RSS_GROWTH_LIMIT}x)`);
+    }
     for (const b of summary.budgets) if (!b.ok) summary.warnings.push(`${b.name}: ${b.actual} ${b.unit} misses the target (${b.target} ${b.unit})`);
     return { summary, workDir: work };
   } catch (e) {
@@ -712,7 +737,11 @@ function markdownTable(s) {
     ['audit', `${s.audit.ms} ms`],
     ['Graph build (child process)', `${fmt(s.graphBuild.wallMs)} ms, peak RSS ${s.graphBuild.peakRssMiB} MiB, ${fmt(s.graphBuild.nodes)} nodes, ${fmt(s.graphBuild.edges)} edges`],
   ];
-  if (s.scaling !== null) rows.push(['Scaling probe', `${fmt(s.scaling.smallMessages)} messages: peak RSS ${s.scaling.smallPeakRssMiB} MiB; ${fmt(s.scaling.largeMessages)}: ${s.scaling.largePeakRssMiB} MiB (data x${s.scaling.dataGrowth}, RSS x${s.scaling.rssGrowth})`]);
+  if (s.scaling !== null) {
+    const sc = s.scaling;
+    const xl = sc.xlMessages === null ? '' : `; ${fmt(sc.xlMessages)}: ${sc.xlPeakRssMiB} MiB (data x${sc.xlDataGrowth}, RSS x${sc.xlRssGrowth})`;
+    rows.push(['Scaling probe', `${fmt(sc.smallMessages)} messages: peak RSS ${sc.smallPeakRssMiB} MiB; ${fmt(sc.largeMessages)}: ${sc.largePeakRssMiB} MiB (data x${sc.dataGrowth}, RSS x${sc.rssGrowth})${xl}`]);
+  }
   const lines = ['| Metric | Result |', '| --- | --- |', ...rows.map(([k, v]) => `| ${k} | ${v} |`), '', '| Budget | Target | Measured | Status |', '| --- | --- | --- | --- |'];
   for (const b of s.budgets) lines.push(`| ${b.name} | ${b.target} ${b.unit} | ${fmt(b.actual)} ${b.unit} | ${b.ok ? 'ok' : 'WARN'} |`);
   lines.push('', `Environment: Node ${s.environment.node}, ${s.environment.platform} ${s.environment.arch}, ${s.environment.cpuCount} CPUs, load average (1 min) ${s.load.loadAverage1mAtStart} at start and ${s.load.loadAverage1mAtEnd} at end.`);
@@ -733,10 +762,18 @@ function renderDoc(s) {
     `The graph build took ${fmt(Math.round(s.graphBuild.wallMs / 100) / 10)} s for ${fmt(s.parameters.messages)} messages (${fmt(s.graphBuild.edges)} edges). The import of the same data took ${fmt(Math.round(s.import.wallMs / 100) / 10)} s. The graph build has no NFR-05 budget because it runs on request (\`gcr graph build\`); \`audit\` (${s.audit.ms} ms) and the slowest \`stats\` group-by (${slowestStats[0]}, ${slowestStats[1]} ms) scan every message.`,
     `The synthetic export has no attachments, no tool messages, no hidden messages and no oversized single message. The numbers say nothing about those paths.`,
   ];
-  const scalingSection =
-    s.scaling === null
-      ? 'The scaling probe is skipped below 10,000 messages.\n'
-      : `| Messages | Peak RSS of \`gcr import\` (MiB) | Messages per second |\n| --- | --- | --- |\n| ${fmt(s.scaling.smallMessages)} | ${s.scaling.smallPeakRssMiB} | ${fmt(s.scaling.smallMessagesPerSecond)} |\n| ${fmt(s.scaling.largeMessages)} | ${s.scaling.largePeakRssMiB} | ${fmt(s.import.messagesPerSecond)} |\n\nThe data grew ${s.scaling.dataGrowth}x and the peak RSS ${s.scaling.rssGrowth}x. The importer streams the archive and parses one conversation at a time (docs/ARCHITECTURE.md section 5), so memory is expected to be bounded by the largest conversation plus SQLite's cache, not by the size of the export (NFR-05). These two runs are the evidence, for these two sizes only; a conversation far larger than the 100 messages generated here would raise the bound.\n`;
+  const scalingSection = (() => {
+    const sc = s.scaling;
+    if (sc === null) return 'The scaling probe is skipped below 10,000 messages.\n';
+    const rows = [[sc.smallMessages, sc.smallPeakRssMiB, sc.smallMessagesPerSecond], [sc.largeMessages, sc.largePeakRssMiB, s.import.messagesPerSecond]];
+    if (sc.xlMessages !== null) rows.push([sc.xlMessages, sc.xlPeakRssMiB, sc.xlMessagesPerSecond]);
+    const table = `| Messages | Peak RSS of \`gcr import\` (MiB) | Messages per second |\n| --- | --- | --- |\n${rows.map((r) => `| ${fmt(r[0])} | ${r[1]} | ${fmt(r[2])} |`).join('\n')}\n`;
+    const growth =
+      sc.xlMessages === null
+        ? `The data grew ${sc.dataGrowth}x and the peak RSS ${sc.rssGrowth}x. The 5x run was skipped (\`--no-scaling-large\`), so this page shows no evidence about much larger exports.`
+        : `From the middle row to the last the data grew ${sc.xlDataGrowth}x and the peak RSS ${sc.xlRssGrowth}x (the run warns above ${SCALING_RSS_GROWTH_LIMIT}x). From the first to the middle row they grew ${sc.dataGrowth}x and ${sc.rssGrowth}x.`;
+    return `${table}\n${growth} The importer streams the archive and parses one conversation at a time (docs/ARCHITECTURE.md section 5); what it keeps for the whole run is a small record per conversation (its id and a few fields), so memory is bounded by the number of conversations plus the largest single conversation plus SQLite's cache, not by the size of the export (NFR-05). It is not flat: part of the remaining growth is per-conversation bookkeeping and allocator behaviour that this probe cannot separate. These runs are the evidence, for these sizes only, on synthetic conversations of 100 messages; a conversation far larger than that raises the bound.\n`;
+  })();
   return `# GCR performance baseline
 
 Generated by \`npm run perf -- --write-doc --date <date>\` (\`scripts/perf-baseline.mjs\`). **Do not edit the numbers by hand**: re-run the script. The structure of this page is a fixed template in that script.
@@ -792,7 +829,7 @@ ${kinds.join('\n')}
 
 "Rejected" means the product answered with a documented error code (for example an empty or punctuation-only query is \`INVALID_ARGUMENT\`); it is not a failure. Every non-hostile query must hit, and the run fails otherwise.
 
-### Memory does not grow with the export
+### Memory against export size
 
 ${scalingSection}
 ## Budgets (the NFR-05 baseline targets) and why these numbers
@@ -806,7 +843,7 @@ ${scalingSection}
 
 * **Import >= 10,000 messages/s.** A heavy personal export has tens of thousands of messages; at this rate 50,000 messages import in about five seconds, so \`gcr import\` stays an interactive command and a very large export (500,000 messages) finishes in under a minute. Below this rate the import becomes the slowest step of a workflow and people stop re-importing to keep the database current.
 * **Search p95 < 100 ms.** About 100 ms is the commonly used limit under which an interactive answer feels immediate. The CLI and the MCP server answer a model or a person one query at a time, so the tail (p95) matters more than the mean; the budget is on all ${s.search.queries} varied queries, not only the easy ones.
-* **Peak RSS < ${BUDGETS.peakRssMiB} MiB.** GCR runs on a developer laptop, a small CI runner or a Codespace next to an editor and a model client; 600 MiB leaves room on a machine with 2 GiB of free memory. NFR-05 asks for bounded memory: the scaling probe above is the evidence for the shape (memory independent of export size), the budget is the absolute ceiling for one process at 50,000 messages.
+* **Peak RSS < ${BUDGETS.peakRssMiB} MiB.** GCR runs on a developer laptop, a small CI runner or a Codespace next to an editor and a model client; 600 MiB leaves room on a machine with 2 GiB of free memory. NFR-05 asks for bounded memory: the scaling probe above is the evidence for the shape (memory bounded by the number of conversations and the largest conversation, not by the size of the export), the budget is the absolute ceiling for one process at 50,000 messages.
 * **FTS index <= 3x the raw text.** \`docs/ARCHITECTURE.md\` fixes "about 3x the raw text size" for the INDEX so that search does not multiply the size of a large export. The whole database file is larger because it also keeps the original message JSON (\`raw_source_json\`) and the block list next to the normalized text (provenance is never discarded); that whole-file ratio is reported in the results table so nobody has to guess what the file costs.
 
 The four targets are engineering judgment, not measured user requirements; changing one needs an ADR, not a quiet edit of this script.

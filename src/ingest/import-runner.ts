@@ -4,7 +4,10 @@
  * into ONE atomic, idempotent import of a user-provided official export. It never fetches anything: the input is a
  * file, a folder or a byte stream the caller already holds.
  *
- * TWO PASSES, BOUNDED MEMORY (memory is O(number of conversations), never O(export size)):
+ * TWO PASSES, BOUNDED MEMORY (what is held for the whole run is O(number of conversations): one small record per conversation,
+ * built from FLATTENED key strings (see flatString), never from slices of the element text; at any moment at most the largest
+ * single conversation is held in addition. It is NOT O(export size): test/ingest/import-runner.heapcap.test.ts imports an 84 MB
+ * export under a 96 MB heap cap):
  *  PASS 1 streams every conversation file once and computes, per file, the SHA-256 of its bytes; for every element a
  *    cheap IDENTITY PEEK (a linear top-level key scanner, NOT a JSON.parse of the element); wrapper expansion; the
  *    provider (registry sniffing of the first recognizable element of each file); and the duplicate-resolution winners.
