@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { REPO_ROOT, SCRIPTS_DIR, baseEnv, buildProduct, cleanupBuilds, makeTempDir, removeDir, runNode } from './scripts.helpers.test.js';
+import { REPO_ROOT, SCRIPTS_DIR, baseEnv, buildProduct, cleanupBuilds, machineLeaks, makeTempDir, removeDir, runNode } from './scripts.helpers.test.js';
 import type { ProductBuild } from './scripts.helpers.test.js';
 
 const SCRIPT = join(SCRIPTS_DIR, 'audit-report.mjs');
@@ -39,9 +39,7 @@ describe('scripts/audit-report.mjs', () => {
     assert.equal(rb.code, 0, rb.stderr);
     const text = readFileSync(a, 'utf8');
     assert.equal(text, readFileSync(b, 'utf8'));
-    for (const secret of [homedir(), hostname(), userInfo().username, REPO_ROOT, build.root]) {
-      if (secret.length >= 4 && secret !== '/') assert.ok(!text.includes(secret), `the page must not contain ${secret.length > 12 ? 'a local path' : 'a machine detail'}`);
-    }
+    assert.deepEqual(machineLeaks(text, [homedir(), REPO_ROOT, build.root], [hostname(), userInfo().username]), [], 'the page must not contain a local path, host name or user name');
     assert.match(text, /SYNTHETIC fixtures/);
     assert.match(text, /## Branch provenance/);
     assert.match(text, /## Model provenance/);

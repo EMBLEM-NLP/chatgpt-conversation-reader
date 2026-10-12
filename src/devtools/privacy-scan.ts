@@ -1352,6 +1352,19 @@ async function scanHistory(root: string, allow: ReadonlySet<string>, byteCap: nu
   let bytesRead = 0;
   let truncated = false;
 
+  // A shallow clone (actions/checkout without fetch-depth: 0 makes one) has only the newest commits: a credential that was
+  // committed and removed before the boundary would never be read, and the scan used to say "clean". Fail closed (TQ-02).
+  const shallow = (await runGit(root, ['rev-parse', '--is-shallow-repository'], 64)).stdout.toString('utf8').trim();
+  if (shallow === 'true') {
+    truncationFinding(
+      findings,
+      notes,
+      HISTORY_PSEUDO_PATH,
+      'the repository is a shallow clone: commits before the shallow boundary were NOT scanned; fetch the full history (git fetch --unshallow; in CI use actions/checkout with fetch-depth: 0) and run the scan again',
+      allowLarge,
+    );
+  }
+
   // Pass 1: every path ever ADDED. --no-renames makes a rename show as delete+add so a renamed-to forbidden name is
   // still reported. Merge commits print no diff here (same as pass 2), so a file that exists ONLY in a merge
   // resolution is a known gap; both passes see exactly the same commits, which keeps the marker check consistent.

@@ -24,6 +24,29 @@ export const SMOKE = join(SCRIPTS_DIR, 'ci-smoke.mjs');
 export const PERF = join(SCRIPTS_DIR, 'perf-baseline.mjs');
 export const COVERAGE = join(SCRIPTS_DIR, 'coverage-summary.mjs');
 
+/**
+ * What a generated document must not tell a reader about the machine that produced it. Paths (home, temp, the checkout, the
+ * working directory) are leaks wherever they occur. A USER or HOST name is only a leak in the shapes in which it identifies a
+ * machine (a path component such as `/home/<name>/`, or `<name>@host` / `user@<name>`): on CI images the account is called
+ * `runner`, `node`, `nobody`, `user`, `build` and the like, and those are ordinary words that the prose of a document may use
+ * (a test that searched for the bare name failed on the first GitHub-hosted run it would have had). Returns labels, never the
+ * leaked values themselves, so a failure message does not repeat them.
+ */
+export function machineLeaks(text: string, paths: readonly string[], names: readonly string[]): string[] {
+  const found: string[] = [];
+  paths.forEach((p, i) => {
+    if (p.length >= 4 && p !== '/' && text.includes(p)) found.push(`path #${i}`);
+  });
+  const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  names.forEach((n, i) => {
+    if (n.length < 2) return;
+    const e = escape(n);
+    const shaped = new RegExp(`[/\\\\]${e}(?![A-Za-z0-9_.-])|(?<![A-Za-z0-9_.-])${e}@[A-Za-z0-9]|[A-Za-z0-9]@${e}(?![A-Za-z0-9_-])`);
+    if (shaped.test(text)) found.push(`name #${i}`);
+  });
+  return found;
+}
+
 export function makeTempDir(prefix: string): string {
   return mkdtempSync(join(process.env['GCR_TEST_TMPDIR'] ?? tmpdir(), prefix));
 }

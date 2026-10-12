@@ -21,6 +21,7 @@ These files are the working notes behind `docs/PARITY_MATRIX.md`, `docs/SECURITY
 ## What was changed before committing
 
 * Local absolute paths of the research machine were replaced by placeholders (`<ccr-checkout>`, `<gcr-checkout>`, `<scratchpad>`, `<home>`). Line numbers and commit ids that refer to the CCR checkout are unchanged.
+* `mcp-sdk-cookbook.md` names test files at the root of a research sandbox (`test/aliases.test.ts`, `test/stdio.e2e.test.ts`, ...). They do not exist in this repository; the tests that grew out of them live under `test/mcp/`.
 * Nothing else was edited: statements of uncertainty were kept as written. If a note and the code disagree, the code and `docs/DECISIONS.md` win.
 
 ## Rules for adding more notes

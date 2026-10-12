@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir, hostname, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { PERF, REPO_ROOT, appendToFile, baseEnv, buildProduct, cleanupBuilds, makeTempDir, removeDir, runNode, sabotagedCopy } from './scripts.helpers.test.js';
+import { PERF, REPO_ROOT, appendToFile, baseEnv, buildProduct, cleanupBuilds, machineLeaks, makeTempDir, removeDir, runNode, sabotagedCopy } from './scripts.helpers.test.js';
 import type { ProductBuild, RunResult } from './scripts.helpers.test.js';
 
 interface Spread {
@@ -218,9 +218,7 @@ describe('scripts/perf-baseline.mjs --write-doc', { timeout: 300_000 }, () => {
     for (const budget of ['Import throughput', 'Search latency p95', 'Peak RSS of any child process', 'FTS index size / raw text']) assert.ok(doc.includes(`| ${budget} |`), budget);
     assert.ok(doc.includes(`\`${s.data.datasetSha256.slice(0, 16)}...\``), 'the dataset fingerprint is recorded');
     assert.ok(doc.includes(`**${s.import.messagesPerSecond.toLocaleString('en-US')} messages/s**`) || doc.includes(`${s.import.messagesPerSecond}`), 'the measured import rate is in the document');
-    for (const secret of [hostname(), userInfo().username, homedir(), tmpdir(), tmpForScript, work, REPO_ROOT, process.cwd()]) {
-      if (secret.length >= 4) assert.ok(!doc.includes(secret), 'the document must not contain a host name, user name or path');
-    }
+    assert.deepEqual(machineLeaks(doc, [homedir(), tmpdir(), tmpForScript, work, REPO_ROOT, process.cwd()], [hostname(), userInfo().username]), [], 'the document must not contain a host name, user name or path');
     assert.ok(!/\/home\/|\/Users\/|\/tmp\//.test(doc));
   });
 
