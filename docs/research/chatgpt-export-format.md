@@ -13,9 +13,9 @@ Date accessed for every web source: 2026-10-10. Scope: features and data shapes 
 ## 0. Read this first: limits of this research
 
 1. **GCR cannot verify any of this against a live ChatGPT export in this environment.** No real export was available, none was requested, and nothing here was checked against one. Every field, type and enumeration below is either OpenAI's delivery wording (section 1) or a *secondhand observation* by community projects. Synthetic fixtures built from this document can only ever be classified `synthetic-only` in the parity matrix.
-2. **OpenAI publishes no schema for the archive contents.** Its Help Center article describes how to request the export and says the ZIP holds "your chat history and other relevant account data"; it names no files and no JSON fields (see section 1). Everything about `conversations.json` is reverse-engineered by third parties, and several of them say plainly that the format changes without notice [S2, S5, S8].
+2. **OpenAI publishes no schema for the archive contents.** Its Help Center article describes how to request the export and is reported to say that the ZIP holds the chat history and other account data (wording not reproduced here); it is reported to name no files and no JSON fields (see section 1). Everything about `conversations.json` is reverse-engineered by third parties, and several of them say plainly that the format changes without notice [S2, S5, S8].
 3. **Access problems (reported, not worked around):**
-   - `help.openai.com` was refused by the egress proxy (`403` on CONNECT, recorded in the proxy status endpoint). I therefore could **not** read OpenAI's article directly. The OFFICIAL claims in section 1 come from a WebSearch summary of that article (S1) and are corroborated only by another repository's research note that says it read the article (S20). Treat them as OFFICIAL-but-unverified-by-fetch.
+   - `help.openai.com` was refused by the egress proxy (`403` on CONNECT, recorded in the proxy status endpoint). I therefore could **not** read OpenAI's article directly. The claims in section 1 come from a WebSearch summary of that article (S1) and are corroborated only by another repository's research note that says it read the article (S20). Treat them as REPORTED-and-UNVERIFIED (not OFFICIAL), by fetch.
    - `community.openai.com`, `ai-chat-importer.com`, `levelup.gitconnected.com` and `takeoutday.org` could not be fetched (DNS failure, `ENOTFOUND`). Their content appears here only as search-engine summaries or as quoted by other repositories, and is labelled accordingly.
    - The GitHub MCP tool is restricted to two repositories, so third-party sources were read through public `raw.githubusercontent.com` URLs pinned to the commit SHAs shown in section 12, and through GitHub code-search text fragments (those fragments are verbatim). No repository was added to the session.
 4. **Paraphrase risk.** The fetch tool answers prompts through a small summarizing model, so quotations from fetched pages are paraphrases unless marked "verbatim (code-search fragment)". Where a number matters it was cross-checked against a second source when one existed.
@@ -26,26 +26,26 @@ Date accessed for every web source: 2026-10-10. Scope: features and data shapes 
 
 | Label | Meaning |
 |---|---|
-| **OFF** | OFFICIAL: stated by OpenAI (URL given). In this document only delivery mechanics qualify, and only via S1/S20 (see limit 3). |
+| **REP** | REPORTED, UNVERIFIED: what a search summary or another repository says OpenAI's Help Center article states (URL given). Never OpenAI's own wording as read by this project, and not to be cited as OFFICIAL. In this document only delivery mechanics qualify, via S1/S20 (see limit 3). (Earlier versions of this file called this label REP / OFFICIAL.) |
 | **CO** | COMMUNITY-OBSERVED: reported by a third-party parser, census, spec or issue. `CO x2` means two or more *independent* observers (compilations that cite each other count once). |
 | **UNC** | UNCERTAIN: single weak source, contradicted by another source, inferred, or my own derivation. |
 | **VERIFIED-LOCAL** | Checked by running code in this environment (Node v22.22.0). Applies to JavaScript/JSON behaviour only, never to the export format. |
 
-## 1. What OpenAI actually states (OFFICIAL, via S1 and S20)
+## 1. What is reported about OpenAI's export article (REPORTED, UNVERIFIED, via S1 and S20)
 
-Source article: OpenAI Help Center, "How do I export my ChatGPT history and data" (article 7260999), https://help.openai.com/en/articles/7260999-how-do-i-export-my-chatgpt-history-and-data (direct fetch blocked; see limit 3).
+Source article: the OpenAI Help Center article on exporting ChatGPT history and data (article 7260999), https://help.openai.com/en/articles/7260999-how-do-i-export-my-chatgpt-history-and-data (direct fetch blocked; see limit 3; read it yourself before relying on any row).
 
 | # | Claim | Label | Src |
 |---|---|---|---|
-| 1.1 | Two routes exist: ChatGPT Settings > Data controls > Export data > Export (confirm on next screen), or the Privacy Portal (Make a Privacy Request > consumer ChatGPT account > Download my data). | OFF (unverified by fetch) | S1, S20 |
-| 1.2 | An email or SMS announces readiness; delivery can take up to 7 days; the download link expires 24 hours after receipt. | OFF (unverified by fetch) | S1, S20 |
-| 1.3 | The Settings route is available for Free, Plus, Pro and eligible ChatGPT Edu workspaces; **not** for Business or Enterprise workspaces (contact the workspace owner). | OFF (unverified by fetch) | S1 |
-| 1.4 | The download is a ZIP containing "your chat history and other relevant account data". The article lists no file names and no JSON schema. | OFF (unverified by fetch) | S1, S20 |
-| 1.5 | The export cannot restore chats that were already deleted. | OFF (unverified by fetch) | S1 |
+| 1.1 | Two routes exist: ChatGPT Settings > Data controls > Export data > Export (confirm on next screen), or the Privacy Portal (Make a Privacy Request > consumer ChatGPT account > Download my data). | REP | S1, S20 |
+| 1.2 | An email or SMS announces readiness; delivery can take up to 7 days; the download link expires 24 hours after receipt. | REP | S1, S20 |
+| 1.3 | The Settings route is available for Free, Plus, Pro and eligible ChatGPT Edu workspaces; **not** for Business or Enterprise workspaces (contact the workspace owner). | REP | S1 |
+| 1.4 | The download is a ZIP containing the chat history and other account data (wording not reproduced). The article is reported to list no file names and no JSON schema. | REP | S1, S20 |
+| 1.5 | The export cannot restore chats that were already deleted. | REP | S1 |
 | 1.6 | The article was shown as updated roughly 29 days before 2026-09-23 (about late August 2026). | UNC | S20 |
 | 1.7 | Temporary chats are excluded from the export. | CO (vendor guides, search summary only) | S27 |
 
-Consequence for GCR: the user-facing import docs may cite 1.1 to 1.5 as OFFICIAL. Nothing about `conversations.json` field names may be described as OpenAI-documented.
+Consequence for GCR: the user-facing import docs may cite 1.1 to 1.5 only as "reported, UNVERIFIED". Nothing about `conversations.json` field names may be described as OpenAI-documented.
 
 ## 2. Archive layout (what may be inside the ZIP)
 

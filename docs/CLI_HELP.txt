@@ -215,7 +215,6 @@ Exit codes:
       IMPORT_LIMIT_EXCEEDED, IMPORT_PARSE_ERROR
   5   DB_SCHEMA_TOO_NEW, DB_MIGRATION_FAILED, DB_ERROR
   6   WRITE_FORBIDDEN
-  7   NOT_IMPLEMENTED
 
 stdout carries only the result; notes and errors go to stderr. GCR never
 contacts chatgpt.com.
@@ -709,7 +708,7 @@ Global options:
 Examples:
   gcr thread 00000000-0000-4000-8000-000000000001
       The active thread of a conversation.
-  gcr thread 00000000-0000-4000-8000-000000000001 --branch 00000000-0000-4000-8000-000000000012
+  gcr thread 00000000-0000-4000-8000-000000000002 --branch 00000000-0000-4000-8000-000000000014
       A specific branch, named by the id of its leaf message.
   gcr thread 00000000-0000-4000-8000-000000000001 --format jsonl
       One JSON value per line, for streaming tools.
@@ -945,6 +944,8 @@ Examples:
       Build the graph from everything imported.
   gcr graph build --min-conversations 3 --kinds url,tool --format json
       Keep only URLs and tool names that occur in at least three conversations.
+      This replaces the graph built before: run "gcr graph build" again to get
+      the full graph back.
 
 Exit codes:
   0   success
@@ -982,11 +983,14 @@ Options:
       --depth <n>               How many hops to follow from the matching nodes
                                 (1-4). (default: 2)
       --max-nodes <n>           Most nodes in the answer (1-500). (default: 100)
-      --kinds <kinds>           Only nodes of these node kinds or entity kinds.
-                                One of: conversation, entity, tool, url, uuid,
-                                timestamp, tool, code_language, file_name,
-                                keyword. Repeatable; comma-separated values are
-                                accepted.
+      --kinds <kinds>           Only nodes of these kinds. Node kinds:
+                                conversation, entity, tool. Entity kinds (they
+                                keep the entity nodes of that kind): url, uuid,
+                                timestamp, code_language, file_name, keyword.
+                                "tool" is both: it keeps the tool nodes. One of:
+                                conversation, entity, tool, url, uuid,
+                                timestamp, code_language, file_name, keyword.
+                                Repeatable; comma-separated values are accepted.
 
 Global options:
       --db <path>               SQLite database file. (default: $GCR_DB, else
@@ -1061,8 +1065,9 @@ Examples:
   gcr graph path conv:chatgpt:default:00000000-0000-4000-8000-000000000001 conv:chatgpt:default:00000000-0000-4000-8000-000000000002
       The shortest chain of shared entities between two conversations (use the
       ids printed by graph query).
-  gcr graph path tool:python ent:keyword:quokka --max-depth 3 --format json
-      Limit the search to three hops.
+  gcr graph path tool:python ent:keyword:synthetic --max-depth 3 --format json
+      Limit the search to three hops (a tool node and a keyword node of the demo
+      data in docs/USER_GUIDE.md).
 
 Exit codes:
   0   success
@@ -1090,11 +1095,14 @@ Arguments:
 Options:
       --limit <n>               Maximum number of neighbours (1-500). (default:
                                 50)
-      --kinds <kinds>           Only neighbours of these node kinds or entity
-                                kinds. One of: conversation, entity, tool, url,
-                                uuid, timestamp, tool, code_language, file_name,
-                                keyword. Repeatable; comma-separated values are
-                                accepted.
+      --kinds <kinds>           Only neighbours of these kinds. Node kinds:
+                                conversation, entity, tool. Entity kinds (they
+                                keep the entity nodes of that kind): url, uuid,
+                                timestamp, code_language, file_name, keyword.
+                                "tool" is both: it keeps the tool nodes. One of:
+                                conversation, entity, tool, url, uuid,
+                                timestamp, code_language, file_name, keyword.
+                                Repeatable; comma-separated values are accepted.
       --edge-kinds <kinds>      Only follow edges of these kinds. One of:
                                 mentioned_in, co_occurs, uses_tool. Repeatable;
                                 comma-separated values are accepted.
@@ -1143,11 +1151,14 @@ that appear everywhere.
 
 Options:
       --limit <n>               Maximum number of nodes (1-500). (default: 10)
-      --kinds <kinds>           Only nodes of these node kinds or entity kinds.
-                                One of: conversation, entity, tool, url, uuid,
-                                timestamp, tool, code_language, file_name,
-                                keyword. Repeatable; comma-separated values are
-                                accepted.
+      --kinds <kinds>           Only nodes of these kinds. Node kinds:
+                                conversation, entity, tool. Entity kinds (they
+                                keep the entity nodes of that kind): url, uuid,
+                                timestamp, code_language, file_name, keyword.
+                                "tool" is both: it keeps the tool nodes. One of:
+                                conversation, entity, tool, url, uuid,
+                                timestamp, code_language, file_name, keyword.
+                                Repeatable; comma-separated values are accepted.
 
 Global options:
       --db <path>               SQLite database file. (default: $GCR_DB, else
@@ -1220,9 +1231,11 @@ Global options:
 
 Examples:
   gcr graph explain 12
-      Evidence for edge number 12.
-  gcr graph explain ent:keyword:marsupial ent:keyword:quokka co_occurs --format json
-      Evidence for the co-occurrence edge between two nodes.
+      Evidence for edge number 12 (edge ids are printed by graph query and graph
+      neighbors; they depend on your graph).
+  gcr graph explain ent:keyword:active ent:keyword:synthetic co_occurs --format json
+      Evidence for the co-occurrence edge between two keyword nodes of the demo
+      data.
 
 Exit codes:
   0   success
@@ -1260,11 +1273,14 @@ Options:
       --depth <n>               Hops to follow from the term (with --term).
                                 (default: 2)
       --max-nodes <n>           Most nodes on the page (1-500). (default: 100)
-      --kinds <kinds>           Only nodes of these node kinds or entity kinds.
-                                One of: conversation, entity, tool, url, uuid,
-                                timestamp, tool, code_language, file_name,
-                                keyword. Repeatable; comma-separated values are
-                                accepted.
+      --kinds <kinds>           Only nodes of these kinds. Node kinds:
+                                conversation, entity, tool. Entity kinds (they
+                                keep the entity nodes of that kind): url, uuid,
+                                timestamp, code_language, file_name, keyword.
+                                "tool" is both: it keeps the tool nodes. One of:
+                                conversation, entity, tool, url, uuid,
+                                timestamp, code_language, file_name, keyword.
+                                Repeatable; comma-separated values are accepted.
       --title <text>            Page title (up to 200 characters). (default: GCR
                                 graph export)
 
@@ -1479,9 +1495,9 @@ Global options:
   -h, --help                    Show help for this command and exit.
 
 Examples:
-  gcr draft show 00000000-0000-4000-8000-0000000000d1
+  gcr draft show <draft-id>
       Print the draft as Markdown.
-  gcr draft show 00000000-0000-4000-8000-0000000000d1 --format json
+  gcr draft show <draft-id> --format json
       The same draft as JSON.
 
 Exit codes:
@@ -1523,9 +1539,9 @@ Global options:
   -h, --help                    Show help for this command and exit.
 
 Examples:
-  gcr draft archive 00000000-0000-4000-8000-0000000000d1
+  gcr draft archive <draft-id>
       Mark the draft as archived.
-  gcr draft archive 00000000-0000-4000-8000-0000000000d1 --format json
+  gcr draft archive <draft-id> --format json
       The same, printing the archived draft as JSON.
 
 Exit codes:
@@ -1669,9 +1685,9 @@ Global options:
   -h, --help                    Show help for this command and exit.
 
 Examples:
-  gcr annotate update 00000000-0000-4000-8000-0000000000a1 --input note.txt --expected-version 1
+  gcr annotate update <annotation-id> --input note.txt --expected-version 1
       Replace the text of version 1.
-  gcr annotate update 00000000-0000-4000-8000-0000000000a1 --input - --expected-version 2 --format json
+  gcr annotate update <annotation-id> --input - --expected-version 2 --format json
       Text from standard input, result as JSON.
 
 Exit codes:
@@ -1772,9 +1788,9 @@ Global options:
   -h, --help                    Show help for this command and exit.
 
 Examples:
-  gcr annotate show 00000000-0000-4000-8000-0000000000a1
+  gcr annotate show <annotation-id>
       Print the note's metadata as Markdown.
-  gcr annotate show 00000000-0000-4000-8000-0000000000a1 --format json
+  gcr annotate show <annotation-id> --format json
       The note including its text, as JSON.
 
 Exit codes:

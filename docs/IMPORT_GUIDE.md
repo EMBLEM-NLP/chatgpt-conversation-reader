@@ -18,18 +18,22 @@ It reads those bytes on this machine and writes a local SQLite database. That is
 
 ## 2. Requesting the export
 
-What follows is what OpenAI states in its Help Center article "How do I export my ChatGPT history and data"
-(`help.openai.com`, article 7260999). Status: **OFFICIAL, but unverified by fetch**: the article could not be downloaded while GCR was designed,
-so these statements come from a search-engine summary of it that a second source corroborates. Check the live article before relying on a detail.
+The current rules for requesting an export are in OpenAI's Help Center article on exporting your ChatGPT history and data (`help.openai.com`,
+article 7260999). **GCR could not read that article**: the article was not downloadable while GCR was designed, and no OpenAI page was fetched.
+What follows is a paraphrase of what a search-engine summary of it reported, corroborated by one other repository's research note.
+Status: **reported, UNVERIFIED: check the Help Center article for the current rules.** It is not a quotation and it is not labelled OFFICIAL
+(the same topics are listed as unverified in `docs/SECURITY_AND_BOUNDARIES.md` section 6, item 7).
 
-1. Two routes exist: in ChatGPT, **Settings > Data controls > Export data > Export** (then confirm on the next screen), or the **Privacy Portal**
-   (Make a Privacy Request > consumer ChatGPT account > Download my data).
-2. You get an email or SMS when the export is ready. Delivery can take up to **7 days**; the download link expires **24 hours** after you receive it.
-3. The Settings route is offered for Free, Plus, Pro and eligible ChatGPT Edu workspaces, **not** for Business or Enterprise workspaces (ask the workspace owner).
-4. The download is a ZIP with "your chat history and other relevant account data".
-5. An export cannot restore chats that were already deleted.
+1. Two routes were reported: inside ChatGPT (Settings, then Data controls, then Export data, then confirm on the next screen), or through OpenAI's Privacy Portal
+   (a privacy request for a consumer ChatGPT account, choosing to download your data).
+2. You are told by email or SMS when the export is ready. Delivery was reported to take up to about 7 days and the download link to stop working about 24 hours after you receive it.
+   Both figures may be out of date.
+3. The Settings route was reported for individual plans (Free, Plus, Pro) and for ChatGPT Edu workspaces where the administrator allows it, and not for Business or Enterprise workspaces
+   (ask the workspace owner). Plan names and eligibility change.
+4. The download was reported to be a ZIP with your chat history and other account data.
+5. An export was reported not to bring back chats that were already deleted.
 
-OpenAI publishes **no** description of the file names or JSON fields inside the archive. Everything GCR knows about `conversations.json`,
+GCR's research found **no** OpenAI description of the file names or JSON fields inside the archive (not verified: the article itself was not read). Everything GCR knows about `conversations.json`,
 `conversations-NNN.json` and `export_manifest.json` was observed by third parties and is exercised by GCR only against **synthetic** fixtures.
 GCR has not been verified against a live export. If your export does not import, the layout may have changed: see section 13.
 
@@ -116,8 +120,9 @@ Raise a limit only for input you trust. From the SDK pass `limits: { maxElementB
 
 Standard input is copied into one buffer that never grows beyond `maxElementBytes x 4` (many tiny chunks cost no more than their bytes).
 
-Memory: the import keeps one map entry per distinct conversation id (O(number of conversations); elements without an id, such as `{}` or `null` entries, cost only a counter) and holds ONE conversation element at a time. Measured on the synthetic baseline
-(50,000 messages in 500 conversations, `test/ingest/import-runner.scale.test.ts`) the import runs at roughly 20,000 messages per second on a development machine with a heap growth of a few tens of MiB.
+Memory: the import keeps one map entry per distinct conversation id (O(number of conversations); elements without an id, such as `{}` or `null` entries, cost only a counter) and holds ONE conversation element at a time.
+**Speed:** the figures to use, and whether the import meets its throughput budget (NFR-05), are in `docs/PERFORMANCE.md`: they are measured on the built CLI (`gcr import` as a child process) over a synthetic export with the same number of messages but far more text per message (longer, varied), and that page records, with the budget, whether it was met (at the time of writing it was **not** met). Do not quote a rate from this guide.
+`test/ingest/import-runner.scale.test.ts` is a different and much easier workload, and its output is not a throughput claim: it calls the import runner in-process, on an in-memory repository, with 50,000 short, repetitive messages in 500 conversations (about 17 MB of JSON), and asserts bounds on memory growth. The rate it prints is markedly higher than the CLI rate on the export in `docs/PERFORMANCE.md` and says nothing about a real export.
 A **single** huge conversation is the expensive case: its JSON text, the normalized record and SQLite statements coexist (about 10x the JSON size was measured for one 22 MB conversation),
 so on a small machine lower `maxElementBytes` rather than leaving the 256 MiB default.
 
@@ -233,7 +238,7 @@ Every failure is a `GcrError` with a stable `code`, usually a `details.reason`, 
 | | `DUPLICATE_CONVERSATION`, `ELEMENT`-level details (`file`, `elementIndex`), `NOT_A_CONVERSATION`, `FILE_PARSE_FAILED` (only with `--strict`) | Strict abort | Re-run without `--strict` or fix the export |
 | `INVALID_ARGUMENT` | `accountLabel`, `LIMIT_NOT_POSITIVE_FINITE`, `UNKNOWN_LIMIT`, `clock` | A bad option | Fix the option (account label: 1-64 of letters, digits, `_ . @ -`, space; first character a letter or digit) |
 | `INVALID_URL`, `INVALID_UUID` | `sourceUri`, `conversationId` | Mode B identifiers are not exact | Use `https://chatgpt.com/c/<uuid>` and a UUID |
-| `NOT_IMPLEMENTED` | | `openai_api` is not an import provider | Mode D is a separate, disabled feature |
+| `INVALID_ARGUMENT` (CLI) / `NOT_IMPLEMENTED` (SDK) | `--provider` | `gcr import --provider openai_api` is rejected by the command line before anything is read (`Option --provider must be one of: chatgpt, claude.`, exit 2; no database file is created; tried on 2026-10-12). Only a program that calls the SDK method `importExport` with `provider: 'openai_api'` gets `NOT_IMPLEMENTED`; the CLI never exits with 7 for an import | Use `chatgpt` or `claude`, or leave `--provider` out. Mode D (the OpenAI developer API) is a separate, disabled feature |
 | `WRITE_FORBIDDEN`, `DB_ERROR`, `DB_SCHEMA_TOO_NEW` | | The database is read-only, locked or newer than this tool | Use a writable database / a newer GCR |
 | `INTERNAL_ERROR` | | An unexpected failure (a bug) | Re-run with `GCR_DEBUG=1` for a stack trace on stderr and report it **without** private data |
 

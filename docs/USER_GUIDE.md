@@ -8,7 +8,7 @@ offline with GCR. Other documents go deeper: [CLI_REFERENCE.md](CLI_REFERENCE.md
 
 * **Evidence.** Every command and output shape below was run on 2026-10-11 with Node 22.22.0 on Linux, against **synthetic** data only
   (the committed `fixtures/chatgpt/` files). Output is abridged (`...`) and mostly shown with `--format compact`; the default format is Markdown.
-  The parts added on 2026-10-12 after the security and spec-conformance fix wave (the warnings of `get` and `thread`, attachment search and symbol-only queries, `audit` with `null` branch provenance, `graph query` of compound terms, the database-path refusals and the ownership warning, the contributor scanner notes) were checked on that day with the built CLI by the engineers who changed the code; the database-path refusals, the ownership warning and the search and audit behaviours were also re-run by hand for this edit. Test counts and timings are not quoted in this guide: `docs/ACCEPTANCE.md` holds them.
+  The parts added on 2026-10-12 after the security and spec-conformance fix wave (the warnings of `get` and `thread`, attachment search and symbol-only queries, `audit` with `null` branch provenance, `graph query` of compound terms, the database-path refusals and the ownership warning, the contributor scanner notes) were checked on that day with the built CLI by the engineers who changed the code; the database-path refusals, the ownership warning and the search and audit behaviours were also re-run by hand for this edit. The documentation review of the same day then added, and checked by hand against the built CLI in scratch folders, the database-error recovery rows and the back-up note (section j), the "Delete your data" steps (section k: the listing of which files each command leaves behind, the absence of any delete command, the loss of drafts on a fresh re-import, the copy of a database with its drafts) and the Node-only way to read the audit log (section g); the export-request table (section a) and the browser statements about the graph page rest on second-hand reports and on one independent reviewer's run, and say so. Test counts and timings are not quoted in this guide: `docs/ACCEPTANCE.md` holds them.
   Commands that appear here but were not run are marked **NOT RUN**. Anything not checked is marked **NOT VERIFIED**.
 * **GCR has never been run on a real ChatGPT export.** Everything about the export format is synthetic-only evidence plus community reports.
   If your real export fails to import, see [section j](#j-troubleshooting-by-error-code) and report the error code, never the data.
@@ -42,32 +42,35 @@ This yields four conversations (`...0001` linear, `...0002` branching, `...0003`
 
 a. [Get your official export](#a-get-your-official-export) | b. [Import](#b-import) | c. [Read a conversation, branches](#c-read-a-conversation-by-link-or-uuid-and-branches) |
 d. [Search](#d-search) | e. [Stats and audit](#e-stats-and-audit) | f. [Graph](#f-graph) | g. [Drafts and annotations](#g-drafts-and-annotations) |
-h. [Manual copy import](#h-manual-copy-import-mode-b) | i. [MCP](#i-mcp-server) | j. [Troubleshooting](#j-troubleshooting-by-error-code) | k. [Privacy checklist](#k-privacy-checklist-before-sharing-anything)
+h. [Manual copy import](#h-manual-copy-import-mode-b) | i. [MCP](#i-mcp-server) | j. [Troubleshooting](#j-troubleshooting-by-error-code) | k. [Privacy checklist](#k-privacy-checklist-before-sharing-anything) (with [Delete your data](#delete-your-data))
 
 ---
 
 ## a. Get your official export
 
-### What is OFFICIAL (could not be re-verified from the sandbox)
+### How to request it (reported, UNVERIFIED: check the Help Center article for the current rules)
 
-OpenAI's Help Center article "How do I export my ChatGPT history and data" (article 7260999,
-`help.openai.com/en/articles/7260999-how-do-i-export-my-chatgpt-history-and-data`) is the only OFFICIAL source. **The sandbox that produced this
-guide could not open any `*.openai.com` page**, so what follows reaches GCR second-hand (a search-engine summary of the article, corroborated by one other
-repository's research note). **Check the live article before you rely on any detail.**
+OpenAI's own Help Center article on exporting your ChatGPT history and data is the place that states the current rules
+(`help.openai.com`, article 7260999; the address was returned by a search tool and never fetched, see
+[research/platform-policy.md](research/platform-policy.md) section 11). **The sandbox that produced this guide could not open any
+`*.openai.com` page**, so nothing in the table below was read from OpenAI. It is a paraphrase of what a search-engine summary reported about that
+article, corroborated by one other repository's research note: **reported, UNVERIFIED**. It is not a quotation and it is not labelled
+OFFICIAL, because GCR cannot vouch for it (the same items are listed as unverified topics in
+[SECURITY_AND_BOUNDARIES.md](SECURITY_AND_BOUNDARIES.md) section 6, item 7). **Open the live article and follow it, not this table.**
 
-| Statement (as reported) | Status |
-|---|---|
-| Two routes: ChatGPT **Settings > Data controls > Export data > Export** (confirm on the next screen), or the **Privacy Portal** (Make a Privacy Request > consumer ChatGPT account > Download my data) | OFFICIAL, could not be re-verified |
-| You are told by email or SMS when the export is ready. Delivery can take up to **7 days**; the download link **expires 24 hours after you receive it** | OFFICIAL, could not be re-verified |
-| The Settings route is offered for Free, Plus, Pro and eligible ChatGPT Edu workspaces; **not** for Business or Enterprise workspaces (ask the workspace owner) | OFFICIAL, could not be re-verified |
-| The download is a ZIP with "your chat history and other relevant account data" | OFFICIAL, could not be re-verified |
-| An export cannot restore chats that were already deleted | OFFICIAL, could not be re-verified |
+| Topic | What was reported (paraphrase) | Status |
+|---|---|---|
+| Where to ask | Two routes: inside ChatGPT (Settings, then Data controls, then Export data, then confirm), or through OpenAI's Privacy Portal (a privacy request for a consumer ChatGPT account, choosing to download your data) | reported, UNVERIFIED |
+| Delivery time and link expiry | You are notified by email or SMS when the export is ready. Delivery was reported to take up to about 7 days, and the download link to stop working about 24 hours after you receive it | reported, UNVERIFIED; the figures may be out of date |
+| Who can use the Settings route | Reported for individual plans (Free, Plus, Pro) and for ChatGPT Edu workspaces where the administrator allows it; reported as not available to Business or Enterprise workspace members, who are pointed to their workspace owner | reported, UNVERIFIED; plan names and rules change |
+| What the archive contains | A ZIP with your chat history and other account data. Which files, and which JSON fields, is not described in anything GCR could read | reported, UNVERIFIED |
+| Deleted chats | Reported to be unrecoverable through an export | reported, UNVERIFIED |
 
-OpenAI publishes **no list of the files or JSON fields** inside the ZIP.
+OpenAI publishes **no list of the files or JSON fields** inside the ZIP (as far as GCR could determine; also NOT VERIFIED).
 
 ### What is only community-observed
 
-Third-party tools report the following; none of it is confirmed by OpenAI, and the format changes without notice:
+Third-party tools report the following; none of it is confirmed by OpenAI or verified by GCR, and the format changes without notice:
 
 * A `conversations.json` (one JSON array), or, for larger histories, shards `conversations-000.json`, `conversations-001.json`, ... possibly with an `export_manifest.json`.
 * Other files such as `chat.html`, `user.json` (this holds personal data such as your e-mail address), feedback and shared-link files, and assets named `<id>.dat`.
@@ -80,7 +83,7 @@ Third-party tools report the following; none of it is confirmed by OpenAI, and t
 * **Outside Git**, and outside any folder that is synced, shared or backed up to a place you do not control. This repository's `.gitignore` already excludes `*.zip`, `*.sqlite`, `.gcr/` and `/conversations*.json`, but the safest place is a folder that is not in a repository at all.
 * On an **encrypted disk** (FileVault, BitLocker, LUKS). GCR has no encryption at rest of its own; the database is as private as the disk it sits on. GCR does not test or verify disk encryption.
 * The ZIP and the GCR database both contain your full conversations. GCR never reads `user.json` or the other account files (it only counts them by name), but they are still in the ZIP. Do not forward the ZIP.
-* The download link expires; GCR never downloads for you.
+* The download link is reported to expire soon after delivery (table above), so save the ZIP when you get it; GCR never downloads for you.
 
 ---
 
@@ -447,9 +450,9 @@ error[INVALID_ARGUMENT]: The export file "graph.html" already exists; it was not
 ```
 
 Options: `--term <word>` (neighbourhood instead of the most connected nodes), `--depth`, `--max-nodes`, `--kinds`, `--title`, `--force`. A symbolic link is never written through; the file is created `0600` because it contains **labels from your conversations**.
-Open it in a browser as a local file (opening it in a browser was **NOT tested** here). Nothing is loaded from the network: the file declares a strict Content-Security-Policy, and a search of the generated file found no external URL.
+Open it in a browser as a local file. **How much this was tested:** the project's own tests execute the page's program in a fake DOM (`node:vm`), and an independent security reviewer opened an export of hostile synthetic conversations once in a real headless Chromium 141 on 2026-10-11: all 31 buttons of that page were clicked, 24 SVG nodes were activated by click and by Enter, a script string was typed into the search box and hostile `#` fragments were loaded; the page title stayed the same, no dialog opened, there were no console or page errors and no request other than to file and data URLs. That run is not part of the test suite and is not repeated in CI (the record is in `docs/ACCEPTANCE.md`, section "Independent reviews"); other browsers and screen readers were never tried. Nothing is loaded from the network: the file declares a strict Content-Security-Policy, and a search of the generated file found no external URL.
 
-**Keyboard use (read from the generated page; NOT VERIFIED in a browser or with a screen reader):** the page starts with a "Skip to the node table" link and has a text filter ("Search labels and ids"), a kind selector and a "Clear filters" button; the node table has sort buttons in its column headers
+**Keyboard use (read from the generated page; in a real browser only click and Enter on the SVG nodes were exercised; NOT VERIFIED with a screen reader, in other browsers, or for Tab order, Space and the skip link):** the page starts with a "Skip to the node table" link and has a text filter ("Search labels and ids"), a kind selector and a "Clear filters" button; the node table has sort buttons in its column headers
 and a button per row and per neighbour that selects a node, and a "Show more nodes" button; the selected node's details appear in a panel; the SVG overview is a supplement whose nodes are focusable buttons (Enter or Space selects). Everything in the diagram is also in the table.
 
 ---
@@ -485,7 +488,7 @@ exit=6
 ```
 
 (`getAnnotation` in that remedy is the SDK method name; on the command line use `gcr annotate show <id>`.) An update replaces the text; only the previous text's hash is kept in the audit log.
-Namespaces (`--namespace`) keep drafts or notes of different purposes apart. Every write adds an append-only audit row with ids, lengths and hashes, never text.
+Namespaces (`--namespace`) keep drafts or notes of different purposes apart. Every write adds an append-only audit row with ids, lengths and hashes, never text. No `gcr` command shows that log (and nothing verifies it for you); [SECURITY_AND_BOUNDARIES.md](SECURITY_AND_BOUNDARIES.md#9-residual-risks-and-known-limitations) section 9 gives a short Node-only way to read it.
 
 ---
 
@@ -618,6 +621,11 @@ Errors print as `error[CODE]: message` plus `remedy:` on stderr (one JSON docume
 | `DB_SCHEMA_TOO_NEW` | 5 | The file was written by a newer GCR (checked on a copy with `PRAGMA user_version = 99`) | "Upgrade GCR, or use a different database file. The file was not modified." (the SHA-256 of the database file was unchanged after `list` and `import` were refused; a zero-byte `-wal` file and a 32 KiB `-shm` file appeared next to it, because SQLite creates them when it opens a WAL-mode file) | yes |
 | `DB_MIGRATION_FAILED` | 5 | A schema migration failed and was rolled back | "The database was left at its previous version. Report the issue (without attaching private data)." | no (source text) |
 | `DB_ERROR` | 5 | SQLite problem; on old Node, `details.reason = "FTS5_UNAVAILABLE"` (see below). Database-path refusals: `SYMLINK_DB_PATH` (a command that writes was given a `--db` symbolic link that is dangling or leads to an empty file: GCR never creates or initialises a database through a link; a read command answers `DB_NOT_FOUND` for a dangling link), `STRAY_SIDECAR_FILES` (a new database would be created beside an existing `-wal`, `-shm` or `-journal`), `not_a_regular_file` (a FIFO, device or socket), `not_gcr_database` (a SQLite file of another application; read commands say this instead of "not initialized") | e.g. the Node upgrade remedy; for `SYMLINK_DB_PATH` "Pass the real path of the database file instead of the link."; for `STRAY_SIDECAR_FILES` "Move or delete them yourself ..., or choose another --db path."; for `not_gcr_database` "Choose a different --db path." | yes (FTS5; the four path reasons were reproduced on 2026-10-12 with the built CLI) |
+| `DB_ERROR` + `details.reason` `corrupt` | 5 | "The database file is damaged (malformed database image)." Reproduced with a copy of a database cut to its first 50,000 bytes | "Restore the database from a backup or re-import your export into a new file." **Read [Back up the database first](#back-up-the-database-first) before the second half of that advice:** a new file has none of your drafts and notes. Copy the damaged file (and its `-wal`/`-shm`) aside first and do not delete it; a refused `list` or `import` left the file itself byte-identical (a read may add empty `-wal`/`-shm` files beside it) | yes (2026-10-12) |
+| `DB_ERROR` + `not_a_database` | 5 | "The file is not a SQLite database (or is encrypted)." Reproduced with random bytes, with text, and with a real database whose first 16 bytes were overwritten | "Choose a different --db path." Check that you named the right file; if it is a database of yours that was damaged, restore a backup (a refused `list` or `import` left the file byte-identical) | yes (2026-10-12) |
+| `DB_ERROR` + `busy` | 5 | "The database is busy (locked by another process)." A command that writes (`import`, `graph build`, `draft`, `annotate`) waited about 5 seconds for another process that held a write transaction. Reads kept working in the test | "Close other programs using the database file, then retry." The holder in the test was a small Node program with an open write transaction; in practice another `gcr` command that is writing at that moment would do the same | yes (2026-10-12) |
+| `DB_ERROR` + `needs_migration` | 5 | "The database has not been initialized." A read command on an empty (0-byte) file (for example one created with `touch`), or on a SQLite file that holds no tables at all; a SQLite file with the tables of another application is `not_gcr_database` instead | "Open the database once in read-write mode (for example by running an import) to initialize or migrate it." `gcr import <export.zip> --db <that file>` initialised a 0-byte file (tried). If the file was supposed to hold your data, it does not: look for a backup | yes (2026-10-12) |
+| `DB_ERROR` + `is_directory` | 5 | "The database path is a directory." `--db` named a folder, for example `./.gcr` instead of `./.gcr/gcr.sqlite` | Name a file: `--db ./.gcr/gcr.sqlite`. (The printed remedy also suggests `gcr doctor --db <path>`.) Reads and imports both refuse it and create nothing | yes (2026-10-12) |
 | `FTS_SYNTAX_ERROR` | 2 | Invalid `--raw` search syntax | see section d | yes |
 | `WRITE_FORBIDDEN` | 6 | Write attempted on a read-only database or a read-only MCP server | "The operator can restart the server with --allow-local-writes ..." | yes (MCP) |
 | `DRAFT_NOT_FOUND` | 3 | No draft with that id | "List drafts to find the id." | yes |
@@ -627,6 +635,15 @@ Errors print as `error[CODE]: message` plus `remedy:` on stderr (one JSON docume
 | `FEATURE_GATED` | 7 | Defined for browser-interaction features | **No code path in `src/` emits it** (searched); there is nothing to unlock | no |
 | `REMOTE_ACCESS_FORBIDDEN` | 7 | Defined for anything that would touch a ChatGPT endpoint | **No code path in `src/` emits it**; no such feature exists | no |
 | `INTERNAL_ERROR` | 1 | A bug; the raw message is withheld because it can hold paths or text | "Re-run with GCR_DEBUG=1 to print the stack trace to stderr, then report the issue without attaching private data." | no (source text) |
+
+### Back up the database first
+
+Your **drafts and annotations exist only in the database file** (section g). Your export ZIP can recreate the imported conversations (import again) and the graph (`gcr graph build`), but never your own drafts and notes. So, before an experiment, before upgrading, before a risky repair and before you import into a fresh file:
+
+* Copy the database while no `gcr` process is running, together with its `-wal` and `-shm` files if they exist: `cp gcr.sqlite gcr.sqlite.bak` (a copy of just the `.sqlite` file was enough after a write command, which leaves no side files; with side files present, copy them as well, because recent changes may sit in the `-wal`). Checked: the backup copy listed the same draft as the original.
+* Try risky things on a copy: `--db ./scratch.sqlite` costs nothing and never touches the original.
+* Keep the backup as private as the database: it holds your full conversations (section k).
+* A fresh re-import (`gcr import ... --db ./new.sqlite`) starts with no drafts and no notes (checked). To carry them over, print them before (`gcr draft show <id>`, `gcr annotate show <id> --format json`) and re-create them afterwards, or keep working in the old file.
 
 ### FTS5_UNAVAILABLE on old Node
 
@@ -668,10 +685,28 @@ Your export and your GCR database contain your full conversations. GCR has no en
 - [ ] **Version control:** nothing from the list above is staged or committed (`git status`). Run `npm run build && node scripts/privacy-scan.mjs --root .`; it must say `clean`. Do not allow-list databases, archives or raw exports. Contributors: see "The privacy scanner and the opt-in git hooks" below.
 - [ ] **Remote environments** (Codespaces, cloud agents, CI) are other people's computers. Do not copy a real export into them. CI uses synthetic fixtures only.
 - [ ] **Bug reports:** include the error **code**, GCR version, Node version and command; do not attach a database, an export, a stack trace you have not read (it can hold paths) or output with message text. Use synthetic data to reproduce.
-- [ ] **Other people's data:** your conversations may contain third-party personal data. Keep the database local and delete what you no longer need (delete the database file; GCR has no `delete` command in this version).
+- [ ] **Other people's data:** your conversations may contain third-party personal data. Keep the database local and delete what you no longer need. GCR has no `delete` command in this version, so deleting means removing files: see [Delete your data](#delete-your-data) below (which files, stop `gcr mcp` first, no secure erase, no per-conversation delete, and your drafts and notes go with the database).
 - [ ] **Drafts:** a draft is stored in the database in clear text. The continuation link is for you to open; GCR never sends the draft.
 - [ ] **Disk:** the database sits unencrypted on whatever disk you choose; use full-disk encryption and sensible file permissions (GCR creates files `0600`, folders `0700`).
 - [ ] **Whose database is it?** Without `--db`, `gcr` opens `./.gcr/gcr.sqlite` of the folder you are in. A stderr warning that it is "not owned by the current user" means someone else prepared that folder: stop, or choose your own database with `--db` / `GCR_DB`.
+
+### Delete your data
+
+GCR keeps everything in plain files on your disk and sends nothing anywhere, so deleting your data means deleting those files yourself. The file list below was checked on 2026-10-12 by importing the synthetic export into a scratch folder, running a few commands and listing the folder; what happens to the freed disk blocks cannot be checked from here (see "not a secure erase").
+
+1. **Stop whatever has the database open.** Stop a running `gcr mcp`, and close the MCP client that started it or remove the server from its configuration (a client may start it again). Let a running `gcr import` finish.
+2. **Delete the database and its side files, together.** The database is the file named by `--db`, else by `$GCR_DB`, else `./.gcr/gcr.sqlite` in the folder where you ran `gcr`. Next to it SQLite keeps `<name>-wal` and `<name>-shm` (and a `<name>-journal` if one ever appears). In the check, the commands that write (`import`, `graph build`, `draft create`) left only `gcr.sqlite`, while commands that only read (`list`, `get`, `graph export`, `gcr mcp` without `--allow-local-writes`) left an empty `-wal` and a 32 KiB `-shm` beside it; an import interrupted with Ctrl-C was seen to leave a `-wal` of tens of megabytes behind (a large synthetic import stopped with SIGINT, 2026-10-12; the database held no conversations afterwards). Stray side files are also why a new database is refused beside them: [SECURITY_AND_BOUNDARIES.md](SECURITY_AND_BOUNDARIES.md) section 4.1. So whichever commands you ran last, remove all three names. For the default location that is the whole `./.gcr` folder, which held nothing else (`rm -r ./.gcr`). Do not delete only the `.sqlite` file: a new database is never created beside a leftover `-wal`, `-shm` or `-journal` (`STRAY_SIDECAR_FILES`).
+3. **Delete what GCR or you made from it.** Every graph page you exported (`gcr graph export --out graph.html` holds labels from your conversations), every file you saved command output to (`gcr get ... > thread.md`, `--format json > out.json`, screenshots), and the export itself: the ZIP you downloaded, any folder you extracted it to and any loose `conversations.json`.
+4. **Look where GCR cannot.** Backups, synchronised or cloud folders, the trash, desktop search indexes, shell history that contains paths, a Codespace or any remote machine, and any MCP client or hosted model that was shown conversation text keep what they keep ([SECURITY_AND_BOUNDARIES.md](SECURITY_AND_BOUNDARIES.md) section 4.1).
+
+What you **cannot** do, and what to know first:
+
+* **There is no per-conversation delete, snapshot delete or prune.** `gcr delete` and `gcr prune` are unknown commands (exit 2), imported rows cannot be changed or deleted by GCR, and every import of a different export adds a snapshot, so the file only grows (ADR-0005). A draft can only be archived (`gcr draft archive` keeps its text in the database) and a note can only be replaced. The one way to remove a single conversation, snapshot, draft or note is to delete the whole database and, if you want the rest back, import into a new file.
+* **Your drafts and notes are in the same database file** and are lost with it; a fresh re-import into a new file starts with none (checked). There is no export command for them, only printing. Before you delete or start over, print what you want to keep and save it somewhere private: `gcr draft list` and `gcr draft show <id>` (also with `--format json`), `gcr annotate list` and `gcr annotate show <id> --format json`.
+* **Deleting a file is not a secure erase.** The database is plain SQLite (GCR has no encryption of its own), and removing a file only frees its blocks: on a solid-state disk, on a journaling or copy-on-write file system, and in a synchronised folder, remnants and copies may remain. Use full-disk encryption and delete the copies you made.
+* **Nothing here touches your ChatGPT account** or anything OpenAI stores; what OpenAI keeps is governed by its own policies, which GCR did not review.
+
+The same list from the security side: [SECURITY_AND_BOUNDARIES.md](SECURITY_AND_BOUNDARIES.md#44-retention-and-deletion) (section 4.4, "Retention and deletion").
 
 ### The privacy scanner and the opt-in git hooks (for contributors)
 

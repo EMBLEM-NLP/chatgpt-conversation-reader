@@ -63,7 +63,7 @@ export const importCommand: CommandSpec = {
     { command: 'import - --strict < conversations.json', note: 'Read conversations.json from standard input; fail instead of skipping damaged conversations.' },
     { command: 'import export.zip --max-element-bytes 67108864 --format json', note: 'Tighten the per-conversation size limit to 64 MiB and print the report as JSON.' },
   ],
-  errors: ['IMPORT_INPUT_NOT_FOUND', 'IMPORT_UNSUPPORTED_FORMAT', 'IMPORT_ZIP_UNSAFE', 'IMPORT_LIMIT_EXCEEDED', 'IMPORT_PARSE_ERROR', 'NOT_IMPLEMENTED', ...WRITE_ERRORS],
+  errors: ['IMPORT_INPUT_NOT_FOUND', 'IMPORT_UNSUPPORTED_FORMAT', 'IMPORT_ZIP_UNSAFE', 'IMPORT_LIMIT_EXCEEDED', 'IMPORT_PARSE_ERROR', ...WRITE_ERRORS],
   async run(ctx: CommandContext): Promise<void> {
     const a = ctx.args;
     const target = first(ctx);

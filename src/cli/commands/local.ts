@@ -132,8 +132,8 @@ export const draftShow: CommandSpec = {
   positionals: [ID_ARG('Draft')],
   options: [],
   examples: [
-    { command: 'draft show 00000000-0000-4000-8000-0000000000d1', note: 'Print the draft as Markdown.' },
-    { command: 'draft show 00000000-0000-4000-8000-0000000000d1 --format json', note: 'The same draft as JSON.' },
+    { command: 'draft show <draft-id>', note: 'Print the draft as Markdown.' },
+    { command: 'draft show <draft-id> --format json', note: 'The same draft as JSON.' },
   ],
   errors: ['DRAFT_NOT_FOUND', ...DB_READ_ERRORS],
   async run(ctx: CommandContext): Promise<void> {
@@ -155,8 +155,8 @@ export const draftArchive: CommandSpec = {
   positionals: [ID_ARG('Draft')],
   options: [],
   examples: [
-    { command: 'draft archive 00000000-0000-4000-8000-0000000000d1', note: 'Mark the draft as archived.' },
-    { command: 'draft archive 00000000-0000-4000-8000-0000000000d1 --format json', note: 'The same, printing the archived draft as JSON.' },
+    { command: 'draft archive <draft-id>', note: 'Mark the draft as archived.' },
+    { command: 'draft archive <draft-id> --format json', note: 'The same, printing the archived draft as JSON.' },
   ],
   errors: ['DRAFT_NOT_FOUND', 'DB_NOT_FOUND', 'DB_SCHEMA_TOO_NEW', 'DB_ERROR', 'WRITE_FORBIDDEN'],
   async run(ctx: CommandContext): Promise<void> {
@@ -216,8 +216,8 @@ export const annotateUpdate: CommandSpec = {
     { name: 'expected-version', kind: 'int', valueName: 'n', min: 1, max: 1_000_000_000, description: '(required) The version of the note you read last (printed by create, show and list).' },
   ],
   examples: [
-    { command: 'annotate update 00000000-0000-4000-8000-0000000000a1 --input note.txt --expected-version 1', note: 'Replace the text of version 1.' },
-    { command: 'annotate update 00000000-0000-4000-8000-0000000000a1 --input - --expected-version 2 --format json', note: 'Text from standard input, result as JSON.' },
+    { command: 'annotate update <annotation-id> --input note.txt --expected-version 1', note: 'Replace the text of version 1.' },
+    { command: 'annotate update <annotation-id> --input - --expected-version 2 --format json', note: 'Text from standard input, result as JSON.' },
   ],
   errors: ['ANNOTATION_NOT_FOUND', 'ANNOTATION_CONFLICT', 'DB_NOT_FOUND', 'DB_SCHEMA_TOO_NEW', 'DB_ERROR', 'WRITE_FORBIDDEN'],
   async run(ctx: CommandContext): Promise<void> {
@@ -273,8 +273,8 @@ export const annotateShow: CommandSpec = {
   positionals: [ID_ARG('Annotation')],
   options: [],
   examples: [
-    { command: 'annotate show 00000000-0000-4000-8000-0000000000a1', note: 'Print the note\'s metadata as Markdown.' },
-    { command: 'annotate show 00000000-0000-4000-8000-0000000000a1 --format json', note: 'The note including its text, as JSON.' },
+    { command: 'annotate show <annotation-id>', note: 'Print the note\'s metadata as Markdown.' },
+    { command: 'annotate show <annotation-id> --format json', note: 'The note including its text, as JSON.' },
   ],
   errors: ['ANNOTATION_NOT_FOUND', ...DB_READ_ERRORS],
   async run(ctx: CommandContext): Promise<void> {

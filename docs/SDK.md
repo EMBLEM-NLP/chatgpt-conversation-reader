@@ -16,7 +16,7 @@ All identifiers below (`00000000-0000-4000-8000-000000000001`) are synthetic.
 
 ## Contents
 
-1. [Quick start](#quick-start)
+1. [Quick start](#quick-start) (and [Using the SDK from your own project](#using-the-sdk-from-your-own-project), including the ExperimentalWarning)
 2. [Opening a database](#opening-a-database)
 3. [Method reference](#method-reference)
 4. [The envelope contract](#the-envelope-contract)
@@ -52,6 +52,39 @@ try {
 }
 ```
 
+## Using the SDK from your own project
+
+`@emblem-nlp/chatgpt-conversation-reader` is a **private, unpublished** package (`"private": true`, no registry entry), so `npm install @emblem-nlp/chatgpt-conversation-reader` finds nothing, and the quick start above fails outside this repository with `ERR_MODULE_NOT_FOUND: Cannot find package '@emblem-nlp/chatgpt-conversation-reader'` (reproduced in an empty folder). The package root points at the build output (`dist/index.js`, `dist/index.d.ts`), so build it first, then make it visible to your project from a local directory:
+
+```bash
+cd /absolute/path/to/chatgpt-conversation-reader && npm ci && npm run build   # once; creates dist/
+cd /path/to/your-project
+npm install /absolute/path/to/chatgpt-conversation-reader                     # a directory install: npm links the folder
+# or: (cd /absolute/path/to/chatgpt-conversation-reader && npm link) && npm link @emblem-nlp/chatgpt-conversation-reader
+```
+
+The package is an ES module with no separate CommonJS entry: `import { Gcr } from '@emblem-nlp/chatgpt-conversation-reader'` works from `.mjs` files and from a project with `"type": "module"`, with types from `dist/index.d.ts`; a CommonJS file can use dynamic `import()`, and `require()` of it also worked on Node v22.22.0 (tried; `require()` returned an object with the 20 runtime exports listed under "Public surface and stability"). Node must satisfy the `engines` range above.
+
+What was verified, and what was not (2026-10-12, Node v22.22.0, Linux, no network): in a scratch project with its own `package.json`, the link that a directory install creates was made by hand (`node_modules/@emblem-nlp/chatgpt-conversation-reader` as a symbolic link to the built repository), and the quick start above then ran unchanged against a synthetic export (4 conversations stored, `get` printed the thread). **`npm install <directory>` and `npm link` themselves were not run**, because installing packages was not permitted for this document; they are the documented npm way to create that same link (a link means the repository's own `node_modules` supplies `zod` and the MCP SDK, so the repository must stay where it is and keep its `node_modules`). If you rebuild the repository, the linked copy changes with it. A packed tarball (`npm pack`, then `npm install ./the-file.tgz`) was not tried either.
+
+### The `node:sqlite` ExperimentalWarning
+
+The SDK stores everything in SQLite through Node's built-in `node:sqlite`, which Node 22 still marks experimental. **In a program that uses the SDK, Node prints this to standard error the first time the module loads:**
+
+```text
+(node:12345) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+```
+
+The `gcr` command and `gcr mcp` (`src/suppress-warnings.ts`) drop exactly that one warning; the SDK does not install that filter, and the filter is not part of the public surface. It is only a notice on stderr: stdout, return values and exit status were unaffected in the scratch project. To silence it for your program without hiding other warnings, start Node with the flag or set it for the process (both were tried and left stderr empty):
+
+```bash
+node --disable-warning=ExperimentalWarning your-program.mjs     # hides every ExperimentalWarning, not only this one
+NODE_OPTIONS=--disable-warning=ExperimentalWarning node your-program.mjs
+```
+
+`--no-warnings` and `NODE_NO_WARNINGS=1` are the blunt alternatives: they hide every warning, deprecations included (not tried here).
+
 ## Opening a database
 
 ```ts
@@ -81,7 +114,7 @@ before it checks whose file it is. The refused file stays byte-for-byte identica
 | `not_gcr_database` | a SQLite file of another application: another non-zero `application_id`, or tables with `application_id` and `user_version` 0; refused read-only and read-write alike | nothing is modified |
 | `is_directory`, `cannot_create`, `stat_failed` | the path is a directory; the exclusive create failed or found a non-regular file or a file of another user; the path could not be inspected | nothing |
 
-The check is a look, not a lock: between the `lstat` and SQLite's own open a hostile process that can write in the database's directory can still swap the name, and a regular file planted at the path of a database that does not exist yet is not detected. Keep databases in directories only you can write to. The SDK prints nothing: the stderr ownership warning for a foreign default database belongs to the CLI (`gcr`), not to `Gcr.open`.
+The check is a look, not a lock: between the `lstat` and SQLite's own open a hostile process that can write in the database's directory can still swap the name, and a regular file planted at the path of a database that does not exist yet is not detected. Keep databases in directories only you can write to. The SDK prints nothing itself: the stderr ownership warning for a foreign default database belongs to the CLI (`gcr`), not to `Gcr.open`. (Node prints its own `node:sqlite` ExperimentalWarning when the module loads: [see above](#the-nodesqlite-experimentalwarning).)
 
 Handle properties: `isOpen`, `readOnly`, `dbLabel` (basename only), `actor`. `close()` is idempotent.
 

@@ -1,9 +1,9 @@
 ---
 title: GCR Platform-Policy Research (OpenAI ToU, export, API, Compliance API)
 description: Phase 0 read-only research feeding GCR docs/SECURITY_AND_BOUNDARIES.md; documents what could and could not be verified about OpenAI platform policy
-version: 1.0.0
+version: 1.1.0
 created: 2026-10-10T22:36:49Z
-last_updated: 2026-10-10T22:36:49Z
+last_updated: 2026-10-12T13:31:32Z
 ---
 
 # GCR platform-policy research (INCOMPLETE: primary sources could not be fetched)
@@ -13,8 +13,9 @@ Date accessed: 2026-10-10. Researcher: read-only subagent. NOT LEGAL ADVICE.
 ## 0. Read this first: status banner
 
 **No OpenAI primary page was fetched.** Every OpenAI host was unreachable from this sandbox, so
-there are **zero verified verbatim quotes** from the current OpenAI Terms of Use, Usage Policies,
-Services Agreement, help-center articles or API docs in this file.
+nothing in this file is verified OpenAI text: there is **no verified quotation** from the current OpenAI
+Terms of Use, Usage Policies, Services Agreement, help-center articles or API docs, and (see below) no
+unverified quotation either.
 
 What this file does contain:
 
@@ -24,10 +25,15 @@ What this file does contain:
 3. CCR facts with file:line citations, verified by reading the local CCR checkout (section 7).
 4. Implications, an operator checklist, and a list of unverified items (sections 8 to 10).
 
-Per the task rules I did not reconstruct policy text from memory. Where a candidate string appears
-below in quotation marks, it is **a string that the search tool returned**, not something I confirmed
-on the live page. Before any of it is cited in `docs/SECURITY_AND_BOUNDARIES.md`, a human or a
-network-enabled agent must open the live URL and paste the clause verbatim (section 11 lists the URLs).
+**This file reproduces no OpenAI sentence or clause.** (It does name help-center article titles and button labels as the search tool reported them, in quotation marks, only so that a human can find the page: they are labels, not policy text, and are as unverified as everything else here.) Per the task rules I did not reconstruct policy text from
+memory, and since the review of 2026-10-12 I no longer reproduce the sentences that the search tool returned
+either: an earlier version of this file quoted candidate Terms of Use phrases, help-center sentences and a
+privacy-policy sentence, labelled "not verified". They are removed, because text that could not be checked
+against the live page should not sit in a repository between quotation marks. Each topic below is described
+in the researcher's own words as **reported by a search tool, UNVERIFIED**, together with the URL where the
+text has to be read. Before any of it is cited in `docs/SECURITY_AND_BOUNDARIES.md`, a human or a
+network-enabled agent must open the live URL and record the clause verbatim, with its section number and
+the date read, outside this repository (section 11 lists the URLs).
 
 ## 1. Access log (what was tried)
 
@@ -60,36 +66,37 @@ in-product documentation tool).
 
 | Item | Search-tool report | Status |
 |---|---|---|
-| Canonical consumer terms URL | `https://openai.com/policies/row-terms-of-use/` ("Terms of Use"); `https://openai.com/policies/terms-of-use/` also returned by search | URL listed by search, not fetched |
-| Regional variants | `https://openai.com/en-GB/policies/eu-terms-of-use/` ("Europe Terms of Use", reported "Updated: 16 January 2026"); older `https://openai.com/policies/dec-2024-eu-terms/` | UNVERIFIED. The operator's jurisdiction decides which document binds them. |
-| ROW Terms date | One search summary says "Effective: January 1, 2026" and another says the page shows "(Previous version)" next to that date, which "suggests a newer version exists". | **UNRESOLVED. Current effective date of the consumer terms as of 2026-10-10 is unverified.** |
-| Business / API terms | `https://openai.com/policies/services-agreement/` and `https://cdn.openai.com/osa/openai-services-agreement.pdf` (file label "v.010126"), reported "Effective: January 1, 2026" | UNVERIFIED |
-| Usage Policies | `https://openai.com/policies/usage-policies/`, reported "Effective: October 29, 2025" | UNVERIFIED; may have changed since |
+| Canonical consumer terms URL | `https://openai.com/policies/row-terms-of-use/` (the rest-of-world Terms of Use); `https://openai.com/policies/terms-of-use/` also returned by search | URL listed by search, not fetched |
+| Regional variants | `https://openai.com/en-GB/policies/eu-terms-of-use/` (the European Terms of Use, reported as updated on 16 January 2026); older `https://openai.com/policies/dec-2024-eu-terms/` | UNVERIFIED. The operator's jurisdiction decides which document binds them. |
+| ROW Terms date | One search summary reported an effective date of 1 January 2026 and another reported that the page marks that version as a previous one, which would suggest that a newer version exists. | **UNRESOLVED. Current effective date of the consumer terms as of 2026-10-10 is unverified.** |
+| Business / API terms | `https://openai.com/policies/services-agreement/` and `https://cdn.openai.com/osa/openai-services-agreement.pdf` (file label v.010126), reported as effective 1 January 2026 | UNVERIFIED |
+| Usage Policies | `https://openai.com/policies/usage-policies/`, reported as effective 29 October 2025 | UNVERIFIED; may have changed since |
 | Service terms | `https://openai.com/policies/service-terms/` | Listed only; contents not reported |
-| Change notice | ROW terms reportedly give "at least 30 days" advance notice of material changes by email or in-product notice | UNVERIFIED; implies the terms can change under GCR between releases |
+| Change notice | The ROW terms are reported to promise advance notice of material changes (reported as at least 30 days) by email or in-product notice | UNVERIFIED; implies the terms can change under GCR between releases |
 | Terms update log | `https://help.openai.com/en/articles/8541941-terms-of-use-updates` | Listed only |
 
-### 2.2 Candidate clause strings returned by the search tool
+### 2.2 Topics the search tool reported for the Terms of Use (no wording reproduced)
 
-All rows: **verbatim status = NOT VERIFIED** (string came from search-tool output; page not fetched).
-Date accessed for the search: 2026-10-10.
+All rows: **status = NOT VERIFIED**. Each row is the researcher's paraphrase of a search-tool summary, not a
+quotation; the page was not fetched. Date accessed for the search: 2026-10-10. The "Read it here" column is
+the URL where the text has to be read and recorded verbatim by a human (section 11).
 
-| Topic | String as returned by the search tool (in quotes) | Where the search tool said it appears | Action before citing |
+| Topic | What the search tool reported (paraphrase) | Read it here | Action before citing |
 |---|---|---|---|
-| Automated or programmatic extraction | "Automatically or programmatically extract data or Output." | Listed under "What you cannot do" in the OpenAI Terms of Use, per the search summary. The same string also surfaced in secondary copies: Hacker News item `https://news.ycombinator.com/item?id=38662753` (a December 2023 copy) and a Cambridge AI-tool terms page `https://prod-drupal.cambridge.org/au/legal/ai-tool-terms-of-use`. One search summary said the current ROW terms (Effective January 1, 2026) "list" it, and that the EU version "repeats" it. | Paste from live `https://openai.com/policies/row-terms-of-use/` and the EU page. Record section number. Check whether "Output" is defined to include conversation transcripts. |
-| Competing models | "Use Output to develop models that compete with OpenAI" | Same list, per the HN December 2023 copy | Verify in current text. Relevant if GCR analytics or embeddings are ever used for training. |
-| Human-generated misrepresentation | "Represent that Output was human-generated when it was not" | Same HN copy | Verify. Relevant to the draft/send feature. |
-| Interfering with the Services, rate limits | No quote returned. The search summary says the terms bar "circumventing rate limits" and bypassing "protective measures and safety mitigations" under a "interfering with or disrupting the Services" item. | Consumer terms (ROW and EU "nearly identical", per summary) | Obtain verbatim text and section number. |
-| Credential or account sharing | No quote returned. The summary says users may not share account credentials or make their account available to others, and are responsible for activity under their account. | Consumer terms | Obtain verbatim text. |
-| Business customers, credentials and limits | No quote returned. The summary says the Services Agreement bars sharing login credentials across multiple users, circumventing rate limits and protective measures, and configuring the Services to avoid "Usage Limits". | `openai.com/policies/services-agreement/` | Obtain verbatim text. Applies only if the operator is a business, API or workspace customer. |
-| API keys | No quote returned. The summary says OpenAI's key-safety article states sharing API keys violates the Terms and is unsupported. | `https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety` | Verify. |
-| Suspension | No quote returned. The summary says OpenAI may suspend or terminate access or delete an account on a determined violation, with an appeal route through Support. | Consumer terms | Verify. |
-| Reverse engineering | "Attempt to or assist anyone to reverse engineer, decompile or discover the source code or underlying components of our Services" | Consumer terms, per search summary (subject to "applicable law") | Verify. Relevant to any "inspect private APIs" step, which the Codex task already forbids. |
-| ChatGPT agent policy page | No quote. The summary says `https://openai.com/policies/using-chatgpt-agent-in-line-with-our-policies/` repeats that users may not bypass rate limits, restrictions or safety measures, and that it also applies to the standalone Operator product. | The page is described as "about 450 days old" | Verify and date it. |
+| Automated or programmatic extraction | The consumer terms are reported to list, among the things a user may not do, extracting data or output automatically or programmatically. One summary said the current rest-of-world terms (effective 1 January 2026, per that summary) carry it and that the EU version repeats it. Older copies of the terms on third-party sites were reported to carry a similar item; those are not authoritative and are not listed here. | `https://openai.com/policies/row-terms-of-use/` and `https://openai.com/en-GB/policies/eu-terms-of-use/` | Record the section number and the exact wording. Check whether the terms define "output" so that it includes conversation transcripts. |
+| Competing models | Reported (from an older third-party copy of the terms): a restriction on using output to develop models that compete with the provider. | the same two pages | Verify in the current text. Relevant if GCR analytics or embeddings are ever used for training. |
+| Human-generated misrepresentation | Reported (from the same older copy): a restriction on presenting output as human-generated when it was not. | the same two pages | Verify. Relevant to the draft/send feature. |
+| Interfering with the Services, rate limits | The search summary said the terms bar circumventing rate limits and bypassing protective measures and safety mitigations, under an item about interfering with or disrupting the Services. The rest-of-world and EU texts were described as nearly identical. | the same two pages | Obtain the verbatim text and section number. |
+| Credential or account sharing | The summary said users may not share account credentials or make their account available to others, and are responsible for activity under their account. | consumer terms (the same two pages) | Obtain the verbatim text. |
+| Business customers, credentials and limits | The summary said the Services Agreement bars sharing login credentials across multiple users, circumventing rate limits and protective measures, and configuring the Services to avoid usage limits. | `https://openai.com/policies/services-agreement/` | Obtain the verbatim text. Applies only if the operator is a business, API or workspace customer. |
+| API keys | The summary said OpenAI's key-safety help article states that sharing API keys violates the terms and is unsupported. | `https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety` | Verify. |
+| Suspension | The summary said OpenAI may suspend or terminate access, or delete an account, on a determined violation, with an appeal route through Support. | consumer terms (the same two pages) | Verify. |
+| Reverse engineering | The consumer terms were reported to bar attempting, or helping anyone, to reverse engineer or decompile the services or to discover their source code or underlying components, subject to applicable law. | the same two pages | Verify. Relevant to any "inspect private APIs" step, which the Codex task already forbids. |
+| ChatGPT agent policy page | The summary said `https://openai.com/policies/using-chatgpt-agent-in-line-with-our-policies/` repeats that users may not bypass rate limits, restrictions or safety measures, and that it also applies to the standalone Operator product. The page was described as roughly 450 days old. | that URL | Verify and date it. |
 
-Note on a search-summary inference I did not adopt: one summary ended with "The current Terms of Use
-answer that question no, and the API is the sanctioned route for programmatic access." That is the
-search tool's interpretation, was not tied to a quoted clause, and was not confirmed, so it is not used here.
+Note on a search-summary inference I did not adopt: one summary ended by interpreting the terms as forbidding
+the activity that had been asked about and by calling the API the sanctioned route for programmatic access.
+That is the search tool's interpretation, was not tied to a clause, and was not confirmed, so it is not used here.
 
 ## 3. Data export and portability routes (UNVERIFIED-SECONDARY)
 
@@ -107,10 +114,10 @@ Reported content (paraphrase of search summaries):
 |---|---|---|
 | In-app route | Profile menu, Settings, Data controls, Export, then confirm | UNVERIFIED |
 | Privacy Portal route | Privacy Portal, "Make a Privacy Request", consumer ChatGPT account, then the download-my-data option | UNVERIFIED |
-| Delivery | Email or SMS when ready. Reported "up to 7 days". Download link expires 24 hours after receipt. Download while signed in to the same account. | UNVERIFIED |
+| Delivery | Email or SMS when ready. Reported as taking up to 7 days. Download link reported to expire 24 hours after receipt. Download while signed in to the same account. | UNVERIFIED |
 | Contents | ZIP with chat history and other account data. Deleted chats cannot be restored through an export. | UNVERIFIED. The summaries did not name `conversations.json` or `chat.html`; see `chatgpt-export-format.md` in this directory for the format work. |
-| Who can self-serve | Free, Go, Plus and Pro signed-in users. Search string: "Self-service export is not available in these workspaces." for Business, Enterprise and ChatGPT for Healthcare. Edu depends on admin settings (export "off by default"). | UNVERIFIED |
-| Workspace users | Search string: "Contact your workspace owner about organization-managed data access." | UNVERIFIED |
+| Who can self-serve | Free, Go, Plus and Pro signed-in users. Business, Enterprise and ChatGPT for Healthcare workspaces were reported as having no self-service export (the search tool returned a sentence to that effect; not reproduced). Edu depends on admin settings (export reported as off by default). | UNVERIFIED |
+| Workspace users | Reported to be directed to their workspace owner for organization-managed data access (the search tool returned a sentence to that effect; not reproduced). | UNVERIFIED |
 | Personal-to-managed move | Export before moving; the old export link or a new export may become unavailable once the personal workspace is removed. | UNVERIFIED |
 
 Deletion and privacy-request routes (same status):
@@ -120,7 +127,7 @@ Deletion and privacy-request routes (same status):
 | Source | `https://help.openai.com/en/articles/6378407-how-to-delete-your-account` ("Deleting your ChatGPT account"); also `https://openai.com/consumer-privacy/` ("ChatGPT privacy settings") and `https://openai.com/en-GB/policies/row-privacy-policy/` |
 | In-app deletion | Settings, Account, Delete |
 | Portal deletion | For users who cannot sign in: Privacy Portal, "Make a Privacy Request", consumer ChatGPT account, "Delete my ChatGPT account", then verification via the linked email or phone |
-| Timing | Search string: "If you delete your account, we will delete your data within 30 days, except we may retain a limited set of data for longer where required or permitted by law." Deletion is permanent. |
+| Timing | Reported: after an account deletion, the data is deleted within 30 days, except that a limited set may be kept longer where the law requires or permits it (the search tool returned a privacy-policy sentence to that effect; it is not reproduced here). Deletion is reported as permanent. Check the privacy policy and the deletion article above. |
 | Managed workspaces | Self-service account deletion reported as unavailable |
 | Training opt-out | Turning off model training does not delete existing chats |
 | Privacy Portal host | `privacy.openai.com` (named by search summaries; the host itself was not probed) |
@@ -134,14 +141,14 @@ delivery delay and link expiry above treated as operator-facing documentation, n
 
 | Item | Reported | Status |
 |---|---|---|
-| Conversations API object | `POST /conversations` creates a durable object with `id`, `created_at`, `metadata`, `object: "conversation"`. Search string: "The Conversations API works with the Responses API to persist conversation state as a long-running object with its own durable identifier." | Source: `https://developers.openai.com/api/docs/guides/conversation-state`, `https://developers.openai.com/api/reference/resources/conversations/methods/create`. UNVERIFIED |
+| Conversations API object | `POST /conversations` creates a durable object with `id`, `created_at`, `metadata`, `object: "conversation"`. It is reported to work with the Responses API to hold conversation state in a long-running object with its own durable identifier (the search tool returned a sentence to that effect; not reproduced) | Source: `https://developers.openai.com/api/docs/guides/conversation-state`, `https://developers.openai.com/api/reference/resources/conversations/methods/create`. UNVERIFIED |
 | Items | Messages, tool calls, tool outputs and other data | UNVERIFIED |
-| Retention | Search string: "Conversation objects and their items are not subject to the 30 day TTL." | UNVERIFIED |
+| Retention | Reported: conversation objects and their items are not subject to a 30-day time-to-live (a retention statement from the API documentation; not reproduced verbatim) | UNVERIFIED |
 | Alternative | `previous_response_id` lets OpenAI manage prior context | UNVERIFIED |
-| Listing | A developer-forum post (community, not official) complains there is no "list conversations" method and that item response IDs are not exposed | Community report only; may be outdated |
+| Listing | A developer-forum post (community, not official) complains that there is no method to list conversations and that item response IDs are not exposed | Community report only; may be outdated |
 | Assistants API | `https://developers.openai.com/api/docs/deprecations` reportedly lists the Assistants API for removal on **August 26, 2026**, replaced by Responses plus Conversations. Today is 2026-10-10, so that date has passed. | UNVERIFIED. Whether the sunset was executed as announced is unknown. |
 | ChatGPT vs API separation | Billing, membership and access are separate: ChatGPT subscription does not cover API usage (`https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform`); workspace membership and API Platform organization membership are managed separately (`https://help.openai.com/en/articles/8265053-what-is-chatgpt-enterprise`). | UNVERIFIED. These pages concern billing and membership, not conversation visibility. |
-| Search conclusion | The search tool itself said it "found nothing" explicitly on how the API relates to ChatGPT consumer conversations, and that "the API conversation object is a developer resource and is separate from ChatGPT chats". | The second clause is the search tool's wording, not a quoted OpenAI statement |
+| Search conclusion | The search tool itself said it found nothing explicit on how the API relates to ChatGPT consumer conversations, and added that the API conversation object is a developer resource separate from ChatGPT chats. | The second statement is the search tool's own wording, not an OpenAI statement |
 
 Conclusion for GCR docs (label as inference): the documented Conversations/Responses API manages
 **objects the developer's own API calls created**. No documentation found in this research says it exposes
@@ -153,14 +160,14 @@ against the live API reference before the doc states it as fact.
 
 | Item | Reported | Source URL (as returned) |
 |---|---|---|
-| Naming | Help article titled "OpenAI Compliance Platform for Enterprise and Edu customers" (slug `compliance-api-for-enterprise-customers`). Search summary: the Compliance API "now sits inside" the "OpenAI Compliance Logs Platform". | `https://help.openai.com/en/articles/9261474-compliance-api-for-enterprise-customers`; `https://developers.openai.com/cookbook/examples/chatgpt/compliance_api/logs_platform` |
+| Naming | Help article titled "OpenAI Compliance Platform for Enterprise and Edu customers" (slug `compliance-api-for-enterprise-customers`). Search summary: the Compliance API now sits inside a Compliance Logs Platform. | `https://help.openai.com/en/articles/9261474-compliance-api-for-enterprise-customers`; `https://developers.openai.com/cookbook/examples/chatgpt/compliance_api/logs_platform` |
 | Audience | ChatGPT Enterprise and Edu workspaces | same |
-| Data covered | Time-stamped conversations, uploaded files, workspace GPT configuration and metadata, memories, workspace users; audit, authentication and Codex usage logs; record-mode canvases and transcripts. Delivered as "immutable, time-windowed JSONL log files". | Cookbook page above; `https://openai.com/index/new-tools-for-chatgpt-enterprise/` |
-| Search string | "For Enterprise and Edu workspaces, canvases and transcripts created by record mode are captured by the Compliance API." | `https://help.openai.com/en/articles/11664471-enterprise-compliance-information-for-chatgpt-record-mode` |
-| Search string | "Enterprise workspace owners can access the Enterprise Compliance API directly or can choose to use a third-party compliance integration" | same family of pages |
-| Credential model | A workspace owner or admin creates a workspace-scoped **Admin key**. Reported: only owners can grant the "Conversation messages" permission or broad compliance access. Admin API requests reportedly use `https://api.chatgpt.com/v1`. | help article 9261474; `https://help.openai.com/en/articles/20001407-managing-admin-keys-in-admin-console` |
-| Change dates | A new conversation-logs system launched "Mar 5, 2026" and the stateful route was removed "Jun 5, 2026" (per search summary of the help article). Old integrations must migrate. | help article 9261474 |
-| Not covered | Workspace analytics is not a substitute (no message text). ChatGPT Atlas "does not emit Compliance API logs". Shared task links and their snapshots are not included. | `https://help.openai.com/en/articles/10875114-workspace-analytics-for-chatgpt-enterprise-and-edu`; `https://help.openai.com/en/articles/12603091-chatgpt-atlas-for-enterprise` |
+| Data covered | Time-stamped conversations, uploaded files, workspace GPT configuration and metadata, memories, workspace users; audit, authentication and Codex usage logs; record-mode canvases and transcripts. Reported as delivered in immutable JSONL log files covering time windows. | Cookbook page above; `https://openai.com/index/new-tools-for-chatgpt-enterprise/` |
+| Record mode | Reported: on Enterprise and Edu workspaces, canvases and transcripts created by record mode are captured by the Compliance API (the search tool returned a sentence to that effect; not reproduced). | `https://help.openai.com/en/articles/11664471-enterprise-compliance-information-for-chatgpt-record-mode` |
+| Access paths | Reported: Enterprise workspace owners can use the Compliance API directly or choose a third-party compliance integration (the search tool returned a sentence to that effect; not reproduced). | same family of pages |
+| Credential model | A workspace owner or admin creates a workspace-scoped **Admin key**. Reported: only owners can grant the permission for conversation messages or broad compliance access. Admin API requests reportedly use `https://api.chatgpt.com/v1`. | help article 9261474; `https://help.openai.com/en/articles/20001407-managing-admin-keys-in-admin-console` |
+| Change dates | A new conversation-logs system was reported as launched on 5 March 2026 and the stateful route as removed on 5 June 2026 (per a search summary of the help article). Old integrations must migrate. | help article 9261474 |
+| Not covered | Workspace analytics is not a substitute (no message text). ChatGPT Atlas is reported not to emit Compliance API logs. Shared task links and their snapshots are not included. | `https://help.openai.com/en/articles/10875114-workspace-analytics-for-chatgpt-enterprise-and-edu`; `https://help.openai.com/en/articles/12603091-chatgpt-atlas-for-enterprise` |
 | Do not confuse | Different from the API Platform's `/v1/conversations` endpoint (section 4). | search summary |
 | Endpoint path | The exact conversation endpoint path was **not** confirmed. A 19-month-old community post reported a 400 on `/compliance/workspaces/{workspace_id}/conversations`. | community report only |
 
@@ -181,7 +188,7 @@ Admin API from GCR.
 - Chrome Web Store and Chrome extension permission policies are outside this task and were **not
   researched**. Listed as unverified in section 10.
 - The search tool reported (community threads, not official) that account suspensions occur and some are
-  reversed on appeal, and that an older thread quotes an earlier scraping ban. Not authoritative.
+  reversed on appeal, and that an older thread is reported to cite an earlier scraping ban. Not authoritative.
 
 ## 7. CCR cross-reference: features whose shape GCR must NOT carry into a ChatGPT live path
 
@@ -190,13 +197,13 @@ These are feature and data-shape facts only; no code is copied.
 
 | CCR fact | Citation | Why it matters to platform policy |
 |---|---|---|
-| Playwright login with a spoofed desktop-Chrome user agent, with a code comment that the default UA "triggers Cloudflare" | `src/auth/claude-login.ts:32-35` | Defeating bot protection. Matches the Codex task prohibition on defeating "authentication/bot protections". |
-| `navigator.webdriver` overridden to `undefined` "so Cloudflare can't detect automation" | `src/auth/claude-login.ts:37-40`; also `src/api/code-session-client.ts:91`, `src/auth/discover-code-api.ts:166` | Same: protective-measure evasion. |
-| Code comment lists "Evasion techniques in use": `--disable-blink-features=AutomationControlled`, webdriver spoof, Chrome 135 UA | `src/auth/claude-login.ts:56-60` | Same. |
-| Session cookies captured and replayed against an undocumented REST API; "no API key" | project `CLAUDE.md` ("Key API Details"); `src/api/client.ts:106` sets a custom `User-Agent` | Cookie replay and private-API use. Codex task Stop conditions name "session cookie replay" and "undocumented ChatGPT consumer APIs". |
+| Playwright login with a spoofed desktop-Chrome user agent; a code comment next to it says the default agent string would draw Cloudflare's bot protection (paraphrased, not quoted) | `src/auth/claude-login.ts:32-35` | Defeating bot protection. Matches the Codex task prohibition on defeating "authentication/bot protections". |
+| `navigator.webdriver` overridden to `undefined`; the code comment gives hiding automation from Cloudflare as the reason (paraphrased) | `src/auth/claude-login.ts:37-40`; also `src/api/code-session-client.ts:91`, `src/auth/discover-code-api.ts:166` | Same: protective-measure evasion. |
+| A code comment lists the evasion techniques in use (paraphrased): `--disable-blink-features=AutomationControlled`, webdriver spoof, Chrome 135 UA | `src/auth/claude-login.ts:56-60` | Same. |
+| Session cookies captured and replayed against an undocumented REST API; no API key is involved (as CCR's project notes put it) | project `CLAUDE.md` ("Key API Details"); `src/api/client.ts:106` sets a custom `User-Agent` | Cookie replay and private-API use. Codex task Stop conditions name "session cookie replay" and "undocumented ChatGPT consumer APIs". |
 | Per-org token bucket, 1 req/s sustained, burst 3 | `src/api/client.ts:21-25` (bucket at 23-25, wait logic 32-50) | Self-throttling is a politeness measure, not a license; not a rate-limit "bypass", but GCR has no live consumer path to throttle. |
 | Write-capable calls (DELETE at `client.ts:146`; POST at `:159`; PUT at `:170` and `:190`) | `src/api/client.ts:146,159,170,190` | Remote mutation of the provider account. Purposes of the POST and PUT calls were **not verified** in this task. GCR's delete and draft features must be local-only (FR-13). |
-| Traffic-capture tool for "reverse-engineering undocumented" API surfaces | project `CLAUDE.md` module table (`src/auth/discover-code-api.ts`) | "Inspect private APIs" is forbidden by Codex task Phase 4. |
+| Traffic-capture tool for reverse-engineering undocumented API surfaces (CCR's own description, paraphrased) | project `CLAUDE.md` module table (`src/auth/discover-code-api.ts`) | "Inspect private APIs" is forbidden by Codex task Phase 4. |
 
 ## 8. (a) What the clauses mean for FR-17 and Phase 4 (browser UI)
 
@@ -204,8 +211,8 @@ These are feature and data-shape facts only; no code is copied.
 Counsel or OpenAI written confirmation is required before relying on any of it.
 
 1. **FR-17 should stay GATED and default OFF.** If the current consumer terms contain the extraction
-   clause reported in 2.2, its wording ("automatically or programmatically") is not limited to bulk
-   or unattended use on its face. A user-installed extension that reads conversation content from the
+   item reported in 2.2, the report describes it as covering automatic or programmatic extraction in
+   general, not only bulk or unattended use (the actual wording is unverified). A user-installed extension that reads conversation content from the
    page, or Playwright/DOM scraping, is at least arguably within it. The spec's FR-17 acceptance
    ("written ToU/permissions approval + separate manual test") is therefore the correct gate, and the
    approval must be about the clause as it reads on the day of the experiment.
@@ -220,7 +227,7 @@ Counsel or OpenAI written confirmation is required before relying on any of it.
 4. **Do not port CCR's evasion techniques** (section 7). Bypassing protective measures and rate limits is
    reported as prohibited in consumer terms, business terms and the agent policy page.
 5. **Draft insertion and sending.** The spec says an MCP write must never silently send. Separately, a
-   send that is automated may collide with the extraction and "human-generated" clauses (2.2) and
+   send that is automated may collide with the extraction and human-generated-output items (2.2) and
    with rate-limit language. No supported OpenAI route for third-party automated sending into the
    consumer UI was found. Per Codex task: if no compliant route exists, ship local drafts plus a direct
    URL for manual continuation. Do not claim live send is verified.
@@ -233,7 +240,7 @@ Counsel or OpenAI written confirmation is required before relying on any of it.
    not a feature GCR calls live.
 8. **Export is the supported personal-data route** (section 3). GCR's core ingestion (FR-02) rests on it.
    Document delivery delay and link expiry as operator-facing facts to re-verify.
-9. **Output use.** The "develop models that compete" clause (2.2) is irrelevant to local search and graph
+9. **Output use.** The reported competing-models item (2.2) is irrelevant to local search and graph
    features, but should be mentioned as a reason GCR does not fine-tune or train on user exports.
 10. **Terms drift.** The reported 30-day notice and the unresolved version question mean
     `SECURITY_AND_BOUNDARIES.md` should store the clause text, its URL, section, the date it was read,
@@ -261,15 +268,15 @@ all are ticked. Agents must not tick these on the operator's behalf.
 
 ## 10. (c) Things I could not verify
 
-1. **Every verbatim OpenAI clause.** No primary page was fetched. All quoted strings in 2.2 to 5 are search-tool output.
-2. The **current effective date and version** of the consumer Terms of Use as of 2026-10-10 (search shows "January 1, 2026" with a "(Previous version)" marker; EU variant "16 January 2026").
-3. Whether the extraction clause is in the **current** terms, its exact wording, section number, and whether "Output" covers conversation transcripts.
+1. **Every verbatim OpenAI clause.** No primary page was fetched. Everything in 2.2 to 5 is a paraphrase of search-tool output, and this file reproduces no OpenAI sentence or clause (see the banner).
+2. The **current effective date and version** of the consumer Terms of Use as of 2026-10-10 (search showed an effective date of 1 January 2026 with a marker that labels it a previous version; the EU variant was reported as updated on 16 January 2026).
+3. Whether the extraction clause is in the **current** terms, its exact wording, section number, and whether the defined term for model output covers conversation transcripts.
 4. The exact wording of the rate-limit, protective-measure and credential-sharing clauses in consumer terms, EU terms and the Services Agreement.
 5. Whether the Usage Policies (reported effective 2025-10-29) contain anything about automation or circumvention. One summary said it found no such provision.
-6. The help-center export article's actual text, the "7 days" and "24 hours" figures, ZIP file names and contents, and any plan-specific differences.
-7. Privacy Portal URL and exact flow; deletion timing quote.
+6. The help-center export article's actual text, the reported delivery time (up to 7 days) and link expiry (24 hours), ZIP file names and contents, and any plan-specific differences.
+7. Privacy Portal URL and exact flow; the deletion timing statement.
 8. Whether any OpenAI document explicitly says that API/Conversations objects do **not** include `chatgpt.com/c/<id>` conversations (the claim in section 4 is an inference).
-9. The exact Compliance API endpoint paths, auth header, rate limits and plan eligibility; the dates "Mar 5, 2026" and "Jun 5, 2026"; the `api.chatgpt.com/v1` base URL.
+9. The exact Compliance API endpoint paths, auth header, rate limits and plan eligibility; the reported dates 5 March 2026 and 5 June 2026; the `api.chatgpt.com/v1` base URL.
 10. Whether the Assistants API sunset (2026-08-26) actually occurred.
 11. OpenAI's position on user-installed browser extensions or Playwright automation of chatgpt.com (no document found).
 12. Chrome Web Store / Chrome extension policy: not researched.

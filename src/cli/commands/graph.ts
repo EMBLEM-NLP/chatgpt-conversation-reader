@@ -22,12 +22,13 @@ import { DB_READ_ERRORS } from './read.js';
 /** Node kinds of the graph (pinned against the SDK's by test/cli/spec.test.ts). */
 const NODE_KINDS = ['conversation', 'entity', 'tool'] as const;
 const EDGE_KINDS = ['mentioned_in', 'co_occurs', 'uses_tool'] as const;
-const NODE_OR_ENTITY_KINDS: readonly string[] = [...NODE_KINDS, ...ENTITY_KINDS];
+// "tool" is both a node kind and an entity kind (a tool name becomes a `tool:<name>` node): list it once.
+const NODE_OR_ENTITY_KINDS: readonly string[] = [...new Set<string>([...NODE_KINDS, ...ENTITY_KINDS])];
 
 const GRAPH_ERRORS: readonly ErrorCode[] = ['NOT_IN_LOCAL_EXPORT', ...DB_READ_ERRORS];
 
 function kindsOption(what: string): OptionSpec {
-  return { name: 'kinds', kind: 'list', valueName: 'kinds', choices: NODE_OR_ENTITY_KINDS, description: `Only ${what} of these node kinds or entity kinds.` };
+  return { name: 'kinds', kind: 'list', valueName: 'kinds', choices: NODE_OR_ENTITY_KINDS, description: `Only ${what} of these kinds. Node kinds: conversation, entity, tool. Entity kinds (they keep the entity nodes of that kind): url, uuid, timestamp, code_language, file_name, keyword. "tool" is both: it keeps the tool nodes.` };
 }
 
 function nodeIdNote(): string {
@@ -50,7 +51,7 @@ export const graphBuild: CommandSpec = {
   ],
   examples: [
     { command: 'graph build', note: 'Build the graph from everything imported.' },
-    { command: 'graph build --min-conversations 3 --kinds url,tool --format json', note: 'Keep only URLs and tool names that occur in at least three conversations.' },
+    { command: 'graph build --min-conversations 3 --kinds url,tool --format json', note: 'Keep only URLs and tool names that occur in at least three conversations. This replaces the graph built before: run "gcr graph build" again to get the full graph back.' },
   ],
   errors: [...DB_READ_ERRORS, 'WRITE_FORBIDDEN'],
   async run(ctx: CommandContext): Promise<void> {
@@ -106,7 +107,7 @@ export const graphPath: CommandSpec = {
   options: [{ name: 'max-depth', kind: 'int', valueName: 'n', min: 1, max: 12, description: 'Longest path in hops (1-12).', defaultText: '6' }],
   examples: [
     { command: 'graph path conv:chatgpt:default:00000000-0000-4000-8000-000000000001 conv:chatgpt:default:00000000-0000-4000-8000-000000000002', note: 'The shortest chain of shared entities between two conversations (use the ids printed by graph query).' },
-    { command: 'graph path tool:python ent:keyword:quokka --max-depth 3 --format json', note: 'Limit the search to three hops.' },
+    { command: 'graph path tool:python ent:keyword:synthetic --max-depth 3 --format json', note: 'Limit the search to three hops (a tool node and a keyword node of the demo data in docs/USER_GUIDE.md).' },
   ],
   errors: [...GRAPH_ERRORS],
   async run(ctx: CommandContext): Promise<void> {
@@ -171,8 +172,8 @@ export const graphExplain: CommandSpec = {
   ],
   options: [{ name: 'limit', kind: 'int', valueName: 'n', min: 1, max: 1000, description: 'Most evidence rows (1-1000).', defaultText: '100' }],
   examples: [
-    { command: 'graph explain 12', note: 'Evidence for edge number 12.' },
-    { command: 'graph explain ent:keyword:marsupial ent:keyword:quokka co_occurs --format json', note: 'Evidence for the co-occurrence edge between two nodes.' },
+    { command: 'graph explain 12', note: 'Evidence for edge number 12 (edge ids are printed by graph query and graph neighbors; they depend on your graph).' },
+    { command: 'graph explain ent:keyword:active ent:keyword:synthetic co_occurs --format json', note: 'Evidence for the co-occurrence edge between two keyword nodes of the demo data.' },
   ],
   errors: [...GRAPH_ERRORS],
   async run(ctx: CommandContext): Promise<void> {

@@ -34,7 +34,7 @@ gcr search "release notes" --format json | jq '.data.items[].snippet'
 gcr graph build && gcr graph query "release"
 ```
 
-All ids in this document are synthetic (`00000000-0000-4000-8000-<12 hex>`).
+All ids in this document are synthetic (`00000000-0000-4000-8000-<12 hex>`). Not every one exists in your database. The ids of conversations `...0001` to `...0004` and of their messages are the ones of the demo data built in [USER_GUIDE.md](USER_GUIDE.md) ("The demo data used here"; for example the only leaf of `...0001` is `...0011`, and `...0002` has the branches `...0013`, `...0014` and `...0016`), and the Examples blocks below use only those ids, or a `<placeholder>` for a value that an earlier command prints (draft and annotation ids are random UUIDs, so no fixed id can exist for them). Graph edge ids depend on your graph. The second `annotate update` example expects the note to be at version 2, that is, after the first one has run.
 
 ## Conventions
 
@@ -63,7 +63,7 @@ What `data` holds in the JSON document:
 | Command | `data` |
 |---|---|
 | `list` | `{ items: ConversationSummary[], limit, offset, total, nextOffset }` |
-| `get`, `thread` | `{ conversation, branchId, activeness, selectionPolicy, omittedHidden, messages[] }` |
+| `get`, `thread` | `{ conversation, branchId, activeness, selectionPolicy, omittedHidden, omittedStructural, messages[] }`; `omittedHidden` counts the hidden messages and `omittedStructural` the empty structural nodes (a root without a message) that were left out of `messages[]`; with `--include-hidden` they stay in `messages[]` and both counts are 0 (demo conversation `...0004`: 7 hidden messages omitted, 0 with the flag; `omittedStructural` was 0 in all four demo conversations) |
 | `get --all-branches` | `{ conversation, thread \| null, threads[] }` (one thread per branch) |
 | `branches` | `{ conversation, activeBranchId, branches[] }` |
 | `search` | `{ query, items[], omittedHidden, limit, offset, nextOffset, nextCursor }` for `--scope messages` (the default); with `--scope titles`, `attachments` or `all` the data is `{ items[], limit, offset, nextOffset, nextCursor }` (no `query` or `omittedHidden`) and the items carry `kind: "title" \| "message" \| "attachment"` (an attachment item adds `attachmentIndex`, `attachmentId`, `attachmentName`, `attachmentMimeType`, `attachmentSizeBytes`) |
@@ -122,7 +122,8 @@ Rules that hold for every document:
   about whether the content is trustworthy, and it does not exist on Windows. In scripts and in directories you do not control, pass `--db`.
 * A database written by a newer GCR is refused (`DB_SCHEMA_TOO_NEW`) and left untouched. `gcr doctor --db <path>` inspects a file
   read-only.
-* SQLite runs in WAL mode: next to `gcr.sqlite` you may see `-wal` and `-shm` files while a command runs.
+* SQLite runs in WAL mode: next to `gcr.sqlite` you may see `-wal` and `-shm` files while a command runs. Commands that only read (`list`, `get`, `graph export`, a read-only `gcr mcp`) were seen to leave an empty `-wal` and a 32 KiB `-shm` behind after they exit; commands that write (`import`, `graph build`, `draft create`) left only the database file (listing a scratch folder, 2026-10-12).
+* **Back up the database before experiments and before re-importing into a fresh file.** Your drafts and annotations live only in this file: an export ZIP can recreate imported conversations and the graph, never your own drafts and notes, and a fresh file starts with none. Copy the file (and its `-wal`/`-shm` if present, with no `gcr` running) first, or experiment with `--db ./scratch.sqlite`. Details and the recovery advice per `DB_ERROR` reason: [DB_ERROR reasons and recovery](#db_error-reasons-and-recovery) and [USER_GUIDE.md](USER_GUIDE.md) section j.
 
 ### Option syntax
 
@@ -192,8 +193,8 @@ Proxy variables, `NO_COLOR`/`FORCE_COLOR` and the terminal width are ignored: th
 | [`draft`](#gcr-draft-create) `create\|list\|show\|archive`, [`annotate`](#gcr-annotate-create) `create\|update\|list\|show` | Local drafts and notes (never sent). |
 | [`mcp`](#gcr-mcp) | The local MCP server over stdio. |
 
-The sections below are generated from the command table that also drives the parser and `--help`; a test fails when this page lacks
-a command or one of its options.
+The sections below were generated from the command table that also drives the parser and `--help`; a test fails when this page lacks
+a command or one of its options. The Examples blocks were then edited by hand so that every id is one of the demo data or a `<placeholder>` (see the top of this page); the examples in `gcr <command> --help` and `CLI_HELP.txt` use the same ids and placeholders.
 
 ### `gcr doctor`
 
@@ -260,7 +261,7 @@ gcr import - --strict < conversations.json
 gcr import export.zip --max-element-bytes 67108864 --format json
 ```
 
-Can fail with: `IMPORT_INPUT_NOT_FOUND` (4), `IMPORT_UNSUPPORTED_FORMAT` (4), `IMPORT_ZIP_UNSAFE` (4), `IMPORT_LIMIT_EXCEEDED` (4), `IMPORT_PARSE_ERROR` (4), `NOT_IMPLEMENTED` (7), `DB_SCHEMA_TOO_NEW` (5), `DB_MIGRATION_FAILED` (5), `DB_ERROR` (5), `WRITE_FORBIDDEN` (6), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1).
+Can fail with: `IMPORT_INPUT_NOT_FOUND` (4), `IMPORT_UNSUPPORTED_FORMAT` (4), `IMPORT_ZIP_UNSAFE` (4), `IMPORT_LIMIT_EXCEEDED` (4), `IMPORT_PARSE_ERROR` (4), `DB_SCHEMA_TOO_NEW` (5), `DB_MIGRATION_FAILED` (5), `DB_ERROR` (5), `WRITE_FORBIDDEN` (6), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1). (`--provider openai_api` is `INVALID_ARGUMENT`, exit 2: the option accepts only `chatgpt` and `claude`. `NOT_IMPLEMENTED` is not an import error of the command line.)
 
 ### `gcr import-copy`
 
@@ -507,8 +508,8 @@ Examples:
 ```bash
 # The active thread of a conversation.
 gcr thread 00000000-0000-4000-8000-000000000001
-# A specific branch, named by the id of its leaf message.
-gcr thread 00000000-0000-4000-8000-000000000001 --branch 00000000-0000-4000-8000-000000000012
+# A specific branch, named by the id of its leaf message (ids from "gcr branches"; this one is a branch of demo conversation ...0002).
+gcr thread 00000000-0000-4000-8000-000000000002 --branch 00000000-0000-4000-8000-000000000014
 # One JSON value per line, for streaming tools.
 gcr thread 00000000-0000-4000-8000-000000000001 --format jsonl
 ```
@@ -618,7 +619,7 @@ Examples:
 ```bash
 # Build the graph from everything imported.
 gcr graph build
-# Keep only URLs and tool names that occur in at least three conversations.
+# Keep only URLs and tool names that occur in at least three conversations. This replaces the graph built before: run "gcr graph build" again to get the full graph back.
 gcr graph build --min-conversations 3 --kinds url,tool --format json
 ```
 
@@ -644,7 +645,7 @@ gcr graph query <term> [options]
 |---|---|---|---|
 | `--depth` | integer 1-4 | 2 | How many hops to follow from the matching nodes (1-4). |
 | `--max-nodes` | integer 1-500 | 100 | Most nodes in the answer (1-500). |
-| `--kinds` | list: conversation, entity, tool, url, uuid, timestamp, tool, code_language, file_name, keyword | - | Only nodes of these node kinds or entity kinds. |
+| `--kinds` | list: conversation, entity, tool, url, uuid, timestamp, code_language, file_name, keyword | - | Only nodes of these kinds. Node kinds: conversation, entity, tool. Entity kinds (they keep the entity nodes of that kind): url, uuid, timestamp, code_language, file_name, keyword. "tool" is both: it keeps the tool nodes. |
 
 Examples:
 
@@ -685,8 +686,8 @@ Examples:
 ```bash
 # The shortest chain of shared entities between two conversations (use the ids printed by graph query).
 gcr graph path conv:chatgpt:default:00000000-0000-4000-8000-000000000001 conv:chatgpt:default:00000000-0000-4000-8000-000000000002
-# Limit the search to three hops.
-gcr graph path tool:python ent:keyword:quokka --max-depth 3 --format json
+# Limit the search to three hops (a tool node and a keyword node of the demo data in docs/USER_GUIDE.md).
+gcr graph path tool:python ent:keyword:synthetic --max-depth 3 --format json
 ```
 
 Can fail with: `NOT_IN_LOCAL_EXPORT` (3), `DB_NOT_FOUND` (5), `DB_SCHEMA_TOO_NEW` (5), `DB_ERROR` (5), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1).
@@ -708,7 +709,7 @@ gcr graph neighbors <node> [options]
 | Option | Value | Default | Meaning |
 |---|---|---|---|
 | `--limit` | integer 1-500 | 50 | Maximum number of neighbours (1-500). |
-| `--kinds` | list: conversation, entity, tool, url, uuid, timestamp, tool, code_language, file_name, keyword | - | Only neighbours of these node kinds or entity kinds. |
+| `--kinds` | list: conversation, entity, tool, url, uuid, timestamp, code_language, file_name, keyword | - | Only neighbours of these kinds. Node kinds: conversation, entity, tool. Entity kinds (they keep the entity nodes of that kind): url, uuid, timestamp, code_language, file_name, keyword. "tool" is both: it keeps the tool nodes. |
 | `--edge-kinds` | list: mentioned_in, co_occurs, uses_tool | - | Only follow edges of these kinds. |
 
 Examples:
@@ -735,7 +736,7 @@ gcr graph god-nodes [options]
 | Option | Value | Default | Meaning |
 |---|---|---|---|
 | `--limit` | integer 1-500 | 10 | Maximum number of nodes (1-500). |
-| `--kinds` | list: conversation, entity, tool, url, uuid, timestamp, tool, code_language, file_name, keyword | - | Only nodes of these node kinds or entity kinds. |
+| `--kinds` | list: conversation, entity, tool, url, uuid, timestamp, code_language, file_name, keyword | - | Only nodes of these kinds. Node kinds: conversation, entity, tool. Entity kinds (they keep the entity nodes of that kind): url, uuid, timestamp, code_language, file_name, keyword. "tool" is both: it keeps the tool nodes. |
 
 Examples:
 
@@ -772,10 +773,10 @@ gcr graph explain <src> <dst> <kind> [options]
 Examples:
 
 ```bash
-# Evidence for edge number 12.
+# Evidence for edge number 12 (edge ids are printed by graph query and graph neighbors; they depend on your graph).
 gcr graph explain 12
-# Evidence for the co-occurrence edge between two nodes.
-gcr graph explain ent:keyword:marsupial ent:keyword:quokka co_occurs --format json
+# Evidence for the co-occurrence edge between two keyword nodes of the demo data.
+gcr graph explain ent:keyword:active ent:keyword:synthetic co_occurs --format json
 ```
 
 Can fail with: `NOT_IN_LOCAL_EXPORT` (3), `DB_NOT_FOUND` (5), `DB_SCHEMA_TOO_NEW` (5), `DB_ERROR` (5), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1).
@@ -799,7 +800,7 @@ gcr graph export [options]
 | `--term` | `<term>` | - | Export the neighbourhood of this term instead of the most connected nodes. |
 | `--depth` | integer 1-4 | 2 | Hops to follow from the term (with --term). |
 | `--max-nodes` | integer 1-500 | 100 | Most nodes on the page (1-500). |
-| `--kinds` | list: conversation, entity, tool, url, uuid, timestamp, tool, code_language, file_name, keyword | - | Only nodes of these node kinds or entity kinds. |
+| `--kinds` | list: conversation, entity, tool, url, uuid, timestamp, code_language, file_name, keyword | - | Only nodes of these kinds. Node kinds: conversation, entity, tool. Entity kinds (they keep the entity nodes of that kind): url, uuid, timestamp, code_language, file_name, keyword. "tool" is both: it keeps the tool nodes. |
 | `--title` | `<text>` | GCR graph export | Page title (up to 200 characters). |
 
 Examples:
@@ -828,7 +829,7 @@ gcr draft create [options]
 | Option | Value | Default | Meaning |
 |---|---|---|---|
 | `--conversation` | `<ref>` | - | (required) The conversation the draft belongs to. Conversation UUID or an exact https://chatgpt.com/c/<uuid> link (only a key into your imported data). |
-| `--input` | `<file|->` | - | (required) File with the text, or "-" for standard input. At most 256 KiB, UTF-8; a directory or a link pointing outside its own directory is refused. |
+| `--input` | `<file\|->` | - | (required) File with the text, or "-" for standard input. At most 256 KiB, UTF-8; a directory or a link pointing outside its own directory is refused. |
 | `--message-id` | `<id>` | - | Anchor the draft to this message of the conversation. |
 | `--title` | `<text>` | - | Short title (up to 200 characters). |
 | `--namespace` | `<name>` | default | Namespace to keep drafts of different purposes apart (lower-case letters, digits, _ . -). |
@@ -895,9 +896,9 @@ Examples:
 
 ```bash
 # Print the draft as Markdown.
-gcr draft show 00000000-0000-4000-8000-0000000000d1
+gcr draft show <draft-id>
 # The same draft as JSON.
-gcr draft show 00000000-0000-4000-8000-0000000000d1 --format json
+gcr draft show <draft-id> --format json
 ```
 
 Can fail with: `DRAFT_NOT_FOUND` (3), `DB_NOT_FOUND` (5), `DB_SCHEMA_TOO_NEW` (5), `DB_ERROR` (5), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1).
@@ -918,9 +919,9 @@ Examples:
 
 ```bash
 # Mark the draft as archived.
-gcr draft archive 00000000-0000-4000-8000-0000000000d1
+gcr draft archive <draft-id>
 # The same, printing the archived draft as JSON.
-gcr draft archive 00000000-0000-4000-8000-0000000000d1 --format json
+gcr draft archive <draft-id> --format json
 ```
 
 Can fail with: `DRAFT_NOT_FOUND` (3), `DB_NOT_FOUND` (5), `DB_SCHEMA_TOO_NEW` (5), `DB_ERROR` (5), `WRITE_FORBIDDEN` (6), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1).
@@ -938,7 +939,7 @@ gcr annotate create [options]
 | Option | Value | Default | Meaning |
 |---|---|---|---|
 | `--conversation` | `<ref>` | - | (required) The conversation to annotate. Conversation UUID or an exact https://chatgpt.com/c/<uuid> link (only a key into your imported data). |
-| `--input` | `<file|->` | - | (required) File with the text, or "-" for standard input. At most 256 KiB, UTF-8; a directory or a link pointing outside its own directory is refused. |
+| `--input` | `<file\|->` | - | (required) File with the text, or "-" for standard input. At most 256 KiB, UTF-8; a directory or a link pointing outside its own directory is refused. |
 | `--message-id` | `<id>` | - | Annotate this message instead of the whole conversation. |
 | `--kind` | `<kind>` | note | Kind of note (lower-case letters, digits and _, up to 32). |
 | `--namespace` | `<name>` | default | Namespace to keep notes of different purposes apart. |
@@ -973,16 +974,16 @@ gcr annotate update <id> [options]
 
 | Option | Value | Default | Meaning |
 |---|---|---|---|
-| `--input` | `<file|->` | - | (required) File with the text, or "-" for standard input. At most 256 KiB, UTF-8; a directory or a link pointing outside its own directory is refused. |
+| `--input` | `<file\|->` | - | (required) File with the text, or "-" for standard input. At most 256 KiB, UTF-8; a directory or a link pointing outside its own directory is refused. |
 | `--expected-version` | integer 1-1000000000 | - | (required) The version of the note you read last (printed by create, show and list). |
 
 Examples:
 
 ```bash
 # Replace the text of version 1.
-gcr annotate update 00000000-0000-4000-8000-0000000000a1 --input note.txt --expected-version 1
+gcr annotate update <annotation-id> --input note.txt --expected-version 1
 # Text from standard input, result as JSON.
-gcr annotate update 00000000-0000-4000-8000-0000000000a1 --input - --expected-version 2 --format json
+gcr annotate update <annotation-id> --input - --expected-version 2 --format json
 ```
 
 Can fail with: `ANNOTATION_NOT_FOUND` (3), `ANNOTATION_CONFLICT` (6), `DB_NOT_FOUND` (5), `DB_SCHEMA_TOO_NEW` (5), `DB_ERROR` (5), `WRITE_FORBIDDEN` (6), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1).
@@ -1034,9 +1035,9 @@ Examples:
 
 ```bash
 # Print the note's metadata as Markdown.
-gcr annotate show 00000000-0000-4000-8000-0000000000a1
+gcr annotate show <annotation-id>
 # The note including its text, as JSON.
-gcr annotate show 00000000-0000-4000-8000-0000000000a1 --format json
+gcr annotate show <annotation-id> --format json
 ```
 
 Can fail with: `ANNOTATION_NOT_FOUND` (3), `DB_NOT_FOUND` (5), `DB_SCHEMA_TOO_NEW` (5), `DB_ERROR` (5), `INVALID_ARGUMENT` (2), `INTERNAL_ERROR` (1).
@@ -1127,7 +1128,7 @@ stack, and report it without private data.
 | `DB_NOT_FOUND` | 5 | The database file (or, for an explicit path, its directory) does not exist. | `run: gcr import <export.zip>`, or point `--db` / `GCR_DB` at an existing file. |
 | `DB_SCHEMA_TOO_NEW` | 5 | The file was written by a newer GCR. It is not modified. | Upgrade GCR or use another file. |
 | `DB_MIGRATION_FAILED` | 5 | A schema migration failed and was rolled back. | Report it without private data. |
-| `DB_ERROR` | 5 | Any other database failure: not a GCR database, a directory, damaged, locked, no FTS5 in this Node, or a database in a read-only location (SQLite must create its `-wal`/`-shm` files next to it even to read). `details.reason` says which: `READ_ONLY_LOCATION` for the last; `SYMLINK_DB_PATH` (a command that writes was given a `--db` symbolic link that is dangling or does not lead to an initialised GCR database: GCR never creates or initialises a database through a link; read commands answer `DB_NOT_FOUND` for a dangling link), `STRAY_SIDECAR_FILES` (a new database would be created beside an existing `-wal`, `-shm` or `-journal`), `not_a_regular_file` (a FIFO, device or socket) and `not_gcr_database` (a SQLite file of another application; **read commands say this too**, they no longer tell you to run an import); also `is_directory`, `cannot_create`, `stat_failed`, `FTS5_UNAVAILABLE`, `busy`, `corrupt`. See [Where the database lives](#where-the-database-lives). | `gcr doctor --db <path>`; follow the remedy (for `SYMLINK_DB_PATH` pass the real path; for `STRAY_SIDECAR_FILES` move or delete the side files yourself, or choose another path; for `not_gcr_database` choose a different `--db`). |
+| `DB_ERROR` | 5 | Any other database failure: not a GCR database, a directory, damaged, locked, no FTS5 in this Node, or a database in a read-only location (SQLite must create its `-wal`/`-shm` files next to it even to read). `details.reason` says which: `READ_ONLY_LOCATION` for the last; `SYMLINK_DB_PATH` (a command that writes was given a `--db` symbolic link that is dangling or does not lead to an initialised GCR database: GCR never creates or initialises a database through a link; read commands answer `DB_NOT_FOUND` for a dangling link), `STRAY_SIDECAR_FILES` (a new database would be created beside an existing `-wal`, `-shm` or `-journal`), `not_a_regular_file` (a FIFO, device or socket) and `not_gcr_database` (a SQLite file of another application; **read commands say this too**, they no longer tell you to run an import); also `is_directory`, `cannot_create`, `stat_failed`, `FTS5_UNAVAILABLE`, `busy`, `corrupt`. See [Where the database lives](#where-the-database-lives). | `gcr doctor --db <path>`; follow the remedy (for `SYMLINK_DB_PATH` pass the real path; for `STRAY_SIDECAR_FILES` move or delete the side files yourself, or choose another path; for `not_gcr_database` choose a different `--db`). One row per reason, with what to do and the warning that a fresh file loses your drafts and notes: [DB_ERROR reasons and recovery](#db_error-reasons-and-recovery). |
 | `WRITE_FORBIDDEN` | 6 | A write was attempted on a read-only database or file system, or where you may not write (`graph export --out` into a directory without permission: EACCES, EPERM, EROFS). | Use a writable location. |
 | `ANNOTATION_CONFLICT` | 6 | `annotate update --expected-version` does not match; `details.currentVersion` has the real one. | Re-read the note (`annotate show`), merge, retry. |
 | `NOT_IMPLEMENTED` | 7 | A disabled capability (the OpenAI developer-API adapter). No CLI option selects it. | n/a |
@@ -1137,6 +1138,25 @@ stack, and report it without private data.
 
 Special cases: `gcr doctor` exits 0 when all checks pass, 5 when the inspected database is unusable and 1 when the environment lacks a
 prerequisite (the report is printed either way). A signal ends the CLI with 130 (SIGINT) or 143 (SIGTERM); a closed pipe with 0.
+
+### DB_ERROR reasons and recovery
+
+`DB_ERROR` (exit 5) carries `error.details.reason`. The remedy GCR prints is one sentence; this table adds what to do and what the advice costs. **Read the back-up warning first:** drafts and annotations live only in the database file, and the advice "re-import your export into a new file" gives you a file without them. Copy a damaged file aside before you touch anything (a refused `import` left a `corrupt` or `not_a_database` file byte-identical, compared by SHA-256, but do not rely on that). The rows marked *(2026-10-12)* were reproduced with scratch files on that date; the others are described in [Where the database lives](#where-the-database-lives) and in the sections they name.
+
+| `details.reason` | What was seen | What to do |
+|---|---|---|
+| `corrupt` *(2026-10-12)* | `The database file is damaged (malformed database image).` A copy of a database cut to its first 50,000 bytes. Remedy printed: "Restore the database from a backup or re-import your export into a new file." | Restore a backup if you have one. Re-importing into a new file recreates the conversations (and `graph build` the graph) but **not your drafts and annotations**; print the ones you can still read from a copy of the file before you give up on it, and keep the damaged file. `gcr doctor --db <file>` prints `schema unknown (unreadable)` and exits 5 for it. |
+| `not_a_database` *(2026-10-12)* | `The file is not a SQLite database (or is encrypted).` Random bytes, plain text, and a real database whose first 16 bytes were overwritten. Remedy printed: "Choose a different --db path." | Check the path. If the file should be your database, it is damaged at its start: restore a backup. A different `--db` never touches this file. |
+| `busy` *(2026-10-12)* | `The database is busy (locked by another process).` A write waited about 5 seconds for a process that held a write transaction; a read in the same moment worked. Remedy: "Close other programs using the database file, then retry." | Wait for the other writer to finish, or stop it, then retry. Nothing was changed. |
+| `needs_migration` *(2026-10-12)* | `The database has not been initialized.` (`details.fileVersion` 0, `requiredVersion` 1) from a read command on an empty (0-byte) file or on a SQLite file that holds no tables at all (a file with the tables of another application is `not_gcr_database`). Remedy: "Open the database once in read-write mode (for example by running an import) to initialize or migrate it." | `gcr import <export.zip> --db <that file>` initialises it (tried on a 0-byte file). If that file was meant to hold your data, it does not: look for a backup. |
+| `is_directory` *(2026-10-12)* | `The database path is a directory.` for a read command and for `import`; nothing was created. | Name a file inside it, for example `--db ./.gcr/gcr.sqlite` instead of `--db ./.gcr`. |
+| `not_gcr_database`, `not_a_regular_file`, `SYMLINK_DB_PATH`, `STRAY_SIDECAR_FILES` | See [Where the database lives](#where-the-database-lives) (reproduced earlier, 2026-10-12). | Choose another `--db`, pass the real path, or move the stray side files yourself. |
+| `READ_ONLY_LOCATION` *(2026-10-12)* | `The database "gcr.sqlite" cannot be read where it is: SQLite has to create its -wal and -shm files next to it, and that location is read-only.` A read command on an existing database in a folder the process cannot write to. (The same folder made a command that writes answer `WRITE_FORBIDDEN`, exit 6, `The database is read-only.`) | Copy the database file (and its `-wal` file, if one exists) to a folder you can write to and point `--db` there, or make the folder writable. |
+| `cannot_create` *(2026-10-12)* | `The database file could not be created.` `gcr import --db <new file>` in a folder the process cannot write to. | Choose another `--db`; the printed remedy suggests `gcr doctor --db <path>`. |
+| `stat_failed` *(2026-10-12)* | `The database path "gcr.sqlite" could not be inspected.` for `list` and for `import`, when the folder that holds the file cannot be searched (mode 000). | Check the permissions of the folder, or choose another file with `--db`. |
+| `FTS5_UNAVAILABLE` | An old Node whose `node:sqlite` has no FTS5 ([USER_GUIDE.md](USER_GUIDE.md) section j, reproduced there on a real Node 22.13.1). | Upgrade Node as the remedy says. |
+
+The three folder rows (`READ_ONLY_LOCATION`, `cannot_create`, `stat_failed`) were reproduced as the user `root`, with folder permissions enforced the way they are for any other user: the process was started with `setpriv --bounding-set=-dac_override,-dac_read_search`, which removes the two capabilities that let root ignore permission bits (a plain `root` shell succeeds in all three cases). With the same trick a read-only (mode 444) database file in a writable folder was still listed; an `import` of an export it already held reported `alreadyImported: true` and left the file byte-identical, and an import that would have to write answered `WRITE_FORBIDDEN` (exit 6).
 
 ## Scripting recipes
 
@@ -1229,7 +1249,7 @@ GCR is a reader for exports you obtained yourself. By design (SPEC section 9, [`
   to open and paste into yourself; a draft has only the states `draft` and `archived`;
 * accept a share link, a link on another host, or a non-UUID id as a ChatGPT link;
 * guess which branch was active, which model answered, or whether an export is complete: unknown stays unknown (`--branch-policy` is a labelled opt-in);
-* change or delete imported conversations (they are immutable; local notes and drafts live in separate tables);
+* change or delete imported conversations (they are immutable; local notes and drafts live in separate tables), or delete anything else: there is no per-conversation, snapshot, draft or note delete and no prune (`gcr delete` and `gcr prune` are unknown commands). A draft can only be archived, a note only replaced; removing data means deleting the database file and the other files listed in [USER_GUIDE.md](USER_GUIDE.md#delete-your-data), and the drafts and notes go with the database;
 * upload an export anywhere, or serve data over a network (`gcr mcp` speaks stdio to a local client only).
 
 If a task needs one of these, the right answer is the official export (`Settings > Data controls > Export data`) followed by `gcr import`.

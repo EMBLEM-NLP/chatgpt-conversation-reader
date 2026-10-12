@@ -11,10 +11,12 @@ The code is `src/ingest/chatgpt-export.ts` (`ChatGPTExportAdapter`); the data mo
   describes the *contents* of `conversations.json` is taken from community projects that reverse-engineered the format,
   and has been tested only against **synthetic fixtures** (`fixtures/chatgpt/`). A passing test run is evidence that the
   code does what this page says on that synthetic data. It is not evidence that a current real export imports correctly.
-* **OpenAI documents how to request an export, not what is inside it.** The Help Center article ("How do I export my
-  ChatGPT history and data", reached via ChatGPT Settings > Data controls > Export data, or via the Privacy Portal) says the
-  ZIP contains your chat history and other account data. It names no files and no JSON fields. The article could not be
-  fetched while GCR's research was done, so even that wording is second-hand.
+* **How to request an export is reported, UNVERIFIED; what is inside it is undocumented as far as GCR could find.** OpenAI's Help
+  Center article on exporting your ChatGPT history and data (article 7260999; reached, as reported, via ChatGPT Settings > Data controls >
+  Export data, or via the Privacy Portal) is reported to say that the ZIP holds your chat history and other account data, and
+  to name no files and no JSON fields. GCR never read that article (it could not be fetched while the research was done), so every
+  statement about delivery time, link expiry, plan eligibility and archive contents is a second-hand paraphrase: check the
+  live article for the current rules. See `docs/USER_GUIDE.md` section a for the paraphrase.
 * The format drifts without notice. Reports from 2026 describe exports whose nodes have **no `children`**, no system or
   tool messages, no `recipient`, sharded files and extension-less assets. GCR is built to accept both that shape and the
   richer earlier shape, and to say so when something is missing rather than to guess.
@@ -23,7 +25,7 @@ The code is `src/ingest/chatgpt-export.ts` (`ChatGPTExportAdapter`); the data mo
 
 | Label | Meaning |
 |---|---|
-| **OFFICIAL** | Stated by OpenAI. On this page only the delivery mechanics above qualify, and only second-hand. |
+| **OFFICIAL** | Stated by OpenAI and verified against OpenAI's own page. **Nothing on this page carries this label**: no OpenAI page could be read, so even the delivery mechanics are only "reported, UNVERIFIED". |
 | **COMMUNITY** | Reported by one or more third-party parsers, specifications or issue reports. `COMMUNITY x2` means two or more independent observers. Never confirmed by OpenAI. |
 | **UNCERTAIN** | A single weak source, contradicted elsewhere, or inferred. |
 | **GCR POLICY** | A decision GCR made so that it never presents a guess as a fact. |

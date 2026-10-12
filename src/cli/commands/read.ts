@@ -176,7 +176,7 @@ export const threadCommand: CommandSpec = {
   ],
   examples: [
     { command: 'thread 00000000-0000-4000-8000-000000000001', note: 'The active thread of a conversation.' },
-    { command: 'thread 00000000-0000-4000-8000-000000000001 --branch 00000000-0000-4000-8000-000000000012', note: 'A specific branch, named by the id of its leaf message.' },
+    { command: 'thread 00000000-0000-4000-8000-000000000002 --branch 00000000-0000-4000-8000-000000000014', note: 'A specific branch, named by the id of its leaf message.' },
     { command: 'thread 00000000-0000-4000-8000-000000000001 --format jsonl', note: 'One JSON value per line, for streaming tools.' },
   ],
   errors: [...REF_ERRORS, 'BRANCH_NOT_FOUND', 'ACTIVE_BRANCH_UNKNOWN', 'MESSAGE_NOT_FOUND', ...DB_READ_ERRORS],
