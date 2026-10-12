@@ -14,10 +14,12 @@
  *   --date <text>       date label recorded in the report and the doc (default "unknown"; the script never reads the clock)
  *   --doc <file>        with --write-doc: write there instead of docs/PERFORMANCE.md (tests use it)
  *   --dist <dir>        compiled product to measure (default ./dist)
+ *   --render-doc-from <file>  do NOT measure: re-render the --doc page from a summary saved earlier (the JSON this script prints with --json);
+ *                       used when only the fixed template changed, so that the numbers stay those of the measured run
  *   --no-scaling-large  skip the import of five times the data (the 5x run takes about five times as long as the main import)
  *
  * What is measured (everything through the compiled product, nothing mocked):
- *   1. import      `gcr import` in a CHILD process: wall time, messages/s, peak RSS (process.resourceUsage().maxRSS, read by a tiny
+ *   1. import      `gcr import` in a CHILD process: wall time, messages/s, peak RSS (VmHWM from /proc/self/status where it exists, else process.resourceUsage().maxRSS; read by a tiny
  *                  --require hook when the child exits)
  *   2. re-import   the same archive again (idempotent: alreadyImported, nothing new), wall time and peak RSS
  *   3. database    file size, ratio to the raw message text, and the share of the FTS index (SQLite dbstat, when available)
@@ -66,13 +68,13 @@ const BUDGETS = {
 
 function usage(code) {
   process.stderr.write(
-    'usage: node scripts/perf-baseline.mjs [--messages N] [--seed N] [--json] [--keep-db] [--write-doc] [--date <text>] [--doc <file>] [--dist <dir>] [--no-scaling-large]\n',
+    'usage: node scripts/perf-baseline.mjs [--messages N] [--seed N] [--json] [--keep-db] [--write-doc] [--date <text>] [--doc <file>] [--dist <dir>] [--no-scaling-large] [--render-doc-from <summary.json>]\n',
   );
   process.exit(code);
 }
 
 function parseArgs(argv) {
-  const opts = { messages: 50_000, seed: 20_261_011, json: false, keepDb: false, writeDoc: false, date: 'unknown', doc: join(repoRoot, 'docs', 'PERFORMANCE.md'), dist: join(repoRoot, 'dist'), scalingLarge: true, worker: null };
+  const opts = { messages: 50_000, seed: 20_261_011, json: false, keepDb: false, writeDoc: false, date: 'unknown', doc: join(repoRoot, 'docs', 'PERFORMANCE.md'), dist: join(repoRoot, 'dist'), scalingLarge: true, renderFrom: null, worker: null };
   const intArg = (name, text, min, max) => {
     if (!/^\d{1,12}$/.test(text ?? '') || Number(text) < min || Number(text) > max) {
       process.stderr.write(`perf-baseline: ${name} needs an integer from ${min} to ${max}\n`);
@@ -96,6 +98,7 @@ function parseArgs(argv) {
     } else if (a === '--doc' && argv[i + 1] !== undefined) opts.doc = resolve(argv[++i]);
     else if (a === '--dist' && argv[i + 1] !== undefined) opts.dist = resolve(argv[++i]);
     else if (a === '--no-scaling-large') opts.scalingLarge = false;
+    else if (a === '--render-doc-from' && argv[i + 1] !== undefined) opts.renderFrom = resolve(argv[++i]);
     else if (a === '--worker' && argv[i + 1] !== undefined) opts.worker = argv[++i]; // internal: the measurement worker
     else if (a === '--worker-db' || a === '--worker-params') opts[a === '--worker-db' ? 'workerDb' : 'workerParams'] = resolve(argv[++i] ?? '');
     else usage(2);
@@ -421,7 +424,14 @@ async function runWorker(opts) {
   } finally {
     gcr.close();
   }
+  // VmHWM (this process image) rather than maxRSS, which would include the parent's resident size at fork time (see the RSS hook in main()).
   out.peakRssKiB = process.resourceUsage().maxRSS;
+  try {
+    const m = /VmHWM:\s+(\d+) kB/.exec(readFileSync('/proc/self/status', 'utf8'));
+    if (m !== null) out.peakRssKiB = Number(m[1]);
+  } catch {
+    /* not Linux: maxRSS stays (and may include the parent's size) */
+  }
   process.stdout.write(`${JSON.stringify(out)}\n`);
 }
 
@@ -466,7 +476,15 @@ async function main(opts) {
   const guardLog = join(work, 'guard.log');
   mkdirSync(join(work, 'home'));
   writeFileSync(guardLog, '');
-  writeFileSync(hook, "process.on('exit', () => { try { require('node:fs').writeFileSync(process.env.GCR_PERF_RSS_FILE, String(process.resourceUsage().maxRSS)); } catch {} });\n");
+  // Peak resident set of the child, in KiB. On Linux `process.resourceUsage().maxRSS` of a spawned child includes the resident size of
+  // the PARENT at the moment of fork (the kernel carries the high-water mark across exec), and this script's parent holds the whole
+  // generated export in memory: a 250,000-message probe showed 546 MiB while the same import started from a small parent measured 139 MiB.
+  // /proc/self/status VmHWM belongs to the process image after exec, so it is used where it exists; elsewhere maxRSS is the fallback and
+  // may be inflated in the same way (the document says so).
+  writeFileSync(
+    hook,
+    "process.on('exit', () => { try { const fs = require('node:fs'); let kib = process.resourceUsage().maxRSS; try { const m = /VmHWM:\\s+(\\d+) kB/.exec(fs.readFileSync('/proc/self/status', 'utf8')); if (m) kib = Number(m[1]); } catch {} fs.writeFileSync(process.env.GCR_PERF_RSS_FILE, String(kib)); } catch {} });\n",
+  );
   const quoted = (p) => (/\s/.test(p) ? `"${p}"` : p);
   const childEnv = (extra) => ({
     PATH: process.env.PATH ?? '',
@@ -768,11 +786,15 @@ function renderDoc(s) {
     const rows = [[sc.smallMessages, sc.smallPeakRssMiB, sc.smallMessagesPerSecond], [sc.largeMessages, sc.largePeakRssMiB, s.import.messagesPerSecond]];
     if (sc.xlMessages !== null) rows.push([sc.xlMessages, sc.xlPeakRssMiB, sc.xlMessagesPerSecond]);
     const table = `| Messages | Peak RSS of \`gcr import\` (MiB) | Messages per second |\n| --- | --- | --- |\n${rows.map((r) => `| ${fmt(r[0])} | ${r[1]} | ${fmt(r[2])} |`).join('\n')}\n`;
+    const flatness =
+      sc.xlRssGrowth === null || sc.xlRssGrowth > 1.15
+        ? 'It is not flat: part of the growth is per-conversation bookkeeping and allocator behaviour that this probe cannot separate.'
+        : 'Over this range the peak did not grow with the data (the differences are within what garbage-collection timing explains).';
     const growth =
       sc.xlMessages === null
         ? `The data grew ${sc.dataGrowth}x and the peak RSS ${sc.rssGrowth}x. The 5x run was skipped (\`--no-scaling-large\`), so this page shows no evidence about much larger exports.`
         : `From the middle row to the last the data grew ${sc.xlDataGrowth}x and the peak RSS ${sc.xlRssGrowth}x (the run warns above ${SCALING_RSS_GROWTH_LIMIT}x). From the first to the middle row they grew ${sc.dataGrowth}x and ${sc.rssGrowth}x.`;
-    return `${table}\n${growth} The importer streams the archive and parses one conversation at a time (docs/ARCHITECTURE.md section 5); what it keeps for the whole run is a small record per conversation (its id and a few fields), so memory is bounded by the number of conversations plus the largest single conversation plus SQLite's cache, not by the size of the export (NFR-05). It is not flat: part of the remaining growth is per-conversation bookkeeping and allocator behaviour that this probe cannot separate. These runs are the evidence, for these sizes only, on synthetic conversations of 100 messages; a conversation far larger than that raises the bound.\n`;
+    return `${table}\n${growth} The importer streams the archive and parses one conversation at a time (docs/ARCHITECTURE.md section 5); what it keeps for the whole run is a small record per conversation (its id and a few fields), so memory is bounded by the number of conversations plus the largest single conversation plus SQLite's cache, not by the size of the export (NFR-05). ${flatness} These runs are the evidence, for these sizes only, on synthetic conversations of 100 messages; a conversation far larger than that raises the bound.\n`;
   })();
   return `# GCR performance baseline
 
@@ -800,7 +822,7 @@ The load average is the only sign of other activity on the machine that the scri
 ## Method
 
 * **Data.** \`scripts/perf-baseline.mjs\` generates ${fmt(s.parameters.messages)} messages in ${fmt(s.parameters.conversations)} conversations (${s.parameters.messagesPerConversation} messages each) in ${s.parameters.shards} shards (\`conversations-00N.json\`) with a seeded PRNG (seed ${s.parameters.seed}; no \`Math.random\`, no clock): the same seed and size always give byte-identical data (SHA-256 \`${s.data.datasetSha256.slice(0, 16)}...\`) and the same stored counts. Text is pseudo-words with a Zipf-like frequency plus real topic words (for stemming and prefixes), accented words, CJK sentences, URLs, code blocks and emoji; user messages are about 6-70 words, assistant messages 30-220. About every 20th assistant reply is an abandoned regeneration, so the trees branch (${fmt(s.data.abandonedBranches)} abandoned leaves in total) and the length of every active thread is known exactly. Raw message text: ${mib(s.data.rawTextBytes)} MiB; export JSON ${mib(s.data.exportJsonBytes)} MiB; ZIP (DEFLATE, in memory) ${mib(s.data.zipBytes)} MiB.
-* **Import, re-import, graph build** run the built CLI (\`dist/cli/main.js\`) as a child process. Wall time includes about 0.1 s of process start. Peak RSS is \`process.resourceUsage().maxRSS\`, written by a tiny \`--require\` hook when the child exits. The children run with \`scripts/no-network-guard.cjs\` preloaded and the run fails if the guard recorded any network attempt.
+* **Import, re-import, graph build** run the built CLI (\`dist/cli/main.js\`) as a child process. Wall time includes about 0.1 s of process start. Peak RSS is the \`VmHWM\` line of \`/proc/self/status\` (the high-water mark of the process after it started; on a platform without it \`process.resourceUsage().maxRSS\`, which on Linux would also count the parent's resident size at fork time and so overstate a child started by this large parent), written by a tiny \`--require\` hook when the child exits. The children run with \`scripts/no-network-guard.cjs\` preloaded and the run fails if the guard recorded any network attempt.
 * **Searches, get, thread, stats, audit** run through the SDK (\`dist/sdk/gcr.js\`, read-only handle) in one measurement worker process, each timed with \`performance.now()\` after five untimed warm-up queries. ${s.search.queries} queries: ${s.search.byKind.word.n} words from the whole frequency range (rare to ubiquitous), ${s.search.byKind.prefix.n} prefixes (\`abc*\`), ${s.search.byKind.phrase.n} phrases (raw FTS5 \`"w1 w2"\`), ${s.search.byKind.cjk.n} CJK substrings of 1-4 characters, ${s.search.byKind.hostile.n} hostile strings (operators, quotes, SQL, NUL, a 5,000-character token, control characters). Page size 20. \`get\` and \`thread\` are timed for the same ${s.parameters.getThreadSample} pseudo-random conversations, and the length of each returned active thread is checked against the generator's.
 * **Correctness gates** (the only way the script fails): stored conversation and message counts (import, idempotent re-import, direct row counts), active-thread lengths, stats totals for every group-by, audit counts, queries that must hit, and an empty guard log.
 
@@ -841,7 +863,7 @@ ${scalingSection}
 | Peak RSS of any child process | < ${BUDGETS.peakRssMiB} MiB | ${b[2].actual} MiB | ${status(2)} |
 | ${b[3].name} | <= ${BUDGETS.databaseToTextRatio}x | ${b[3].actual}x | ${status(3)} |
 
-* **Import >= 10,000 messages/s.** A heavy personal export has tens of thousands of messages; at this rate 50,000 messages import in about five seconds, so \`gcr import\` stays an interactive command and a very large export (500,000 messages) finishes in under a minute. Below this rate the import becomes the slowest step of a workflow and people stop re-importing to keep the database current.
+* **Import >= 10,000 messages/s.** A heavy personal export has tens of thousands of messages; at this budgeted rate 50,000 messages would import in about five seconds, so \`gcr import\` stays an interactive command, and a very large export (500,000 messages) in under a minute. At the rate measured in this run (${fmt(s.import.messagesPerSecond)} messages/s) the same sizes take about ${fmt(Math.round(50000 / s.import.messagesPerSecond))} s and ${fmt(Math.round(500000 / s.import.messagesPerSecond))} s. Below the budgeted rate the import becomes the slowest step of a workflow and people stop re-importing to keep the database current.
 * **Search p95 < 100 ms.** About 100 ms is the commonly used limit under which an interactive answer feels immediate. The CLI and the MCP server answer a model or a person one query at a time, so the tail (p95) matters more than the mean; the budget is on all ${s.search.queries} varied queries, not only the easy ones.
 * **Peak RSS < ${BUDGETS.peakRssMiB} MiB.** GCR runs on a developer laptop, a small CI runner or a Codespace next to an editor and a model client; 600 MiB leaves room on a machine with 2 GiB of free memory. NFR-05 asks for bounded memory: the scaling probe above is the evidence for the shape (memory bounded by the number of conversations and the largest conversation, not by the size of the export), the budget is the absolute ceiling for one process at 50,000 messages.
 * **FTS index <= 3x the raw text.** \`docs/ARCHITECTURE.md\` fixes "about 3x the raw text size" for the INDEX so that search does not multiply the size of a large export. The whole database file is larger because it also keeps the original message JSON (\`raw_source_json\`) and the block list next to the normalized text (provenance is never discarded); that whole-file ratio is reported in the results table so nobody has to guess what the file costs.
@@ -872,6 +894,14 @@ npm run perf -- --write-doc --date 2026-01-31   # rewrite this page (pass the da
 const opts = parseArgs(process.argv.slice(2));
 if (opts.worker !== null) {
   await runWorker(opts);
+} else if (opts.renderFrom !== null) {
+  const saved = JSON.parse(readFileSync(opts.renderFrom, 'utf8'));
+  if (saved?.schema !== SCHEMA) {
+    process.stderr.write(`perf-baseline: ${basename(opts.renderFrom)} is not a ${SCHEMA} summary\n`);
+    process.exit(2);
+  }
+  writeFileSync(opts.doc, renderDoc(saved));
+  process.stderr.write(`perf-baseline: re-rendered ${basename(opts.doc)} from ${basename(opts.renderFrom)} (no measurement)\n`);
 } else {
   let result;
   try {
