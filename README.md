@@ -4,7 +4,7 @@
 annotating **your own ChatGPT export data**. You download the official export yourself, GCR indexes it into a SQLite file on
 your machine, and you search it, rebuild its branches, look at statistics and a knowledge graph, and keep local drafts and notes.
 
-Version `0.2.0-dev.0` (pre-release, `private`, not published). Date of the runs quoted below: 2026-10-11.
+Version `0.2.0-dev.0` (pre-release, `private`, not published). The commands, outputs, counts and dates behind every "tested" statement below are in [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md); this README repeats no test counts because they go stale.
 
 > **Read this first.** GCR has only ever been run on **synthetic, invented data** (`fixtures/chatgpt/`). It has **never** been run
 > on a real ChatGPT export, because none was available. OpenAI publishes no schema for the export, so every statement about what
@@ -37,20 +37,18 @@ Version `0.2.0-dev.0` (pre-release, `private`, not published). Date of the runs 
 git clone --branch claude/chatgpt-conversation-reader-rraexo https://github.com/EMBLEM-NLP/chatgpt-conversation-reader   # or use your existing checkout
 cd chatgpt-conversation-reader
 npm ci            # reproducible install from the committed package-lock.json
-npm run build     # compiles src/ to dist/ (1.4 s wall time on 2026-10-11 with Node 22.22.0 on a busy machine)
+npm run build     # compiles src/ to dist/
 node dist/cli/main.js --help
 ```
 
 * The executable is `dist/cli/main.js`; `package.json` declares it as the binary **`gcr`**. The package is `private` and not
   published, so run it as `node dist/cli/main.js ...` (or add `alias gcr='node /ABSOLUTE/PATH/dist/cli/main.js'`).
   The examples below write `gcr` for that command.
-* `npm ci` was **not run** while this README was written (no network permitted); `node_modules` was already present. The clone
-  URL above is the `origin` of this checkout and the branch is the one the work was committed on; the remote was not contacted, so whether the repository is reachable, whether it is public and whether that branch is on it are **NOT VERIFIED**.
-* `npm run build` and `node dist/cli/main.js --help` were run on 2026-10-11 with Node 22.22.0.
+* `npm ci`, `npm run build` and the whole suite were run in a fresh clone of the pushed branch (see [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)), so the remote and the branch exist and are readable with the author's credentials; whether the repository is public is **NOT VERIFIED**. The package is not published to npm.
 
 ## Two-minute quick start (synthetic data)
 
-Every command below was run on 2026-10-11 with Node 22.22.0 against the committed synthetic fixtures; the output is abridged
+Every command below was run against the committed synthetic fixtures (and is executed again by the documentation review recorded in [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)); the output is abridged
 (`--format compact` keeps it short; the default is Markdown). All ids are synthetic (`00000000-0000-4000-8000-<12 hex>`).
 
 ```bash
@@ -158,7 +156,7 @@ exit code: 3
 ```
 
 The words "(active branch)" inside the search snippets are part of the invented fixture text, not a GCR annotation.
-A larger end-to-end run over all 13 fixtures, driving the built CLI and the built MCP server with a network guard active, is `npm run smoke` (`node scripts/ci-smoke.mjs`). The number of checks grows as the script is extended: `SMOKE OK (41 checks)` for the version of commit `91caaf2`, `SMOKE OK (51 checks)` for the version of commit `1e27fa0` (2026-10-11). The working-tree version after that commit (modified 14:13 UTC) failed in 2 of 10 runs on Node 22.22.0 (cause not diagnosed), so treat a single green run with caution (details in [CHANGELOG.md](CHANGELOG.md)).
+A larger end-to-end run over the committed fixtures, driving the built CLI and the built MCP server over real stdio with a network guard active, is `npm run smoke` (`node scripts/ci-smoke.mjs`; it prints `SMOKE OK (<n> checks)` and the number grows as the script is extended).
 The task-oriented walk-through (branches without a `current_node`, sharded exports, search syntax, MCP, troubleshooting) is [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 
 ## Status: capability modes A to E
@@ -177,12 +175,12 @@ Source: `gcr doctor` (run 2026-10-11, Node 22.22.0, Linux), whose wording is quo
 
 | Tested (synthetic data only) | NOT tested / NOT verified |
 |---|---|
-| Compiled TypeScript test suite on **Node 22.22.0**: 6,750 tests, 6,748 pass, 0 fail, 2 skipped (both skip because the run was as `root`, where file permissions are not enforced), 905 suites, 390 s. Run 2026-10-11 14:01 to 14:08 UTC from a working tree whose `src/` and `test/` equal commit `1341059`; the later test file `test/scripts/no-network-guard.adversarial.test.ts` (commit `1e27fa0`) is **not** in these counts | **A real ChatGPT export** (never available). Field names, shards, manifest, asset naming and drift are community reports only |
-| Same compiled suite on **Node 22.16.0** (the declared minimum): 6,750 tests, 6,748 pass, 0 fail, 2 skipped, 905 suites, 575 s (machine load average 7 to 14, other processes running). Earlier runs on a tree that was still being edited had transient failures (see [CHANGELOG.md](CHANGELOG.md)) | **Node 24 and newer**; Node below 22.16.0 is refused by design (verified: 22.13.1 reports `FTS5 NOT available`) |
-| `npm run typecheck` and `npm run build` (exit 0), and `node scripts/ci-smoke.mjs` (built CLI and MCP server driven on synthetic data with a network guard): the script version of commit `91caaf2` printed `SMOKE OK (41 checks)`; the version of commit `1e27fa0` has 51 checks and passed 1 of 1 run on Node 22.22.0; the working-tree version after it passed 1 of 1 run on Node 22.16.0 but **failed in 2 of 10 runs on Node 22.22.0** (cause not diagnosed; see [CHANGELOG.md](CHANGELOG.md)) | **The GitHub Actions workflow has never run on GitHub** (`.github/workflows/gcr-ci.yml` was only executed step by step locally) |
-| The MCP server through the real SDK client over stdio (`gcr_*` tools, read-only default, write refusal) | **VS Code, Claude Desktop and Codex themselves**: the config snippets follow those clients' documented shape as the authors knew it |
-| Privacy scan of the working tree (`node scripts/privacy-scan.mjs --root .`: clean, 340 files, 2026-10-11 14:40 UTC) and `npm audit --omit=dev --audit-level=high` (0 vulnerabilities in the first author's run on 2026-10-11; it contacts the npm registry and was **not re-run** by the fact-check, which had no network). **The history scan (`--history`, a CI step) reports 1 finding in an old commit and would fail CI** (see [CHANGELOG.md](CHANGELOG.md)) | **OpenAI Terms of Use, Usage Policies and help-center pages: not readable from the sandbox, so the platform policy review is NOT PERFORMED.** Nothing in this repository quotes or paraphrases an OpenAI clause as fact |
-| Graph HTML generated, scanned for network references, and read for its structure | Graph HTML in a real browser or with a screen reader; Windows and macOS; encryption at rest (none exists); permission-denied paths (the suite ran as root) |
+| The compiled TypeScript test suite (unit, integration, property, adversarial and security tests) on **Node 22.22.0** and on the declared minimum **Node 22.16.0**, in the working tree and in a fresh clone of the pushed branch; `npm run typecheck`; `npm run build`. Linux x64, as `root` (two permission tests skip). Counts, durations and dates: [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | **A real ChatGPT export** (never available). Field names, shards, manifest, asset naming and drift are community reports only |
+| `npm run smoke`: the built CLI and the built MCP server driven over real stdio on synthetic data with a network guard that fails on any socket, DNS or process spawn | **Node 24 and newer**; Windows and macOS. Node below 22.16.0 is refused by design (verified on a real 22.13.1: `FTS5 NOT available`) |
+| The MCP server through the real SDK client over stdio (`gcr_*` tools, read-only default, write refusal, approved roots, visible escapes of hazardous characters) | **VS Code, Claude Desktop and Codex themselves**: the config snippets follow those clients' documented shape as the authors knew it |
+| Privacy scan of the working tree and of the whole git history (`node scripts/privacy-scan.mjs`, `--history`), `npm audit`, the dependency licence inventory, regenerated-docs freshness checks (CLI help, MCP schemas, audit report) and the reproducibility of the release tarball hash | **The GitHub Actions workflow has never run on GitHub** (`.github/workflows/gcr-ci.yml` was only executed step by step locally) |
+| Hostile ZIPs, directories, JSON, CLI/MCP arguments and database paths, attacked by an independent reviewer; the graph page executed in a real Chromium (inert); 25+ source mutations checked against the suite by a test-quality reviewer | **OpenAI Terms of Use, Usage Policies and help-center pages: not readable from the sandbox, so the platform policy review is NOT PERFORMED.** Nothing in this repository quotes or paraphrases an OpenAI clause as fact |
+| Performance baseline (50,000 synthetic messages) and coverage, [docs/PERFORMANCE.md](docs/PERFORMANCE.md), [docs/COVERAGE.md](docs/COVERAGE.md): import throughput **missed** the project's own 10,000 messages/s budget | Encryption at rest (none exists); permission-denied paths (the suite ran as root); a screen reader or a second browser on the graph HTML; concurrent first import of one new database where one command fails (documented race) |
 
 The baseline GCR v0.1.1 named in the task was **never available** (ADR-0001). GCR 0.2.0-dev.0 is a clean-room implementation of
 `SPEC.md`; no lineage with, or parity to, v0.1.1 is claimed.
@@ -263,20 +261,21 @@ needs `GCR_APPROVED_IMPORT_ROOTS`. Twelve tools are registered (`gcr_list`, `gcr
 | [docs/PARITY_MATRIX.md](docs/PARITY_MATRIX.md) | Every FR/NFR and capability mode classified (supported, synthetic-only, experimental, not implemented, blocked by platform) with evidence, plus the CCR feature comparison |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | The measured performance baseline on synthetic data (generated by `npm run perf`; single run in a shared sandbox) |
 | [docs/COVERAGE.md](docs/COVERAGE.md) | Line, branch and function coverage of `src/` by the repository's own tests (Node built-in V8 coverage; synthetic data only; generated by `npm run coverage-summary`) |
-| [docs/WARNING_CODES.md](docs/WARNING_CODES.md) | Catalogue of the warning codes emitted in `src/` (the document counts 116), with meaning and operator action; the meaning columns were written by hand |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Decision records ADR-0001 to ADR-0021 (clean-room, license, Node minimum, no PR by the agent, ...); ADR-0013 to ADR-0021 were written after the code existed and were not confirmed by an operator or by legal review |
+| [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | The acceptance record: every gate command with its real output, counts, durations and dates, and the checks that were NOT run |
+| [docs/AUDIT_REPORT.md](docs/AUDIT_REPORT.md) | Branch and model provenance audit of the synthetic fixtures (generated by `npm run audit:report`) |
+| [docs/research/](docs/research/README.md) | The Phase 0 research notes (UNVERIFIED items marked) |
+| [docs/WARNING_CODES.md](docs/WARNING_CODES.md) | Catalogue of the warning codes emitted in `src/` (the document counts 120), with meaning and operator action; the meaning columns were written by hand |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Decision records ADR-0001 to ADR-0027 (clean-room, license, Node minimum, no PR by the agent, ...); ADR-0013 to ADR-0027 were written after the code existed and were not confirmed by an operator or by legal review |
 | [docs/BROWSER_GATE.md](docs/BROWSER_GATE.md) | Why browser interaction (Mode E) is gated and ships no code; the human checklist |
 | [docs/EXECUTION_PLAN.md](docs/EXECUTION_PLAN.md) | Milestones M0 to M4 and their gates |
 | [docs/PR_NOTES.md](docs/PR_NOTES.md) | Ready-to-paste PR descriptions for M0 to M4 derived from the real git history; no PR has been opened |
 | [docs/REPO_RUNBOOK.md](docs/REPO_RUNBOOK.md) | The supplied GitHub and Codex runbook, kept verbatim (it says Node 22.13; ADR-0012 supersedes that) |
 
-`SPEC.md` section 10 and several other files name an acceptance record (`ACCEPTANCE.md` under `docs/`). **That file does not exist** in the repository (checked with `ls` on 2026-10-11 at 14:09 UTC), so this README cannot link to it and no acceptance run is recorded outside the evidence in [CHANGELOG.md](CHANGELOG.md), [docs/PARITY_MATRIX.md](docs/PARITY_MATRIX.md) and [docs/PR_NOTES.md](docs/PR_NOTES.md).
-
 ## License status
 
 The package is declared `"license": "UNLICENSED"` and `"private": true`. **There is no `LICENSE` file by decision (ADR-0008): the repository
 owner must choose a license.** Until then, no license is granted by this repository. The two local checkouts of the sibling Claude Conversation Reader (CCR) repository
-have no `LICENSE`, `NOTICE` or `COPYING` file either (checked with `ls` and `git ls-files` on 2026-10-11); their `package.json` declares `"license": "ISC"` without a license text, which this README does not treat as a grant. **No CCR code was copied** into GCR (only features and documented data shapes were inventoried). npm dependencies keep
+have no `LICENSE`, `NOTICE` or `COPYING` file either (checked with `ls` and `git ls-files`); their `package.json` declares `"license": "ISC"` without a license text, which this README does not treat as a grant. **No CCR code was copied** into GCR (only features and documented data shapes were inventoried). npm dependencies keep
 their own licenses (`npm run licenses` summarises them).
 
 ## Contributing
