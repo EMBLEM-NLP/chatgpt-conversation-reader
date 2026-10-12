@@ -82,11 +82,11 @@ Counts and ranges per group, computed from the table above by a script (not by h
 
 M4 has no commit of its own: its files ride in the seven commits listed (`test/security/no-network.test.ts` was added in `636fef6` and edited in `c8533e4`, `f14350b`, `f164efd` and `1917348`; `docs/BROWSER_GATE.md` is `c1b4854`; `scripts/test-browser-gated.mjs` is `1917348`; ADR-0010 is in `68c016d`).
 
-Recompute and check, from the repository root (no output from the first command means the table lists exactly the commits of the branch in order; the second prints group, commits, first, last and the number of foreign commits inside first..last):
+Recompute and check, from the repository root (no output from the first command means the table lists exactly the commits of the branch up to the anchor `d9bac73`, in order; the second prints group, commits, first, last and the number of foreign commits inside first..last):
 
 ```bash
-diff <(git log --reverse --format=%h) <(awk -F'|' '/^\| [0-9]+ \| `[0-9a-f]+` \|/ {c=$3; gsub(/[ `]/,"",c); print c}' docs/PR_NOTES.md)
-awk -F'|' '/^\| [0-9]+ \| `[0-9a-f]+` \|/ {g=$6; gsub(/ /,"",g); c=$3; gsub(/[ `]/,"",c); n[g]++; if (!(g in f)) {f[g]=c; fi[g]=$2+0}; l[g]=c; li[g]=$2+0} END {for (g in n) printf "%s %d %s %s %d\n", g, n[g], f[g], l[g], li[g]-fi[g]+1-n[g]}' docs/PR_NOTES.md | sort
+diff <(git log --reverse --format=%h d9bac73) <(awk -F'|' '/^\| [0-9]+ \| `[0-9a-f]+` \|/ && $2+0<=38 {c=$3; gsub(/[ `]/,"",c); print c}' docs/PR_NOTES.md)
+awk -F'|' '/^\| [0-9]+ \| `[0-9a-f]+` \|/ && $2+0<=38 {g=$6; gsub(/ /,"",g); c=$3; gsub(/[ `]/,"",c); n[g]++; if (!(g in f)) {f[g]=c; fi[g]=$2+0}; l[g]=c; li[g]=$2+0} END {for (g in n) printf "%s %d %s %s %d\n", g, n[g], f[g], l[g], li[g]-fi[g]+1-n[g]}' docs/PR_NOTES.md | sort
 ```
 
 **Cut points** for the stacked PRs. A cut point is chosen by the state of the tree, not by the primary scope of its last commit: `bc6af53` is the first commit that declares Node 22.16.0 and `1341059` the first measured commit after `bc6af53` without a failing test (section 0); it also corrects the `destructiveHint` of `gcr_update_local_annotation`, which the committed code and schema before it both stated wrongly as `false`. The composition column counts the commits of the range by their Milestone column; the diff columns are `git diff --shortstat <base> <head>` (net, what a reviewer sees; `pr/m0` uses the empty tree as base) and `git diff --name-only` by top-level directory.
@@ -98,6 +98,18 @@ awk -F'|' '/^\| [0-9]+ \| `[0-9a-f]+` \|/ {g=$6; gsub(/ /,"",g); c=$3; gsub(/[ `
 | `pr/m2` | `bc6af53..1341059` | 14 to 23 | 10 | M1 1, M2 7, M3 2 | 115 | +31,716 -85 | 37 | 57 | 0 | 10 | 11 |
 | `pr/m3` | `1341059..caf76d1` | 24 to 29 | 6 | M3 6 | 17 | +2,525 -533 | 1 | 3 | 0 | 9 | 4 |
 | `pr/fw` | `caf76d1..d9bac73` | 30 to 38 | 9 | FW 9 | 124 | +15,102 -630 | 23 | 66 | 0 | 23 | 12 |
+
+**Commits after the anchor.** The tables above were generated at `d9bac73` (38 commits) and are not extended row by row. The commits below were added afterwards; all belong to the final review and fix pass (group FW, pr/fw). The sum of FW is therefore larger than the table says, and `pr/fw` is cut at the branch head (section 2), not at `d9bac73`. Their messages state what each contains; the acceptance record for the head is [ACCEPTANCE.md](ACCEPTANCE.md). To list them: `git log --reverse --oneline d9bac73..HEAD`.
+
+| # | Commit | Date (UTC) | Subject |
+|---|---|---|---|
+| 39 | `a762297` | 2026-10-12 09:56 | docs: regenerate PR_NOTES from the real history (38 commits mapped, M0..M4 + fix-wave PR bodies, fact-checked) |
+| 40 | `a7c34d4` | 2026-10-12 09:56 | wip(tests): environment-robust tests, exit-code pin, helpers (TQ-06..TQ-09) - in progress, not yet verified |
+| 41 | `39e92b9` | 2026-10-12 12:13 | fix(db): concurrent creation of one new database no longer fails with 'busy' or 'not a GCR database' |
+| 42 | `48e1519` | 2026-10-12 12:54 | perf: measure child RSS with VmHWM (maxRSS includes the parent's size at fork); regenerate PERFORMANCE and COVERAGE |
+| 43 | `9641ed3` | 2026-10-12 12:55 | docs: README/CHANGELOG corrections from the round-2 docs review (Chromium run, mutation count, npm ci status, data deletion pointer) |
+| 44 | `8b50b3e` | 2026-10-12 13:37 | docs: round-2 docs review fixes (no OpenAI wording reproduced or labelled OFFICIAL, Chromium run recorded, delete-your-data, SDK consumption, DB_ERROR recovery, runnable examples) |
+| 45 | `751bd0f` | 2026-10-12 13:49 | docs(release): tarball hash depends on file modes on disk; build from a fresh clone (found comparing a work tree with a fresh clone) |
 
 To recompute one row: `git rev-list --count <head>` gives the position of the head, `git diff --shortstat <base> <head>` the diff size.
 
@@ -115,7 +127,7 @@ git branch pr/m0 68c016d
 git branch pr/m1 bc6af53                    # red: one failing test (section 0)
 git branch pr/m2 1341059                    # the first measured commit after bc6af53 without a failing test (section 0); 99cd600 is red
 git branch pr/m3 caf76d1                    # last commit before the review-driven fixes
-git branch pr/fw <FINAL_SHA>                # the last commit of the branch once the final pass is committed (d9bac73 when this file was generated)
+git branch pr/fw origin/claude/chatgpt-conversation-reader-rraexo   # the branch head: the last commit of this work
 git push -u origin pr/m0 pr/m1 pr/m2 pr/m3 pr/fw
 
 # 2. Extract each description from the FINAL tree of this file (markers <!-- PR-Mx-BEGIN --> ... <!-- PR-Mx-END -->)
@@ -358,11 +370,11 @@ Makes the project reproducible and reviewable: committed lockfile and `npm ci`, 
 
 ### Evidence
 
-All results of the current tree (typecheck, build, the compiled suite on Node 22.22.0 and on the declared minimum 22.16.0, smoke, privacy scan of tree and history, license inventory, `npm audit`, CLI-help and MCP-schema freshness, performance and coverage runs) belong in [ACCEPTANCE.md](ACCEPTANCE.md): command, exit code, counts, durations, Node version and date. That file did not exist when this description was regenerated (check that it does). This file repeats none of them. Checked for this file on 2026-10-12:
+All results of the current tree (typecheck, build, the compiled suite on Node 22.22.0 and on the declared minimum 22.16.0, smoke, privacy scan of tree and history, license inventory, `npm audit`, CLI-help and MCP-schema freshness, performance and coverage runs) belong in [ACCEPTANCE.md](ACCEPTANCE.md): command, exit code, counts, durations, Node version and date. The file exists now; this file repeats none of its numbers. Checked for this file on 2026-10-12:
 
 | Command | Result |
 |---|---|
-| `node scripts/privacy-scan.mjs --root . --history` | `privacy-scan: clean`, exit 0 (about 09:33 UTC, working tree and all commits, with the `dist/` built at 06:35 UTC, which is older than `src/devtools/privacy-scan.ts`; the gate result belongs in [ACCEPTANCE.md](ACCEPTANCE.md), which did not exist when this file was regenerated) |
+| `node scripts/privacy-scan.mjs --root . --history` | `privacy-scan: clean`, exit 0 (about 09:33 UTC, working tree and all commits, with the `dist/` built at 06:35 UTC, which is older than `src/devtools/privacy-scan.ts`; the gate result is in [ACCEPTANCE.md](ACCEPTANCE.md)) |
 | `node scripts/test-browser-gated.mjs` | `NOT_RUN: no browser code exists in this build ...`, exit 0 |
 | `npm audit --omit=dev --audit-level=high` | needs the npm registry; **not run** for this file (no network); the first author's run on 2026-10-11 exited 0 |
 | `node scripts/ci-smoke.mjs` | not run for this file; one intermittent failure pair was seen on 2026-10-11 under heavy machine load and was not diagnosed (section 0); repeated runs: [ACCEPTANCE.md](ACCEPTANCE.md) |
@@ -392,7 +404,7 @@ None.
 
 - [x] Required local gates exist: `npm test`, `node scripts/ci-smoke.mjs`, `npm run typecheck`, `npm run build`, `npm run test:browser` (reports `NOT_RUN`)
 - [x] Read-only token, pinned actions, no secrets, no ChatGPT login in CI; synthetic fixtures only
-- [ ] Evidence recorded with exact commands, exit codes, Node versions and dates, in [ACCEPTANCE.md](ACCEPTANCE.md): **the file did not exist when this description was regenerated**; tick this only after checking that it exists and holds the runs
+- [x] Evidence recorded with exact commands, exit codes, Node versions and dates, in [ACCEPTANCE.md](ACCEPTANCE.md) (sections 2 to 4, including the runs on Node 22.16.0, in a fresh clone and as a non-root user)
 - [x] No claim of live integration from synthetic fixtures; OpenAI policy review stated as **NOT PERFORMED**
 - [ ] CI job executed on GitHub: **no**
 - [ ] `docs/SECURITY_AND_BOUNDARIES.md` consulted for auth/network/browser changes: the file exists since checkpoint 15; the author of this description only listed its section headings, a reviewer should read it
@@ -508,7 +520,7 @@ None. `src/db/schema.ts` is identical at `caf76d1` and `HEAD`; the attachment se
 
 ### Rollback note
 
-`git revert --no-commit caf76d1..<FINAL_SHA> && git commit`. Local databases are unaffected; the git hooks are copies that exist only where the operator ran `node scripts/install-git-hooks.mjs` (never run in this repository).
+`git revert --no-commit caf76d1..origin/claude/chatgpt-conversation-reader-rraexo && git commit`. Local databases are unaffected; the git hooks are copies that exist only where the operator ran `node scripts/install-git-hooks.mjs` (never run in this repository).
 
 ### Checklist (mirrors AGENTS.md)
 
