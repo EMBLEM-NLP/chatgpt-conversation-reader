@@ -19,6 +19,10 @@
 // the checksum proves integrity of a copy against the manifest, not who made the manifest. Distribute SHA256SUMS over a
 // channel separate from the tarball (or sign it) if that distinction matters to you.
 //
+// Build the artifact from a FRESH CLONE: `npm pack` records the permission bits of the files on disk, and git tracks only the
+// executable bit. Two checkouts of one commit therefore have the same tarball hash only if their files have the same modes (found
+// on 2026-10-12: docs/REPO_RUNBOOK.md was 0600 in a long-lived working tree and 0644 in a fresh clone, so the two hashes differed
+// although `diff -r` of the extracted trees was empty). `--twice` packs the SAME tree twice and so cannot see this.
 // Nothing here touches the network: `npm pack --ignore-scripts` reads local files only.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
