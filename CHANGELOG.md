@@ -62,9 +62,9 @@ Everything was run on **synthetic, invented data** only, on Linux x64 in a share
 * **Real MCP clients** (VS Code, Claude Desktop, Codex): only the official SDK client was used. The configuration snippets follow those clients' documented shape as the authors knew it. HTTP/SSE transports do not exist.
 * **Encryption at rest**: none exists. Disk-level encryption and file-permission behaviour under other users were not tested.
 * **Permission-denied paths**: the suite ran as `root`, where file permissions are not enforced (two tests skip).
-* **A browser or screen reader on the graph HTML**; keyboard behaviour is described from the generated file only.
+* **Browsers and assistive technology on the graph HTML**: the page was executed once in a real Chromium 141 by an independent reviewer (inert under hostile titles, ids, hashes and search input; not part of the suite, not repeated in CI); a screen reader, other browsers and keyboard behaviour beyond click/Enter were not tested.
 * **Live behaviour of the browser features**: none exist (Mode E is gated; Mode D is a disabled adapter). No "live send" of any kind was attempted or is possible.
-* **`npm ci` from an empty `node_modules`** was not re-run for this entry (no network was permitted for installs); the lockfile is committed and `node_modules` was already present.
+* **`npm ci` against the live registry** was run in fresh clones of the pushed branch by the lead and by two reviewers (see [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)); it needs the registry once. The package is not published to npm.
 * **Large inputs on real hardware**: the 50,000-message synthetic scale tests (`test/ingest/*.scale.test.ts`) and the 50,000-message baseline script (`scripts/perf-baseline.mjs`) used generated data; no real-size export (hundreds of MB, multi-GiB ZIP64) was imported. The measured baseline is in `docs/PERFORMANCE.md` (one run in a shared, loaded sandbox; not summarised here).
 * **Parity with the Claude Conversation Reader (CCR)** is a feature inventory only; no CCR code was copied or run, and CCR has no `LICENSE` file (ADR-0008).
 
