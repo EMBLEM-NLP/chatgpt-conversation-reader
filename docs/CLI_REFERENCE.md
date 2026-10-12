@@ -17,7 +17,7 @@ regenerates it from the built CLI, and a test fails when it is stale). This page
 
 Contents: [Quick start](#quick-start) | [Conventions](#conventions) | [Global options](#global-options) | [Commands](#commands) |
 [Exit codes and errors](#exit-codes-and-errors) | [Scripting recipes](#scripting-recipes) | [Privacy notes](#privacy-notes) |
-[What the CLI deliberately cannot do](#what-the-cli-deliberately-cannot-do)
+[What the CLI deliberately cannot do](#what-the-cli-deliberately-cannot-do) | [Contributor tools](#contributor-tools-not-gcr-commands)
 
 ## Quick start
 
@@ -45,6 +45,7 @@ stdout carries **only** the command's result. Notes ("created ./.gcr ..."), prog
 the only notes that exist are listed here: the creation of the default `./.gcr` directory (printed once the command has succeeded), a hint that superseded snapshots were
 searched (`search --all-batches`, human formats), and "reading from standard input" when a person types into a terminal.
 `--quiet` suppresses notes; it never suppresses errors. Progress lines (import) are printed only when stderr is a terminal.
+One more line can appear on stderr and is a **warning, not a note**, so `--quiet` does not hide it: when the *default* database (`./.gcr/gcr.sqlite`) or its directory is not owned by you, see [Where the database lives](#where-the-database-lives).
 
 ### Output formats (`--format`)
 
@@ -65,7 +66,7 @@ What `data` holds in the JSON document:
 | `get`, `thread` | `{ conversation, branchId, activeness, selectionPolicy, omittedHidden, messages[] }` |
 | `get --all-branches` | `{ conversation, thread \| null, threads[] }` (one thread per branch) |
 | `branches` | `{ conversation, activeBranchId, branches[] }` |
-| `search` | `{ query, items[], omittedHidden, limit, offset, nextOffset, nextCursor }`; with `--scope titles`, `attachments` or `all` the items carry `kind: "title" \| "message" \| "attachment"` (an attachment item adds `attachmentIndex`, `attachmentId`, `attachmentName`, `attachmentMimeType`, `attachmentSizeBytes`) |
+| `search` | `{ query, items[], omittedHidden, limit, offset, nextOffset, nextCursor }` for `--scope messages` (the default); with `--scope titles`, `attachments` or `all` the data is `{ items[], limit, offset, nextOffset, nextCursor }` (no `query` or `omittedHidden`) and the items carry `kind: "title" \| "message" \| "attachment"` (an attachment item adds `attachmentIndex`, `attachmentId`, `attachmentName`, `attachmentMimeType`, `attachmentSizeBytes`) |
 | `stats` | `{ groupBy, rows[], totals, modelProvenance, formatProfiles, limit, offset, nextOffset }` |
 | `audit` | `{ scanned, findings[], branchProvenance \| null, modelProvenance, formatProfiles }`; `branchProvenance` is `null` ("not computed") when no tree check (`--tree`, `--no-current-node`, `--timestamps`) was selected |
 | `batches` | an array of import-batch rows |
@@ -99,10 +100,26 @@ Rules that hold for every document:
   on demand, with mode **0700**, and only at the moment of the first write; an explicit `--db`/`$GCR_DB` whose directory does not exist is
   an error, so a typo never creates directory trees. `graph build`, drafts and annotations need imported data and refuse to create an
   empty database (`DB_NOT_FOUND`).
-* **A failed command does not leave a database behind.** If `import` or `import-copy` creates the database file and then fails (not an export,
-  an unsafe ZIP, a limit, `--strict`, a bad option), the file is removed again, together with `./.gcr` when that command created it, so the
+* **A failed command does not leave a database behind, and removes only what it created.** If `import` or `import-copy` creates the database file and then fails (not an export,
+  an unsafe ZIP, a limit, `--strict`, a bad option), the file is removed again, together with `./.gcr` when that command created it (and only while it is empty), so the
   next read still answers `run: gcr import <export.zip>` instead of "0 conversations". A database that existed before is never removed, and
-  neither is one that holds an import.
+  neither is one that holds an import. Before it opens anything the command records which of the database file and its `-wal`, `-shm` and `-journal` names already exist
+  (a dangling symbolic link counts as existing), and the clean-up unlinks only names that were absent then and are present now: an unrelated file of yours that happens to be called
+  `<db>-wal` is never deleted by a failed first import (a new database is not even created beside such a file, `STRAY_SIDECAR_FILES` below). Two commands that create the *same new* database at the same moment are not coordinated (the one that fails takes the file back and the other
+  may report success for an import that went to the deleted file): start the first import of a new path once.
+* **Paths GCR refuses.** The database path is inspected with `lstat` before anything is created (details: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) section 3, ADR-0022). All of these are `DB_ERROR` (exit 5)
+  with a `details.reason`: `SYMLINK_DB_PATH` (a command that writes was given a `--db` that is a symbolic link which is dangling, or leads to an empty file of 0 or 1 byte, or leads to a SQLite file without tables: GCR never
+  creates or initialises a database through a link; pass the real path. A link to a GCR database that is already initialised works. A read command is never refused with this reason: on a dangling link it answers `DB_NOT_FOUND`,
+  on a link to an empty file "not initialized" (`details.reason` `needs_migration`));
+  `STRAY_SIDECAR_FILES` (a new database would be created next to an existing `<db>-wal`, `<db>-shm` or `<db>-journal`, which SQLite would delete or reuse: move or delete them yourself, or choose another path);
+  `not_a_regular_file` (a FIFO, a device or a socket, also behind a link); `not_gcr_database` (a SQLite file with another application's tables or data: read commands now say so instead of "not initialized, run an import");
+  the others are `is_directory`, `cannot_create` and `stat_failed`.
+* **A default database that is not yours is announced.** `./.gcr/gcr.sqlite` is relative to the *current directory*, so running `gcr` in a directory somebody else prepared opens a database they planted, and its
+  provenance and completeness fields are whatever they wrote. On POSIX systems, when the **default** database or its directory (`./.gcr`) is not owned by the current user, every command that opens it (the read commands, `import`,
+  `import-copy`, `graph build`, `draft` and `annotate` commands, and `gcr mcp`) prints one warning line on **stderr**: "warning: the default database ./.gcr/gcr.sqlite (or its directory) is not owned by the current user, ...
+  Use --db <path> or set GCR_DB to choose a database you trust." It is printed once per command, **`--quiet` does not hide it**, stdout is untouched, it names no path and no user id, and it also appears on the first `import`
+  into a foreign `./.gcr` that holds no database yet. A database chosen with `--db` or `GCR_DB` gets no warning (naming it is your own choice), nor does `gcr doctor`. It is a warning, not a refusal: ownership says nothing
+  about whether the content is trustworthy, and it does not exist on Windows. In scripts and in directories you do not control, pass `--db`.
 * A database written by a newer GCR is refused (`DB_SCHEMA_TOO_NEW`) and left untouched. `gcr doctor --db <path>` inspects a file
   read-only.
 * SQLite runs in WAL mode: next to `gcr.sqlite` you may see `-wal` and `-shm` files while a command runs.
@@ -143,7 +160,7 @@ Proxy variables, `NO_COLOR`/`FORCE_COLOR` and the terminal width are ignored: th
 * `gcr list | head -1`: when the reader of stdout goes away (EPIPE) the CLI closes the database and exits **0** silently.
 * **SIGINT** (Ctrl-C) and **SIGTERM** close the database and exit **130** / **143**. An import that was in flight is rolled back by SQLite
   the next time the file is opened: a half-imported batch can never be read. (A database file that the interrupted import had just created
-  stays, empty; the next import fills it.) (`gcr mcp` runs its own graceful shutdown and exits 0.)
+  stays, empty; the next import fills it. If you delete only the `.sqlite` file by hand, delete its `-wal` and `-shm` files too: a new database is not created beside them, `STRAY_SIDECAR_FILES`.) (`gcr mcp` runs its own graceful shutdown and exits 0.)
 * Node prints "SQLite is an experimental feature" when `node:sqlite` loads. The CLI (and the MCP entry) drop exactly that one
   `ExperimentalWarning` (matched by name and message) with `src/suppress-warnings.ts`; every other warning still reaches stderr.
 
@@ -169,7 +186,7 @@ Proxy variables, `NO_COLOR`/`FORCE_COLOR` and the terminal width are ignored: th
 | [`import`](#gcr-import), [`import-copy`](#gcr-import-copy) | Bring an official export, or a manual copy, into the database. |
 | [`batches`](#gcr-batches) | The import batches (one per distinct export). |
 | [`list`](#gcr-list), [`get`](#gcr-get), [`thread`](#gcr-thread), [`branches`](#gcr-branches) | Read conversations. |
-| [`search`](#gcr-search) | Full-text search over messages and titles. |
+| [`search`](#gcr-search) | Full-text search over message text, conversation titles and attachment file names. |
 | [`stats`](#gcr-stats), [`audit`](#gcr-audit) | Counts, and data-quality / provenance checks. |
 | [`graph`](#gcr-graph-build) `build\|query\|path\|neighbors\|god-nodes\|explain\|export` | The derived knowledge graph. |
 | [`draft`](#gcr-draft-create) `create\|list\|show\|archive`, [`annotate`](#gcr-annotate-create) `create\|update\|list\|show` | Local drafts and notes (never sent). |
@@ -382,7 +399,7 @@ The query is treated as plain words (operators and quotes are inert; a trailing 
 
 Folded when matching: case, accents, character width (fullwidth letters), ligatures (fi) and CJK substrings. Not folded: "ß" is not "ss". Emoji and other symbols are not indexed (only letters, digits and combining marks are), so a query made only of them is refused with INVALID_ARGUMENT: search for words.
 
---scope attachments matches the file NAMES and MIME types of attachments (metadata only: attachment files are never read and no attachment content is searched, not even the text a Claude export carries inline; a ChatGPT export may not contain the files). Each search word must occur anywhere inside the folded name or type (so "notes", "diagram" and "synthetic-notes.txt" all find synthetic-notes.txt, and "image/png" finds every PNG). Results are not ranked: oldest message first. --scope all lists titles, then messages, then attachments (attachment names are part of "all"); with --raw the attachment part is skipped and ATTACHMENTS_NOT_SEARCHED says so.
+--scope attachments matches the file NAMES and MIME types of attachments (metadata only: attachment files are never read and no attachment content is searched, not even the text a Claude export carries inline; a ChatGPT export may not contain the files). Each search word must occur anywhere inside the folded name or type (so "notes", "ynthetic-note" and "synthetic-notes.txt" all find synthetic-notes.txt, "diagram" finds synthetic-diagram.png, and "image/png" finds every PNG). Results are not ranked: oldest message first. --scope all lists titles, then messages, then attachments (attachment names are part of "all"); with --raw the attachment part is skipped and ATTACHMENTS_NOT_SEARCHED says so.
 
 Hidden messages (and their attachments) are skipped unless --include-hidden. A query that starts with "-" goes after "--".
 
@@ -1089,13 +1106,13 @@ stack, and report it without private data.
 
 | Code | Exit | When the CLI reports it | What to do |
 |---|---|---|---|
-| `INVALID_ARGUMENT` | 2 | Bad command line: unknown command/option, missing or repeated value, number out of range, bad `--format`/`--tz`, an SDK-side validation failure, an input file that is a directory or too large, an export file name the file system rejects (too long). | Read the message; `gcr <command> --help`. |
+| `INVALID_ARGUMENT` | 2 | Bad command line: unknown command/option, missing or repeated value, number out of range, bad `--format`/`--tz`, an SDK-side validation failure, an input file that is a directory or too large, an export file name the file system rejects (too long); a search query without any indexed character ("the query contains only symbols or punctuation, which are not indexed; search for words" or "the query is empty; search for words"); **an output too large to build as one text** (`details.reason = "OUTPUT_TOO_LARGE"`: beyond V8's string limit of about 512 MiB, for example `get --all-branches --format json` of a conversation with hundreds of thousands of nodes; `get`, `thread`, `list`, `search`, `branches`, `import` and the other commands that render a document can raise it; exit **2**, not 1). | Read the message; `gcr <command> --help`. For `OUTPUT_TOO_LARGE`: use `--format jsonl` (one JSON value per line), narrow the scope (one conversation or branch instead of `--all-branches` or a whole list), lower `--limit`, or page with `--offset`. |
 | `INVALID_URL` | 2 | A link that is not a well-formed canonical `https://` URL (no scheme separator, backslashes, percent-encoding in the path, over 2048 characters). | Use `https://chatgpt.com/c/<uuid>` or a bare UUID. |
 | `INVALID_UUID` | 2 | A reference that is not a UUID, or a link whose id is not one. | Use the UUID from `gcr list`. |
 | `UNSUPPORTED_URL` | 2 | Share links (`/share/...`), other hosts (`www.`, `chat.openai.com`), `http:`, ports, user info, extra path segments. | Only `https://chatgpt.com/c/<uuid>` is accepted, and only as a key into your data. |
 | `FTS_SYNTAX_ERROR` | 2 | `search --raw` with FTS5 syntax that SQLite rejects. | Drop `--raw` (plain mode makes operators inert) or fix the expression. |
 | `NOT_IN_LOCAL_EXPORT` | 3 | The conversation, batch or graph node is not in the local data. **Never guessed, never fetched.** | Request your official export (ChatGPT Settings > Data controls > Export data) and `gcr import` it. |
-| `BRANCH_NOT_FOUND` | 3 | `--branch` names a branch that does not exist; a snapshot without branches. | `gcr branches <ref>` and pass one of the ids. |
+| `BRANCH_NOT_FOUND` | 3 | `--branch` names a branch that does not exist (`details.reason` `unknown_branch`), a leaf whose branch was beyond the enumeration limits (`not_enumerated`) or a stored message that no root reaches (`unreachable`); a snapshot without branches (`no_branches`: its tree is empty, or N messages are stored but none is reachable, `details.unreachableMessages`). | `gcr branches <ref>` and pass one of the ids. Messages that no root reaches stay searchable (`gcr search`) but no command can show them (`gcr audit --tree` lists the damaged conversation). |
 | `MESSAGE_NOT_FOUND` | 3 | `--message-id` of a draft or note is not in the conversation. | Use a message id from `gcr get --format json`. |
 | `AMBIGUOUS_CONVERSATION` | 3 | The id exists under several providers or accounts. | Add `--provider` and `--account`. |
 | `ACTIVE_BRANCH_UNKNOWN` | 3 | The export names no active branch and the conversation has several. **GCR does not guess.** | `--branch <id>`, `--all-branches`, or opt in with `--branch-policy last_child\|latest_leaf`; the result is then labelled `ACTIVE_BRANCH_HEURISTIC`. |
@@ -1110,7 +1127,7 @@ stack, and report it without private data.
 | `DB_NOT_FOUND` | 5 | The database file (or, for an explicit path, its directory) does not exist. | `run: gcr import <export.zip>`, or point `--db` / `GCR_DB` at an existing file. |
 | `DB_SCHEMA_TOO_NEW` | 5 | The file was written by a newer GCR. It is not modified. | Upgrade GCR or use another file. |
 | `DB_MIGRATION_FAILED` | 5 | A schema migration failed and was rolled back. | Report it without private data. |
-| `DB_ERROR` | 5 | Any other database failure: not a GCR database, a directory, damaged, locked, no FTS5 in this Node, or a database in a read-only location (SQLite must create its `-wal`/`-shm` files next to it even to read). `details.reason` says which (`READ_ONLY_LOCATION` for the last). | `gcr doctor --db <path>`; follow the remedy. |
+| `DB_ERROR` | 5 | Any other database failure: not a GCR database, a directory, damaged, locked, no FTS5 in this Node, or a database in a read-only location (SQLite must create its `-wal`/`-shm` files next to it even to read). `details.reason` says which: `READ_ONLY_LOCATION` for the last; `SYMLINK_DB_PATH` (a command that writes was given a `--db` symbolic link that is dangling or does not lead to an initialised GCR database: GCR never creates or initialises a database through a link; read commands answer `DB_NOT_FOUND` for a dangling link), `STRAY_SIDECAR_FILES` (a new database would be created beside an existing `-wal`, `-shm` or `-journal`), `not_a_regular_file` (a FIFO, device or socket) and `not_gcr_database` (a SQLite file of another application; **read commands say this too**, they no longer tell you to run an import); also `is_directory`, `cannot_create`, `stat_failed`, `FTS5_UNAVAILABLE`, `busy`, `corrupt`. See [Where the database lives](#where-the-database-lives). | `gcr doctor --db <path>`; follow the remedy (for `SYMLINK_DB_PATH` pass the real path; for `STRAY_SIDECAR_FILES` move or delete the side files yourself, or choose another path; for `not_gcr_database` choose a different `--db`). |
 | `WRITE_FORBIDDEN` | 6 | A write was attempted on a read-only database or file system, or where you may not write (`graph export --out` into a directory without permission: EACCES, EPERM, EROFS). | Use a writable location. |
 | `ANNOTATION_CONFLICT` | 6 | `annotate update --expected-version` does not match; `details.currentVersion` has the real one. | Re-read the note (`annotate show`), merge, retry. |
 | `NOT_IMPLEMENTED` | 7 | A disabled capability (the OpenAI developer-API adapter). No CLI option selects it. | n/a |
@@ -1195,7 +1212,10 @@ printf 'Thanks, that answers it.' | gcr draft create --conversation 00000000-000
 * **Error messages and logs** contain codes, ids and basenames, never absolute paths or text. `--debug` is the exception by design: a stack
   trace can name internal files and the cause chain can quote a library error. Do not paste a debug trace into a public issue without reading it.
 * **Input files are read defensively** (`--input`, `import-copy`): bounded size, regular files only, strict UTF-8, and a symbolic link must
-  stay inside its own directory.
+  stay inside its own directory. A **hard link** is not detected (it is a second name for the same file, so neither the symlink rule nor `realpath` can see it): the CLI is not fenced, you name every path,
+  and only the MCP import refuses a file with more than one hard link. Do not pass `--input` a path you did not choose.
+* **The default database belongs to the directory you are in.** Without `--db` and `GCR_DB` the database is `./.gcr/gcr.sqlite` of the current directory; when it or its directory belongs to another user you get the stderr
+  warning described under [Where the database lives](#where-the-database-lives). Use `--db` in automation.
 * **Standard input** for `import -` is buffered in memory up to four times `--max-element-bytes`; for drafts and notes up to 256 KiB.
 
 ## What the CLI deliberately cannot do
@@ -1213,6 +1233,28 @@ GCR is a reader for exports you obtained yourself. By design (SPEC section 9, [`
 * upload an export anywhere, or serve data over a network (`gcr mcp` speaks stdio to a local client only).
 
 If a task needs one of these, the right answer is the official export (`Settings > Data controls > Export data`) followed by `gcr import`.
+
+## Contributor tools (not `gcr` commands)
+
+These scripts are for people who work on the repository. They are not part of the `gcr` binary, do not appear in `CLI_HELP.txt`, and make no network access of their own (the scanner runs `git` with every transport disabled). The scanner needs a built `dist/` (`scripts/privacy-scan.mjs` imports `dist/devtools/privacy-scan.js`; a stale `dist/` does not know the newer flags; the three `npm run privacy-scan...` scripts below run `npm run build` first, a direct `node scripts/privacy-scan.mjs` does not); the installer does not, but the hooks it installs refuse to run without a built scanner.
+
+| Command | What it does |
+|---|---|
+| `npm run privacy-scan` (= `npm run build && node scripts/privacy-scan.mjs`) | Scans the work tree (tracked files and untracked files that are not ignored) plus the added lines of the staged diff for private data. Exit 0 clean, 1 findings, 2 error. |
+| `npm run privacy-scan:history` | The same, plus every path ever added and every added line in all refs (`--history`; this is what the CI workflow runs). |
+| `npm run privacy-scan:staged` (= `--staged`) | Scans exactly what the next commit would record, read from the index (it honours `GIT_INDEX_FILE`); cannot be combined with `--history`. The pre-commit hook runs this. |
+| `npm run hooks:install` (= `node scripts/install-git-hooks.mjs`) | Opt-in: copies `scripts/git-hooks/pre-commit` (runs `--staged`) and `pre-push` (runs the normal tree scan) into `.git/hooks`. Sets no git configuration; refuses to replace a hook it did not write unless `--force` (the old file is kept as `<hook>.pre-gcr-backup`); `--uninstall` removes only its own copies; stops when `core.hooksPath` is set. The hooks fail closed (no `node`, no built scanner, a finding) and print how to bypass knowingly (`--no-verify`) and why not to. |
+
+Scanner options: `--root <dir>`, `--json`, `--max-file-bytes <n>` (default 2 MiB), `--max-history-bytes <n>` (default 64 MiB) and `--allow-large-unscanned`; `node scripts/privacy-scan.mjs --help` prints the usage.
+Findings you may meet (the `rule` field; a finding shows at most 4 characters of a match and never copies line content):
+
+* `unscanned-large-file` (exit 1): a file above `--max-file-bytes` is read only through its first 256 KiB and last 64 KiB (bounded reads) and judged there; the bytes in between were **not** judged, so the scanner cannot say the file is clean. Silenced only by listing the exact path in `.privacy-scan-allow`, by living below `node_modules`, `dist`, `dist-test*` or `coverage`, or, **for local use only**, by `--allow-large-unscanned` (which downgrades this finding and `scan-truncated` to notes; a clean result then proves less, and CI never passes it).
+* `scan-truncated`: a history or staged-diff pass was cut by `--max-history-bytes`, so older history was not judged.
+* `gcr-output-file`: the file is something GCR itself wrote (a graph HTML page, a CLI or MCP JSON/JSONL result, a Markdown or compact rendering, the rendering of a draft or an annotation). Such files hold titles, entity labels and message text; keep them out of the repository (recognised by content, under any name; exempt only under `fixtures/` with the synthetic marker).
+* `synthetic-marker-missing`: a file with the shape of a ChatGPT or Claude export (keys such as `mapping` with `current_node`, or `chat_messages` with `uuid`) must contain the literal `GCR-SYNTHETIC-FIXTURE`, under any name. The marker is a plain text match, so a real export whose message text happens to contain it would be waived: do not rely on it for real data.
+* Others: `forbidden-filename`, `forbidden-extension`, `forbidden-file-signature`, `private-data-directory`, `export-directory`, `export-file-outside-fixtures`, `fixture-too-large`, `unreadable-file`, `allow-file-invalid`, `too-many-findings`, and the content rules (private keys, API keys and tokens, credentials in a URL, JWTs, authorization and cookie headers, ChatGPT session cookies, real conversation URLs, asset pointers, high-entropy blobs).
+
+The pre-push hook scans the work tree and the index, **not the commits being pushed**; only the `--history` scan (CI, or by hand) judges those. Known limits (BOM-less UTF-16 and NUL-padded text are binary for the secret rules, the middle of a large file, encoded data) are listed in [`SECURITY_AND_BOUNDARIES.md`](SECURITY_AND_BOUNDARIES.md) sections 4.7 and 9.
 
 ## Files
 

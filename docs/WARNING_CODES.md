@@ -1,6 +1,6 @@
 # GCR warning-code catalogue
 
-Status: generated from the source tree on 2026-10-11 with Node 22.22.0 (repository state of that day, package version 0.2.0-dev.0).
+Status: generated from the source tree on 2026-10-11 with Node 22.22.0 (package version 0.2.0-dev.0) and re-checked on 2026-10-12 against the source tree after the security and spec-conformance fix wave (Section 2 prints CONSISTENT for it; the four codes the wave added are `ATTACHMENTS_NOT_SEARCHED`, `ATTACHMENTS_PARTLY_SEARCHED`, `NO_MATCHING_NODE` and `TERM_SPLIT`).
 Every code below is emitted somewhere in `src/`, and every warning code in `src/` is below: Section 2 shows how that is checked and the result of the last run.
 The **Meaning** and **Operator action** columns are written by hand from reading the source; they are NOT mechanically checked and describe code paths that were exercised only with synthetic data. Nothing here describes behaviour against a real ChatGPT or Claude export (none was ever available).
 
@@ -123,7 +123,7 @@ if (problems.length > 0) { console.log(`INCONSISTENT (${problems.length}):`); fo
 console.log('CONSISTENT: every warning code in src is in the document and every documented code is emitted in src, with identical emitter paths.');
 ```
 
-Result of the last run (2026-10-12, Node 22.22.0, after the spec-conformance fixes that added `ATTACHMENTS_NOT_SEARCHED`, `ATTACHMENTS_PARTLY_SEARCHED`, `NO_MATCHING_NODE` and `TERM_SPLIT`):
+Result of the last run (2026-10-12, Node 22.22.0, after the spec-conformance fixes that added `ATTACHMENTS_NOT_SEARCHED`, `ATTACHMENTS_PARTLY_SEARCHED`, `NO_MATCHING_NODE` and `TERM_SPLIT`, and after the security fixes that added the error-reason literals `OUTPUT_TOO_LARGE`, `STRAY_SIDECAR_FILES` and `SYMLINK_DB_PATH`, which are classified in Section 4). The script was extracted from this file and run unchanged from the repository root against the source tree as it stood during the documentation sync of that day (it reads only `src/` and this file), and it printed exactly these lines and exit status 0:
 
 ```text
 source: 120 warning codes in 16 files; shared with ERROR_CODES: ACTIVE_BRANCH_UNKNOWN
@@ -366,6 +366,12 @@ These strings look like codes but are not `Warning.code` values. They are classi
 | --- | --- |
 | audit byCode keys (finding sub-codes of the timestamps check) | `CONVERSATION_CREATED_AT_INVALID`, `CONVERSATION_CREATED_AT_NULL`, `CONVERSATION_UPDATED_AT_INVALID`, `CONVERSATION_UPDATED_BEFORE_CREATED`, `MESSAGE_BEFORE_PARENT`, `MESSAGE_CREATED_AT_INVALID`, `MESSAGE_CREATED_AT_NULL` |
 | error details.reason / limit labels (not part of Warning.code) | `BAD_ACCOUNT_LABEL`, `BAD_BUFFER`, `BAD_CHUNK_TYPE`, `BAD_ENTRY_NAME`, `BAD_EXTENSION`, `BAD_IMPORTED_AT`, `BAD_MAX_BYTES`, `BAD_NAME`, `BAD_NESTED_LIMIT`, `BAD_OPTIONS`, `BAD_PASSES`, `BAD_PATH`, `BAD_SOURCE`, `BAD_SOURCE_KIND`, `BAD_STREAM`, `CHANGED_WHILE_READING`, `CONCURRENT_MODIFICATION`, `CONTEXT_NOT_OBJECT`, `ELEMENT_TOO_LARGE`, `ENTRY_IS_DIRECTORY`, `ENTRY_NOT_FOUND`, `FTS5_UNAVAILABLE`, `INPUT_TOO_LARGE`, `INVALID_JSON`, `IS_DIRECTORY`, `LIMITS_NOT_OBJECT`, `LIMIT_NOT_POSITIVE_FINITE`, `MANUAL_COPY_MAX_DOCUMENT_CHARS`, `MANUAL_COPY_MAX_MESSAGES`, `MANUAL_COPY_MAX_TEXT_BYTES`, `MANUAL_COPY_MAX_TOTAL_BYTES`, `MANUAL_COPY_TOO_LARGE`, `MAX_JSON_DEPTH`, `MAX_MESSAGES_PER_CONVERSATION`, `MIXED_PROVIDERS`, `NESTED_ZIP_TOO_LARGE`, `NOT_FOUND`, `NOT_JSON`, `NOT_READABLE`, `NOT_REGULAR_FILE`, `NOT_UTF8`, `NO_CONVERSATION_FILE`, `NO_DIRECTORY`, `NO_OPTIONS`, `NO_SOURCE`, `OPEN_FAILED`, `OUTPUT_TOO_LARGE`, `PERMISSION_DENIED`, `PROVIDER_UNDETECTED`, `READER_CLOSED`, `READ_FAILED`, `READ_ONLY_LOCATION`, `STDIN_NOT_JSON`, `STDIN_TOO_LARGE`, `STDOUT_WRITE_FAILED`, `STRAY_SIDECAR_FILES`, `SUPPORT_FILE_TOO_LARGE`, `SYMLINK_DB_PATH`, `SYMLINK_REFUSED`, `TEXT_NOT_STRING`, `UNEXPECTED_ADAPTER_FAILURE`, `UNEXPECTED_ITERATION`, `UNKNOWN_ADAPTER`, `UNKNOWN_LIMIT`, `UNSUPPORTED_ENCODING`, `WRITE_FAILED`, `ZIP_ON_STDIN` |
+
+Error reasons whose wording or set changed with the 2026-10-12 fix wave (listed as bullets so that the check above does not read them as part of the table; none of them is a warning):
+
+* `OUTPUT_TOO_LARGE` is `details.reason` of an `INVALID_ARGUMENT` error (exit 2): an output that cannot be built as one string. Raised by the public renderers and mapped by the CLI's error reporter. Not a warning and never in `warnings[]`.
+* `SYMLINK_DB_PATH`, `STRAY_SIDECAR_FILES` are `details.reason` values of a `DB_ERROR` (exit 5) raised by `openDatabase` (`src/db/open.ts`); their lower-case companions `not_a_regular_file`, `not_gcr_database`, `is_directory`, `cannot_create` and `stat_failed` are not matched by the check at all (it reads upper-case literals that contain an underscore) and are documented in `docs/SDK.md` ("Opening a database").
+* `PROVIDER_UNDETECTED` is `details.reason` of an `IMPORT_UNSUPPORTED_FORMAT` error with **two texts** (`providerUndetectedError` in `src/ingest/registry.ts`). Without an oversize element: "The conversation provider could not be detected: no element has a ChatGPT "mapping" or a Claude "chat_messages" array." (remedy: check that this is an official export, or select the provider explicitly). When at least one element that carries a provider marker was longer than the sniffing limit (64 Mi characters) and so was not sniffed: "The conversation provider could not be detected: an element is too large to sniff (over 64 Mi characters), so its "mapping" or "chat_messages" marker was not looked at." (remedy: pass `--provider chatgpt|claude`), with `details.sniffSkipped = "ELEMENT_TOO_LARGE"` and `details.maxDetectChars`. The code and the reason are the same in both cases.
 
 ## 5. Audit findings (not warnings, but also code-keyed)
 

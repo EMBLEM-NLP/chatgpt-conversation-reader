@@ -174,11 +174,13 @@ stringify to an id are rejected). The returned instances are frozen and `listAda
 | neither; `mapping` or `chat_messages` of the wrong type; markers only in nested objects or string values | `null` |
 | a `{"conversations": [...]}` wrapper | `null` (sniff its elements instead) |
 | a JSON array, scalar, `null`, invalid JSON, non-string input | `null` |
-| longer than `maxChars` (default 64 MiB, checked **before** parsing) | `null`, "select the provider explicitly" |
+| longer than `maxChars` (default 64 Mi characters, `DEFAULT_MAX_DETECT_CHARS`, measured in UTF-16 code units and checked **before** parsing) | `null`, with the fixed reason `SNIFF_SKIPPED_TOO_LARGE`: "The element is too large to sniff (longer than the sniffing limit); pass the provider explicitly with --provider chatgpt\|claude." (a skipped detection, not a failed one: such an element can well have a `mapping`) |
 
 Keys are read with own-property lookups on the result of `JSON.parse`, so escaped keys (`"mapping"`) and duplicated keys behave exactly as
 they do for the adapters. A leading UTF-8 BOM is ignored. `null` always means "the operator must choose a provider"; the importer must not fall
 back to a default.
+
+When an import ends with no provider identified and none forced, the runner raises `providerUndetectedError({ tooLarge })` (`registry.ts`): `IMPORT_UNSUPPORTED_FORMAT` with `details.reason = "PROVIDER_UNDETECTED"` in both cases. If at least one element that carries a provider marker was skipped by the size rule (the runner records `reason === SNIFF_SKIPPED_TOO_LARGE`), the message says that an element is too large to sniff (over 64 Mi characters), so its `mapping` or `chat_messages` marker was not looked at, the remedy is to pass `--provider chatgpt|claude`, and the details add `sniffSkipped: "ELEMENT_TOO_LARGE"` and `maxDetectChars`. Otherwise the message is the original "no element has a ChatGPT `mapping` or a Claude `chat_messages` array" with the remedy to check that this is an official export or to select the provider. Before this wording existed, a conversation with one very large message was reported with the second text although it does have a `mapping`.
 
 ## 5. Provenance and completeness at a glance
 

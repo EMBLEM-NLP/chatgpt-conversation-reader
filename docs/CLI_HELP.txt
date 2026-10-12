@@ -496,11 +496,12 @@ query made only of them is refused with INVALID_ARGUMENT: search for words.
 (metadata only: attachment files are never read and no attachment content is
 searched, not even the text a Claude export carries inline; a ChatGPT export may
 not contain the files). Each search word must occur anywhere inside the folded
-name or type (so "notes", "diagram" and "synthetic-notes.txt" all find
-synthetic-notes.txt, and "image/png" finds every PNG). Results are not ranked:
-oldest message first. --scope all lists titles, then messages, then attachments
-(attachment names are part of "all"); with --raw the attachment part is skipped
-and ATTACHMENTS_NOT_SEARCHED says so.
+name or type (so "notes", "ynthetic-note" and "synthetic-notes.txt" all find
+synthetic-notes.txt, "diagram" finds synthetic-diagram.png, and "image/png"
+finds every PNG). Results are not ranked: oldest message first. --scope all
+lists titles, then messages, then attachments (attachment names are part of
+"all"); with --raw the attachment part is skipped and ATTACHMENTS_NOT_SEARCHED
+says so.
 
 Hidden messages (and their attachments) are skipped unless --include-hidden. A
 query that starts with "-" goes after "--".

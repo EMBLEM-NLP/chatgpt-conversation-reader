@@ -67,9 +67,21 @@ static Gcr.open(opts: GcrOpenOptions): Gcr
 | `clock` | `() => string` | real clock | ISO-8601 UTC timestamps for imports and local writes (inject for reproducible output). |
 
 A new file is created with mode `0600` before SQLite touches it. A database written by a newer GCR is refused with `DB_SCHEMA_TOO_NEW`; a SQLite
-file that is not a GCR database is refused with `DB_ERROR` (`details.reason: "not_gcr_database"`). Both refusals happen **before** anything is written:
+file that is not a GCR database is refused with `DB_ERROR` (`details.reason: "not_gcr_database"`; a **read-only** open refuses it the same way, it no longer says "not initialized"). Both refusals happen **before** anything is written:
 `Gcr.open` first looks at the file read-only, because the read-write open of `db/open.ts` switches the journal mode to WAL (which rewrites header bytes)
 before it checks whose file it is. The refused file stays byte-for-byte identical and no side file appears. Unknown option names are `INVALID_ARGUMENT`.
+
+**The path is inspected with `lstat` before anything is created** (ADR-0022; every open goes through it: `Gcr.open`, and with it the CLI and the MCP server). `Gcr.open` can therefore throw `DB_ERROR` with these `details.reason` values, besides the ones in [Errors and remedies](#errors-and-remedies):
+
+| `details.reason` | When | Created? |
+|---|---|---|
+| `SYMLINK_DB_PATH` | a read-write handle was given a `dbPath` that is a symbolic link which is dangling (with `create: false`: `DB_NOT_FOUND` instead), or leads to an empty file (0 or 1 byte: SQLite would initialise it in place), or leads to a valid SQLite file that holds no tables yet. A link to a GCR database that is already initialised still opens. A read-only handle never gets this reason: on a dangling link it is `DB_NOT_FOUND`, on a link to an empty file the usual `DB_ERROR` `needs_migration` ("not initialized") | nothing |
+| `STRAY_SIDECAR_FILES` | a new database would be created while `<dbPath>-wal`, `-shm` or `-journal` already exist (SQLite would delete or reuse them); `details.files` lists which | nothing |
+| `not_a_regular_file` | the path is a FIFO, a device or a socket, also behind a link (a read-only open of a FIFO would block for ever) | nothing |
+| `not_gcr_database` | a SQLite file of another application: another non-zero `application_id`, or tables with `application_id` and `user_version` 0; refused read-only and read-write alike | nothing is modified |
+| `is_directory`, `cannot_create`, `stat_failed` | the path is a directory; the exclusive create failed or found a non-regular file or a file of another user; the path could not be inspected | nothing |
+
+The check is a look, not a lock: between the `lstat` and SQLite's own open a hostile process that can write in the database's directory can still swap the name, and a regular file planted at the path of a database that does not exist yet is not detected. Keep databases in directories only you can write to. The SDK prints nothing: the stderr ownership warning for a foreign default database belongs to the CLI (`gcr`), not to `Gcr.open`.
 
 Handle properties: `isOpen`, `readOnly`, `dbLabel` (basename only), `actor`. `close()` is idempotent.
 
@@ -435,12 +447,12 @@ try { gcr.get(someReference); } catch (e) {
 
 | Code | Exit | When the SDK raises it | Remedy |
 |---|---|---|---|
-| INVALID_ARGUMENT | 2 | wrong type or range, unknown option, malformed reference object, empty search query, bad cursor | fix the call; `details.field` / `details.option` name the argument |
+| INVALID_ARGUMENT | 2 | wrong type or range, unknown option, malformed reference object, a search query without any indexed character (blank, or only symbols, emoji or punctuation), bad cursor, `mode: "raw"` or `cursor` with scope `attachments`, a message filter with scope `titles` or `all`; **from a renderer** (`renderThread`, `renderConversationList`, `renderSearchHits`, `renderBranchList`, `renderImportReport`, `renderEnvelope`): `details.reason: "OUTPUT_TOO_LARGE"` when the output cannot be built as one string (beyond V8's limit of about 512 MiB), with `details.format` and a remedy (use `jsonl`, narrow the scope, lower `limit`, page with `offset`) | fix the call; `details.field` / `details.option` name the argument |
 | INVALID_URL | 2 | a link that is not a well-formed canonical https URL (no host, control characters, percent-encoding, over 2048 characters) | use `https://chatgpt.com/c/<uuid>` or a bare UUID |
 | INVALID_UUID | 2 | a string reference that is not a UUID, or a link whose id is not a UUID | use a UUID from the link or from `list` |
 | UNSUPPORTED_URL | 2 | share links, other hosts (`www.`, `chat.openai.com`), `http:`, userinfo, ports, extra path segments | only `https://chatgpt.com/c/<uuid>` is accepted |
 | NOT_IN_LOCAL_EXPORT | 3 | the conversation (or batch, or graph node) is not in the local data | request your official export and `gcr import` it (see above) |
-| BRANCH_NOT_FOUND | 3 | unknown branch id; a snapshot with no branches | list branches with `branches()` and pass one of the ids |
+| BRANCH_NOT_FOUND | 3 | unknown branch id (`details.reason: "unknown_branch"`, or `"not_enumerated"` for a leaf beyond the enumeration limits); a stored message that no root reaches (`"unreachable"`); a snapshot with no branches (`"no_branches"`, with `details.unreachableMessages` when messages are stored but unreachable) | list branches with `branches()` and pass one of the ids |
 | MESSAGE_NOT_FOUND | 3 | a draft/annotation anchor message that is not in the conversation | use a message id from `get` |
 | AMBIGUOUS_CONVERSATION | 3 | the id exists under several provider/account pairs (`details.candidates`) | pass `{ conversationId, provider, accountLabel }` |
 | ACTIVE_BRANCH_UNKNOWN | 3 | no valid `current_node`, several branches, no explicit choice (or the valid `current_node` lies beyond the branch enumeration limit: `details.reason: "active_branch_not_enumerated"`) | pass `branch`, or opt in to `branchPolicy` (labelled heuristic; not applied when the source's pointer exists) |
@@ -453,7 +465,7 @@ try { gcr.get(someReference); } catch (e) {
 | DB_NOT_FOUND | 5 | a read-only/`create: false` open of a missing file, or a missing directory | run `gcr import <export.zip> --db <path>` |
 | DB_SCHEMA_TOO_NEW | 5 | the file was written by a newer GCR | upgrade GCR or use another file |
 | DB_MIGRATION_FAILED | 5 | a schema migration failed and was rolled back | report it without private data |
-| DB_ERROR | 5 | any other database failure; `details.reason`: `closed`, `write_in_progress`, `busy`, `corrupt`, `not_gcr_database`, `needs_migration`, `FTS5_UNAVAILABLE` (Node older than 22.16.0), `constraint`, ... | follow the `remedy` of the specific reason |
+| DB_ERROR | 5 | any other database failure; `details.reason`: `closed`, `write_in_progress`, `busy`, `corrupt`, `not_gcr_database` (read-only opens too), `needs_migration`, `FTS5_UNAVAILABLE` (Node older than 22.16.0), `constraint`, and the path refusals of [Opening a database](#opening-a-database): `SYMLINK_DB_PATH`, `STRAY_SIDECAR_FILES`, `not_a_regular_file`, `is_directory`, `cannot_create`, `stat_failed`, ... | follow the `remedy` of the specific reason |
 | FTS_SYNTAX_ERROR | 2 | `mode: "raw"` with an invalid FTS5 expression | use plain mode or fix the expression |
 | WRITE_FORBIDDEN | 6 | a mutator on a read-only handle | open the database without `readOnly` |
 | DRAFT_NOT_FOUND | 3 | unknown draft id | list drafts |
@@ -482,6 +494,7 @@ try { gcr.get(someReference); } catch (e) {
 `renderConversationList`, `renderSearchHits`, `renderBranchList`, `renderImportReport`, `renderEnvelope` (with `RenderOptions`). Everything else is a type: the domain model
 (`ConversationRecord`, `MessageRecord`, `Branch`, `Completeness`, ...), the result shapes (`ResultEnvelope`, `Page`, `ConversationSummary`, `ThreadResult`, `SearchHit`, `BatchInfo`,
 `ImportReport`, `FormatProfile`, ...), the option and result types of stats, audit, graph and drafts, `ImportOptions`, `AdapterId`, `ErrorCode`, `ErrorEnvelope` and `Warning`.
+The search types are exported as types too: `SearchOptions`, `SearchScope` (`'messages' | 'titles' | 'attachments' | 'all'`), `SearchItem` (`MessageSearchItem | TitleSearchItem | AttachmentSearchItem`, discriminated by `kind`), `MessageSearchItem`, `TitleSearchItem`, **`AttachmentSearchItem`** (`AttachmentHit & { kind: 'attachment' }`, from `sdk/gcr.ts`) and **`AttachmentHit`** (the db-level hit, from `db/search.ts`, next to `SearchMode`); the last two are type-only exports, so the runtime export list is unchanged. `AuditReport.branchProvenance` is typed `{ ... } | null`: code that reads `data.branchProvenance.conversationsWithKnownActiveBranch` without a `null` check no longer compiles (intended; the value is `null` when no tree-based check was selected).
 
 The sorted list of runtime export names is pinned by `test/sdk/exports.test.ts`; adding or removing one is a deliberate API change that updates that test and this page.
 
