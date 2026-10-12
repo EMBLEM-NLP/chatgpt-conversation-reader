@@ -296,14 +296,25 @@ describe('formatInTimeZone: offset and wall clock always agree (property, indepe
     );
   });
 
-  it('is deterministic and strictly monotone in the instant for a fixed zone (property)', () => {
+  /** The instant (epoch seconds) a printed local time stands for: wall clock minus the printed offset. An oracle independent of formatInTimeZone. */
+  function instantOf(printed: string): number {
+    const m = LOCAL.exec(printed);
+    assert.ok(m !== null, printed);
+    const [, y, mo, d, h, mi, s, , sign, oh, om, os] = m;
+    const offset = (sign === '-' ? -1 : 1) * (Number(oh) * 3600 + Number(om) * 60 + Number(os ?? '0'));
+    return Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)) / 1000 - offset;
+  }
+
+  it('the printed local time stands for exactly the instant it was made from, so consecutive instants never share a string (property)', () => {
     runProperty(
       fc.property(fc.integer({ min: Date.UTC(2000, 0, 1) / 1000, max: Date.UTC(2040, 0, 1) / 1000 }), fc.constantFrom(...ZONES), (sec, tz) => {
-        const iso = new Date(sec * 1000).toISOString();
-        assert.equal(formatInTimeZone(iso, tz), formatInTimeZone(iso, tz));
-        // Converting back through the printed offset must reproduce the instant exactly: no two instants share a string.
+        const printed = formatInTimeZone(new Date(sec * 1000).toISOString(), tz);
         const next = formatInTimeZone(new Date((sec + 1) * 1000).toISOString(), tz);
-        assert.notEqual(formatInTimeZone(iso, tz), next);
+        // Converting back through the printed offset must reproduce the instant exactly (an oracle, not a second call of the same function) ...
+        assert.equal(instantOf(printed), sec, `${tz} ${printed}`);
+        assert.equal(instantOf(next), sec + 1, `${tz} ${next}`);
+        // ... which is what makes the two strings different (no two instants share a string).
+        assert.notEqual(printed, next);
       }),
       300,
     );

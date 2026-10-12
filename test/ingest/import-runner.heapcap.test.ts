@@ -13,7 +13,6 @@ import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { pathToFileURL } from 'node:url';
 import { linearConversationText, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
 import { withTempDir } from '../helpers/tmp.js';
 
@@ -47,9 +46,11 @@ describe('NFR-05: importing a large export does not retain the conversation text
       const bytes = await writeExport(file);
       assert.ok(bytes > 75 * 1024 * 1024, `fixture is large enough to make retention fatal (got ${bytes} bytes)`);
 
-      const runnerUrl = pathToFileURL(new URL('../../src/ingest/import-runner.js', import.meta.url).pathname).href;
-      const repoUrl = pathToFileURL(new URL('../../src/db/repo.js', import.meta.url).pathname).href;
-      const openUrl = pathToFileURL(new URL('../../src/db/open.js', import.meta.url).pathname).href;
+      // Module specifiers for the child: the file URLs themselves. (A URL's .pathname keeps %20 / %C3%BC escapes, so building a
+      // path from it breaks as soon as the checkout lives in a directory with a space or a non-ASCII letter in its name.)
+      const runnerUrl = new URL('../../src/ingest/import-runner.js', import.meta.url).href;
+      const repoUrl = new URL('../../src/db/repo.js', import.meta.url).href;
+      const openUrl = new URL('../../src/db/open.js', import.meta.url).href;
       const script = `
         const { runImport } = await import(${JSON.stringify(runnerUrl)});
         const { Repository } = await import(${JSON.stringify(repoUrl)});

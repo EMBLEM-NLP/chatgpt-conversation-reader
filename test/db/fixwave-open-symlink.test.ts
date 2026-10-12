@@ -14,7 +14,7 @@
  */
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,7 +131,8 @@ describe('ATK-01: a dangling symbolic link as the database path', () => {
   it('a link to an EMPTY existing file would initialise a new database through a link: refused, the target is left as it was', () => {
     const { dir, shared, attacker } = layout();
     const target = join(attacker, 'empty.sqlite');
-    writeFileSync(target, '', { mode: 0o644 });
+    writeFileSync(target, '');
+    chmodSync(target, 0o644); // explicit: a mode given to writeFileSync is reduced by the umask of whoever runs the tests
     const link = join(shared, 'gcr.sqlite');
     symlinkSync(target, link);
     withUmask(0o022, () => {

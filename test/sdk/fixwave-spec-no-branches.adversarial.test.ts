@@ -10,13 +10,14 @@
  */
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { after, before, describe, it } from 'node:test';
 import { Gcr } from '../../src/sdk/gcr.js';
 import { expectGcr, fixedClock, makeTempDir, removeDir, thrown } from './sdk.helpers.test.js';
 
 const NO_ROOT = '00000000-0000-4000-8000-000000000030';
 const CYCLE_BESIDE_TREE = '00000000-0000-4000-8000-000000000031';
-const FIXTURE = new URL('../../../fixtures/chatgpt/broken-trees.json', import.meta.url).pathname;
+const FIXTURE = fileURLToPath(new URL('../../../fixtures/chatgpt/broken-trees.json', import.meta.url));
 
 let dir = '';
 let gcr: Gcr;

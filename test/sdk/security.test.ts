@@ -219,13 +219,19 @@ describe('SQL and FTS injection are inert', () => {
     try {
       const total = t.gcr.list().data.total;
       const attacks = ['\' OR 1=1; DROP TABLE messages; --', '"; DELETE FROM conversations; --', 'quokka) OR (1=1', 'NEAR(a b)', 'col:quokka', '-quokka', '* OR *', 'a" OR "b'];
-      for (const q of attacks) {
+      // The oracle for "operators are inert in plain mode": a hostile query finds exactly what the same query finds with every
+      // operator character replaced by a space (its words only), item for item; or it is refused with the same code as that query.
+      const outcome = (query: string): unknown => {
         try {
-          const r = t.gcr.search({ query: q });
-          assert.ok(r.data.items.length < 9, `${q}: plain mode treats operators as ordinary words`);
+          return { items: t.gcr.search({ query, limit: 100 }).data.items.map((i) => `${i.kind}:${i.conversationId}:${'messageId' in i ? String(i.messageId) : ''}`) };
         } catch (e) {
-          assert.ok(e instanceof Error && (e as { code?: string }).code === 'INVALID_ARGUMENT', `${q}: only INVALID_ARGUMENT is acceptable`);
+          return { error: (e as { code?: string }).code };
         }
+      };
+      for (const q of attacks) {
+        const words = q.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+        assert.notEqual(words, '', `${q}: the oracle query has words`);
+        assert.deepEqual(outcome(q), outcome(words), `${q}: plain mode treats operators as ordinary text (same result as ${JSON.stringify(words)})`);
         t.gcr.search({ query: 'quokka', conversationId: q.slice(0, 100) });
         t.gcr.search({ query: 'quokka', role: q });
         t.gcr.list({ provider: q });

@@ -19,6 +19,7 @@ import type { AddressInfo, Server, Socket } from 'node:net';
 import { delimiter, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { GUARD, baseEnv, makeTempDir, removeDir, runNode } from './scripts.helpers.test.js';
+import { socketDirFor } from '../helpers/unix-socket.js';
 
 let dir = '';
 before(() => {
@@ -243,8 +244,10 @@ describe('scripts/no-network-guard.cjs: the hardening does not break harmless wo
     assert.equal(out['fork'], 'hi');
   });
 
-  it('Unix-domain servers and clients, path-style and string-style, still work', () => {
-    const sock = join(dir, 'harmless.sock');
+  it('Unix-domain servers and clients, path-style and string-style, still work', (t) => {
+    const socketDir = socketDirFor(dir, 'harmless.sock'); // a path longer than sun_path is silently truncated by Node
+    if (socketDir === null) return t.skip('no directory with a path short enough for a Unix-domain socket');
+    const sock = join(socketDir, 'harmless.sock');
     const r = probe(`
       const net = require('net');
       const s = net.createServer((c) => c.end('ok')).listen(${JSON.stringify(sock)}, () => {

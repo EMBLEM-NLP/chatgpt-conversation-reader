@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { ConversationBuilder, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
+import { requireOption } from '../helpers/node-options.js';
 import { FIXTURES, ID, arr, assertClean, assertOk, assertTextError, copyDb, envelope, gcr, obj, spawnCli, tempDir, templateDb, writeFile } from './cli.helpers.test.js';
 
 describe('no network, ever: a tripwire around the whole process', () => {
@@ -50,7 +51,7 @@ globalThis.WebSocket = function () { hit('WebSocket'); };
     const { dbPath, dir } = await copyDb();
     const preload = writeFile(dir, 'tripwire.cjs', TRIPWIRE);
     const netlog = join(dir, 'net.log');
-    const env = { NODE_OPTIONS: `--require ${preload}`, GCR_TEST_NETLOG: netlog, HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9', ALL_PROXY: 'http://127.0.0.1:9' };
+    const env = { NODE_OPTIONS: requireOption(preload), GCR_TEST_NETLOG: netlog, HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9', ALL_PROXY: 'http://127.0.0.1:9' };
     const note = writeFile(dir, 'n.txt', 'note');
     const exportFile = writeFile(dir, 'conversations.json', (await templateDb()).std.json);
     const copy = writeFile(dir, 'copy.json', JSON.stringify({ messages: [{ role: 'user', text: 'x' }] }));

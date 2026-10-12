@@ -187,7 +187,7 @@ describe('countDuplicateKeys: property against a construction oracle', () => {
         const spaced = serialize(t, ws);
         assert.deepEqual(JSON.parse(spaced), JSON.parse(compact));
         assert.equal(countDuplicateKeys(spaced), countDuplicateKeys(compact));
-        assert.equal(countDuplicateKeys(compact), countDuplicateKeys(compact));
+        assert.equal(countDuplicateKeys(compact), expectedDuplicates(t), 'the compact text is checked against the construction oracle too, not only against its own re-spaced copy');
       }),
       300,
     );

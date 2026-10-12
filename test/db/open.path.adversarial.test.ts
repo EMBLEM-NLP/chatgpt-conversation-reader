@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,7 @@ import { after, describe, it } from 'node:test';
 import { GcrError } from '../../src/errors.js';
 import { closeDatabase, openDatabase } from '../../src/db/open.js';
 import { Gcr } from '../../src/sdk/gcr.js';
+import { socketDirFor } from '../helpers/unix-socket.js';
 
 const OPEN_JS = fileURLToPath(new URL('../../src/db/open.js', import.meta.url));
 
@@ -101,7 +102,9 @@ describe('a special file at the database path is refused at once, read-only and 
     });
 
     it(`a Unix domain socket (${mode})`, async (t) => {
-      const dir = tempDir();
+      // The socket has to sit at a path that fits sun_path (see test/helpers/unix-socket.ts): a short directory when TMPDIR is long.
+      const dir = socketDirFor(tempDir(), 'gcr.sqlite');
+      if (dir === null) return t.skip('no directory with a path short enough for a Unix-domain socket');
       const sock = join(dir, 'gcr.sqlite');
       const server = createServer();
       try {
@@ -113,6 +116,10 @@ describe('a special file at the database path is refused at once, read-only and 
         return t.skip('cannot create a Unix socket here');
       }
       try {
+        // A path longer than sockaddr_un.sun_path (107 bytes on Linux, 103 on macOS) does not make listen() fail: Node binds a
+        // TRUNCATED name, so nothing exists at the path this test would hand to the product (a long TMPDIR). Only a socket that
+        // really sits at the requested path can be refused as one.
+        if (lstatSync(sock, { throwIfNoEntry: false })?.isSocket() !== true) return t.skip('the socket could not be created at the requested path (path too long for a Unix socket here)');
         assertRefusedPromptly(openInChild(sock, readOnly), `socket ${mode}`);
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -126,7 +133,8 @@ describe('a symbolic link to a NON-EMPTY file that is not a database is never wr
     const dir = tempDir();
     const precious = join(dir, 'precious.txt');
     const content = 'A PRECIOUS FILE THAT IS NOT A DATABASE, long enough to look like text, not like a SQLite header.\n';
-    writeFileSync(precious, content, { mode: 0o640 });
+    writeFileSync(precious, content);
+    chmodSync(precious, 0o640); // explicit: the mode passed to writeFileSync is reduced by the umask (0027 gives 0640, 0077 gives 0600)
     const link = join(dir, 'gcr.sqlite');
     symlinkSync(precious, link);
     for (const readOnly of [false, true]) {

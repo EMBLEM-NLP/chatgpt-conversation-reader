@@ -10,6 +10,14 @@
  *
  * In-process (runCli with a captured output and a stubbed process.getuid, so the tests also run without root) plus one
  * end-to-end test with a real chown that runs only as root. SYNTHETIC data only.
+ *
+ * WHICH TESTS SKIP, BY USER (the "# skipped" count of a run is the same number for both users, but not the same tests):
+ *  - as root:      nothing in this file is skipped;
+ *  - as non-root:  "end to end with a real chown (root only): the first import into somebody else's empty ./.gcr warns" (a normal
+ *                  user cannot chown). The ATK-11 logic itself stays covered without root by the stubbed-uid tests above it.
+ *  The other root/non-root skip pairs of the suite: test/cli/fixwave-db-safety.test.ts (non-root skips its real-chown test),
+ *  test/devtools/privacy-scan.repo.test.ts "reports an unreadable file ..." and test/sdk/doctor.test.ts "an unreadable file (no
+ *  read permission) ..." (both skip as ROOT, because root can read everything).
  */
 import '../../src/suppress-warnings.js';
 import assert from 'node:assert/strict';

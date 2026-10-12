@@ -171,16 +171,34 @@ describe('runManualCopyImport', () => {
     }
   });
 
+  // TQ-09: this scan used to read the source with `.catch(() => null)`, looked at the imports only `if (src !== null)` and ended with
+  // `assert.ok(true)`, so a missing or moved file passed. The file MUST be readable (readFile rejects, the test fails), the scanner
+  // is proven on synthetic sources that do and do not use the network, and it must have actually parsed the real import list.
+  const FORBIDDEN_MODULE = /^(node:)?(http|https|http2|net|tls|dns|dgram|child_process|worker_threads|cluster|vm)$/;
+  const withoutComments = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  /** Static imports, dynamic import() and require() of string-literal specifiers. */
+  const specifiersOf = (code: string): string[] => [...code.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)['"]([^'"]+)['"]/g)].map((m) => m[1] ?? '');
+  const networkUse = (text: string): string[] => {
+    const code = withoutComments(text);
+    return [...specifiersOf(code).filter((spec) => FORBIDDEN_MODULE.test(spec)), ...(/\bfetch\s*\(/.test(code) ? ['fetch('] : [])];
+  };
+
+  it('the source scan itself detects network and process APIs (so a clean result below means something)', () => {
+    assert.deepEqual(networkUse("import http from 'node:http';\nexport const x = 1;"), ['node:http']);
+    assert.deepEqual(networkUse("import { spawn } from 'child_process';"), ['child_process']);
+    assert.deepEqual(networkUse("const m = await import('node:net');"), ['node:net']);
+    assert.deepEqual(networkUse("const m = require('tls');"), ['tls']);
+    assert.deepEqual(networkUse('await fetch(url);'), ['fetch(']);
+    assert.deepEqual(networkUse("// import http from 'node:http'; fetch(1)\n/* require('net') */\nimport { createHash } from 'node:crypto';"), [], 'comments and harmless modules are not findings');
+  });
+
   it('sourceUri is a label only: nothing is fetched (the module imports no network or process API)', async () => {
     const { readFile } = await import('node:fs/promises');
     const { fileURLToPath } = await import('node:url');
-    const src = await readFile(fileURLToPath(new URL('../../../src/ingest/manual-copy.ts', import.meta.url)), 'utf8').catch(() => null);
-    // The compiled test may run where src/ is absent; when present, check the import list.
-    if (src !== null) {
-      const imports = [...src.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1] ?? '');
-      for (const spec of imports) assert.ok(!/^(node:)?(http|https|net|tls|dns|dgram|child_process|worker_threads|vm)$/.test(spec), spec);
-      assert.ok(!/\bfetch\s*\(/.test(src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')));
-    }
-    assert.ok(true);
+    // No catch: when src/ingest/manual-copy.ts is not where the compiled test expects it, readFile rejects and this test FAILS.
+    const src = await readFile(fileURLToPath(new URL('../../../src/ingest/manual-copy.ts', import.meta.url)), 'utf8');
+    const specifiers = specifiersOf(withoutComments(src));
+    assert.ok(specifiers.includes('../errors.js') && specifiers.includes('../db/repo.js'), `the scan parsed the real import list (got ${JSON.stringify(specifiers)})`);
+    assert.deepEqual(networkUse(src), []);
   });
 });

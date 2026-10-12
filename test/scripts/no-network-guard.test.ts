@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { requireOption } from '../helpers/node-options.js';
+import { socketDirFor } from '../helpers/unix-socket.js';
 import { GUARD, baseEnv, makeTempDir, removeDir, runNode } from './scripts.helpers.test.js';
 
 const PREFIX = 'GCR_NO_NETWORK_GUARD:';
@@ -149,8 +151,11 @@ describe('scripts/no-network-guard.cjs: every known way to use the network throw
 });
 
 describe('scripts/no-network-guard.cjs: what it must NOT block', () => {
-  it('stdio pipes, child processes with piped stdio, Unix-domain sockets (server and client) and plain file I/O', async () => {
-    const socketPath = join(dir, 'local.sock');
+  it('stdio pipes, child processes with piped stdio, Unix-domain sockets (server and client) and plain file I/O', async (t) => {
+    // A socket path longer than sun_path is silently truncated by Node (and the two names below would collide): use a short directory.
+    const socketDir = socketDirFor(dir, 'local.sock', 'local.sock2');
+    if (socketDir === null) return t.skip('no directory with a path short enough for a Unix-domain socket');
+    const socketPath = join(socketDir, 'local.sock');
     const code = `
       const net = require('net'), cp = require('child_process'), fs = require('fs');
       const out = {};
@@ -276,7 +281,7 @@ describe('scripts/no-network-guard.cjs: how it is installed', () => {
     const loadedFile = join(dir, 'options-loaded.log');
     const inner = 'try { fetch("http://192.0.2.1:9/").catch(() => {}); } catch (e) {}';
     const outer = `const r = require('child_process').spawnSync(process.execPath, ['-e', ${JSON.stringify(inner)}], { stdio: 'inherit' }); process.exitCode = r.status;`;
-    const r = await runNode(['-e', outer], { cwd: dir, env: baseEnv({ NODE_OPTIONS: `--require=${GUARD}`, GCR_NO_NETWORK_LOG: logFile, GCR_NO_NETWORK_LOADED_LOG: loadedFile }) });
+    const r = await runNode(['-e', outer], { cwd: dir, env: baseEnv({ NODE_OPTIONS: requireOption(GUARD), GCR_NO_NETWORK_LOG: logFile, GCR_NO_NETWORK_LOADED_LOG: loadedFile }) });
     assert.equal(r.code, 0);
     assert.deepEqual(linesOf(logFile), ['fetch'], 'the grandchild was guarded too');
     assert.equal(linesOf(loadedFile).length, 2, 'the guard loaded in the child and in the grandchild');

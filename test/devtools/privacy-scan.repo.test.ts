@@ -781,9 +781,11 @@ describe('robustness', () => {
       await commitAll(dir, 'one');
       const ran = join(dir, '..', `fsmonitor-ran-${process.pid}`);
       const hook = join(dir, '..', `fsmonitor-hook-${process.pid}.sh`);
-      await writeFile(hook, `#!/bin/sh\ntouch '${ran}'\nprintf '\\0'\n`, { mode: 0o755 });
+      // git hands core.fsmonitor to a shell, so a path with a space (a TMPDIR such as "/tmp/my dir") has to be quoted for it.
+      const quoted = (p: string): string => `'${p.replaceAll("'", "'\\''")}'`;
+      await writeFile(hook, `#!/bin/sh\ntouch ${quoted(ran)}\nprintf '\\0'\n`, { mode: 0o755 });
       try {
-        await git(dir, 'config', 'core.fsmonitor', hook);
+        await git(dir, 'config', 'core.fsmonitor', quoted(hook));
         await put(dir, 'b.txt', 'y\n');
         await git(dir, 'add', 'b.txt'); // plain git runs the hook here (and in diff/ls-files)
         // Control: plain git DOES run it, so the assertion below is not vacuous.

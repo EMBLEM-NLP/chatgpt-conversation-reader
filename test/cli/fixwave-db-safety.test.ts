@@ -10,6 +10,15 @@
  *  - ATK-08(a): a read command on a SQLite file that is not a GCR database says exactly that;
  *  - ATK-11: a default ./.gcr database that belongs to somebody else is announced on stderr (never stdout, never suppressed by
  *    --quiet); explicit --db / GCR_DB are the operator's own choice and stay silent.
+ *
+ * WHICH TESTS SKIP, BY USER (the "# skipped" count of a run is the same number for both users, but not the same tests):
+ *  - as root:      nothing in this file is skipped;
+ *  - as non-root:  "end to end: warns on stderr for a database owned by another user (only when the test may chown) ..." (a normal
+ *                  user cannot chown). The ATK-11 logic is still covered without root by the defaultDatabaseOwnershipWarning
+ *                  tests, which pass a different uid to the function instead of changing a file's owner.
+ *  The other root/non-root skip pairs of the suite: test/cli/db-safety.adversarial.test.ts (non-root skips its real-chown test),
+ *  test/devtools/privacy-scan.repo.test.ts "reports an unreadable file ..." and test/sdk/doctor.test.ts "an unreadable file (no
+ *  read permission) ..." (both skip as ROOT, because root can read everything).
  */
 import assert from 'node:assert/strict';
 import { chownSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs';

@@ -10,7 +10,8 @@
  */
 import assert from 'node:assert/strict';
 import { constants as bufferConstants } from 'node:buffer';
-import { freemem } from 'node:os';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { test } from 'node:test';
 import { GcrError } from '../../src/errors.js';
 import { jsonArrayElements, jsonLinesElements } from '../../src/ingest/json-stream.js';
@@ -171,37 +172,57 @@ test('a maxElementBytes below one whole byte is INVALID_ARGUMENT (no element cou
 // Defect: a raised limit above the maximum JS string length ended in a raw ERR_STRING_TOO_LONG
 // ---------------------------------------------------------------------------------------------------------------
 
-test('maxElementBytes can never exceed what a JS string can hold: an element at that size is IMPORT_LIMIT_EXCEEDED, not a raw Error', { timeout: 120_000 }, async (t) => {
+// TQ-07: this scenario buffers ~512 MiB (the element grows by doubling up to the clamp, in Buffers outside the JS heap). It used
+// to be skipped whenever os.freemem() was below 4 GiB, so on a busy or small CI machine the assertion about the clamp silently
+// disappeared. It now always runs, in a CHILD process with an explicit V8 heap cap: the outcome does not depend on the free
+// memory of the moment (a machine that really cannot spare ~1 GiB gets a clear failure, never a silent skip), the parent test
+// process never holds the buffers, and the cap proves that the importer needs no big JS heap for an oversized element.
+const CHILD_HEAP_CAP_MIB = 96;
+
+test('maxElementBytes can never exceed what a JS string can hold: an element at that size is IMPORT_LIMIT_EXCEEDED, not a raw Error (child process, explicit heap cap)', { timeout: 180_000 }, async () => {
   const maxString = bufferConstants.MAX_STRING_LENGTH;
-  // The element is buffered up to the limit (~512 MiB, growing by doubling), so require generous free memory.
-  if (freemem() < 4 * 1024 ** 3) {
-    t.skip('needs ~1 GiB of free memory');
-    return;
-  }
-  const slab = Buffer.alloc(8 * 1024 * 1024, 0x61);
-  async function* oversized(): AsyncGenerator<Buffer> {
-    yield Buffer.from('["');
-    let remaining = maxString + 16; // comfortably more than a string can hold
-    while (remaining > 0) {
-      const n = Math.min(remaining, slab.length);
-      yield slab.subarray(0, n);
-      remaining -= n;
+  const moduleUrl = new URL('../../src/ingest/json-stream.js', import.meta.url).href;
+  const script = `
+    import { jsonArrayElements } from ${JSON.stringify(moduleUrl)};
+    import { getHeapStatistics } from 'node:v8';
+    import { constants } from 'node:buffer';
+    const slab = Buffer.alloc(8 * 1024 * 1024, 0x61);
+    async function* oversized() {
+      yield Buffer.from('["');
+      let remaining = constants.MAX_STRING_LENGTH + 16; // comfortably more than a string can hold
+      while (remaining > 0) {
+        const n = Math.min(remaining, slab.length);
+        yield slab.subarray(0, n);
+        remaining -= n;
+      }
+      yield Buffer.from('"]');
     }
-    yield Buffer.from('"]');
-  }
-  await assert.rejects(
-    (async () => {
+    let outcome;
+    try {
       for await (const el of jsonArrayElements(oversized(), { maxElementBytes: 2 ** 40 })) void el;
-    })(),
-    (e: unknown) => {
-      assert.ok(e instanceof GcrError, `expected GcrError, got ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`);
-      assert.equal(e.code, 'IMPORT_LIMIT_EXCEEDED');
-      assert.equal(e.details?.['reason'], 'ELEMENT_TOO_LARGE');
-      // Equality (not <=) also pins the hard-coded constant in json-stream.ts to the runtime's real value.
-      assert.equal(e.details?.['max'], maxString, 'the effective limit is exactly the maximum string length');
-      return true;
-    },
-  );
+      outcome = { threw: false };
+    } catch (e) {
+      outcome = { threw: true, isGcrError: e?.constructor?.name === 'GcrError', name: String(e?.name), code: e?.code, reason: e?.details?.reason, max: e?.details?.max, message: String(e?.message).slice(0, 200) };
+    }
+    process.stdout.write(JSON.stringify({ ...outcome, maxString: constants.MAX_STRING_LENGTH, heapLimit: getHeapStatistics().heap_size_limit }));
+  `;
+  const child = spawn(process.execPath, [`--max-old-space-size=${CHILD_HEAP_CAP_MIB}`, '--no-warnings', '--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env['PATH'] ?? '' } });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
+  child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
+  const [code, signal] = (await once(child, 'close')) as [number | null, NodeJS.Signals | null];
+  assert.equal(signal, null, `the child was killed by ${String(signal)} (it needs about 1 GiB of memory outside the JS heap); stderr: ${stderr.slice(0, 300)}`);
+  assert.equal(code, 0, `child exit code; stderr: ${stderr.slice(0, 300)}`);
+  const r = JSON.parse(stdout) as { threw: boolean; isGcrError: boolean; name: string; code?: string; reason?: string; max?: number; message?: string; maxString: number; heapLimit: number };
+  assert.ok(r.heapLimit < 512 * 1024 ** 2, `the explicit --max-old-space-size=${CHILD_HEAP_CAP_MIB} applied (heap limit ${r.heapLimit})`);
+  assert.equal(r.maxString, maxString, 'the child runs on the same runtime');
+  assert.equal(r.threw, true, 'an element larger than a JS string must be refused');
+  assert.equal(r.isGcrError, true, `expected a GcrError, got ${r.name}: ${r.message ?? ''}`);
+  assert.equal(r.code, 'IMPORT_LIMIT_EXCEEDED');
+  assert.equal(r.reason, 'ELEMENT_TOO_LARGE');
+  // Equality (not <=) also pins the hard-coded constant in json-stream.ts to the runtime's real value.
+  assert.equal(r.max, maxString, 'the effective limit is exactly the maximum string length');
 });
 
 // ---------------------------------------------------------------------------------------------------------------

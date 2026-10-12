@@ -10,6 +10,7 @@ import { before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { CLI_MAIN, FORMATS, HOSTILE, ID, REPO_ROOT, assertClean, assertJsonError, assertOk, assertTextError, collect, copyDb, envelope, gcr, parseJson, spawnCli, tempDir, templateDb, writeFile } from './cli.helpers.test.js';
 import type { RunResult } from './cli.helpers.test.js';
+import { requireOption } from '../helpers/node-options.js';
 
 let dbPath = '';
 before(async () => {
@@ -95,7 +96,7 @@ describe('the node:sqlite ExperimentalWarning', () => {
         '}, 600);',
       ].join('\n'),
     );
-    const child = spawnCli(['import', '-', '--db', join(dir, 'w.sqlite')], { stdin: '', env: { NODE_OPTIONS: `--require ${preload}` } });
+    const child = spawnCli(['import', '-', '--db', join(dir, 'w.sqlite')], { stdin: '', env: { NODE_OPTIONS: requireOption(preload) } });
     const done = collect(child);
     await new Promise((r) => setTimeout(r, 1500)); // after the preload's timer fired
     child.stdin?.end();
@@ -158,7 +159,7 @@ describe('--debug and unexpected failures', () => {
   for (const kind of ['throw', 'reject'] as const) {
     it(`an unexpected exception (${kind}) is INTERNAL_ERROR, exit 1, with a generic message that leaks nothing`, async () => {
       const dir = tempDir();
-      const env = { NODE_OPTIONS: `--require ${writeFile(dir, 'preload.cjs', thrower(kind))}` };
+      const env = { NODE_OPTIONS: requireOption(writeFile(dir, 'preload.cjs', thrower(kind))) };
       // stdin stays open, so the import is still waiting when the preload's timer fires.
       const failing = async (extra: string[]): Promise<RunResult> =>
         collect(spawnCli(['import', '-', '--db', join(dir, `${kind}-${extra.join('')}.sqlite`), ...extra], { stdin: '', env }), { timeoutMs: 30_000 });

@@ -12,13 +12,15 @@
  */
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { after, before, describe, it } from 'node:test';
 import { Gcr } from '../../src/sdk/gcr.js';
 import type { AttachmentSearchItem, MessageSearchItem, SearchItem, TitleSearchItem } from '../../src/sdk/gcr.js';
 import { ConversationBuilder, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
 import { assertCode, assertEnvelopeShape, fixedClock, importBuilders, makeTempDir, removeDir, title, warningCodes } from './sdk.helpers.test.js';
 
-const FIXTURES = new URL('../../../fixtures/', import.meta.url).pathname;
+// fileURLToPath, not URL.pathname: the latter keeps %20 / %C3%BC escapes for a checkout in a directory with a space or a non-ASCII name.
+const FIXTURES = fileURLToPath(new URL('../../../fixtures/', import.meta.url));
 const ATTACHMENT_CONVERSATION = '00000000-0000-4000-8000-00000000000b';
 
 const attachments = (items: readonly SearchItem[]): AttachmentSearchItem[] => items.filter((i): i is AttachmentSearchItem => i.kind === 'attachment');

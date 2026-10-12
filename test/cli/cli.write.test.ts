@@ -3,7 +3,7 @@
  * annotations and the knowledge graph (including the HTML export's overwrite and symlink protections).
  */
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { buildZip } from '../helpers/zip-builder.js';
@@ -155,7 +155,9 @@ describe('default database location and permissions', () => {
 
   it('leaves the permissions of an existing ./.gcr alone', async () => {
     const cwd = tempDir();
-    mkdirSync(join(cwd, '.gcr'), { mode: 0o755 });
+    mkdirSync(join(cwd, '.gcr'));
+    chmodSync(join(cwd, '.gcr'), 0o755); // explicit: mkdir's mode argument is reduced by the umask of whoever runs the tests
+    assert.equal(octal(mode(join(cwd, '.gcr'))), '0755', 'premise: the fixture directory is world-readable');
     const file = writeFile(cwd, 'conversations.json', standardExport().json);
     const r = await gcr(['import', file, '--format', 'json'], { cwd });
     assertOk(r);

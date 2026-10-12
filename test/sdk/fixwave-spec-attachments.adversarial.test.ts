@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { after, before, describe, it } from 'node:test';
 import { Gcr } from '../../src/sdk/gcr.js';
 import { ConversationBuilder, syntheticUuid } from '../helpers/chatgpt-export-builder.js';
@@ -99,7 +100,7 @@ describe('SPEC-04 review: docs claim about text a Claude export carries inline (
     const d3 = await makeTempDir();
     const g = Gcr.open({ dbPath: join(d3, 'c.sqlite'), clock: fixedClock });
     try {
-      await g.importExport({ source: { kind: 'path', path: new URL('../../../fixtures/claude/attachments-files.json', import.meta.url).pathname } });
+      await g.importExport({ source: { kind: 'path', path: fileURLToPath(new URL('../../../fixtures/claude/attachments-files.json', import.meta.url)) } });
       const conv = g.list({ limit: 5 }).data.items[0];
       assert.ok(conv !== undefined);
       const thread = g.get({ conversationId: conv.conversationId, provider: conv.provider, accountLabel: conv.accountLabel }).data.thread;
