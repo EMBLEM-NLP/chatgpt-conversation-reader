@@ -107,7 +107,7 @@ describe('a bare UUID string reference is only trimmed of ASCII whitespace (TQ-0
   it('NBSP, BOM and U+2003 padding is INVALID_UUID on every reading method; ASCII padding resolves the conversation', async () => {
     const t = await standardDb();
     try {
-      for (const ch of [' ', '﻿', ' ']) {
+      for (const ch of ['\u00a0', '\ufeff', '\u2003']) {
         for (const padded of [`${ch}${ID.linear}`, `${ID.linear}${ch}`, `${ch}${ID.linear}${ch}`]) {
           for (const [name, call] of [
             ['get', () => t.gcr.get(padded)],

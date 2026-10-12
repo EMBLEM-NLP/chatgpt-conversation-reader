@@ -350,18 +350,18 @@ describe('parseConversationRef', () => {
   // TQ-03 (mutation survivor `normalizeUuid(input.trim())`): String.prototype.trim() removes every one of these, GCR's own
   // trim ("Nothing else is trimmed", src/domain/ids.ts) none of them. A padded bare id is not an id: INVALID_UUID / not_a_uuid.
   const NOT_ASCII_WHITESPACE: ReadonlyArray<readonly [string, string]> = [
-    ['no-break space U+00A0', ' '],
-    ['byte order mark U+FEFF', '﻿'],
-    ['em space U+2003', ' '],
-    ['ideographic space U+3000', '　'],
+    ['no-break space U+00A0', '\u00a0'],
+    ['byte order mark U+FEFF', '\ufeff'],
+    ['em space U+2003', '\u2003'],
+    ['ideographic space U+3000', '\u3000'],
     ['vertical tab U+000B', '\u000b'],
-    ['ogham space mark U+1680', ' '],
-    ['en quad U+2000', ' '],
-    ['hair space U+200A', ' '],
-    ['narrow no-break space U+202F', ' '],
-    ['medium mathematical space U+205F', ' '],
-    ['line separator U+2028', ' '],
-    ['paragraph separator U+2029', ' '],
+    ['ogham space mark U+1680', '\u1680'],
+    ['en quad U+2000', '\u2000'],
+    ['hair space U+200A', '\u200a'],
+    ['narrow no-break space U+202F', '\u202f'],
+    ['medium mathematical space U+205F', '\u205f'],
+    ['line separator U+2028', '\u2028'],
+    ['paragraph separator U+2029', '\u2029'],
   ];
   for (const [label, ch] of NOT_ASCII_WHITESPACE) {
     it(`a bare UUID padded with ${label} is refused, whichever side carries it (INVALID_UUID not_a_uuid)`, () => {
@@ -376,7 +376,7 @@ describe('parseConversationRef', () => {
   }
 
   it('the refusal of a padded bare UUID is the same through normalizeUuid and does not echo the padding', () => {
-    for (const ch of [' ', '﻿', ' ']) {
+    for (const ch of ['\u00a0', '\ufeff', '\u2003']) {
       expectCode(() => normalizeUuid(`${ch}${U}`), 'INVALID_UUID', 'not_a_uuid');
       let caught: unknown;
       try {

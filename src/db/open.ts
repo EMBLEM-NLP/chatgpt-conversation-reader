@@ -358,6 +358,29 @@ function countUserObjects(db: DatabaseSync): number {
   return Number(db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").get()?.['n'] ?? 0);
 }
 
+/**
+ * `PRAGMA journal_mode = WAL` with a bounded retry on SQLITE_BUSY. SQLite does not call the busy handler for a journal-mode
+ * switch (`busy_timeout` does not apply), so when several processes create the same brand-new database at the same moment all but
+ * one used to fail with DB_ERROR "busy" although waiting a few milliseconds would have worked (round-2 review: 6 of 90 runs of
+ * the six-processes test failed). Only a busy/locked answer is retried; any other failure surfaces at once, and after the last
+ * attempt the busy error itself is thrown (about two seconds in all).
+ */
+const WAL_SWITCH_ATTEMPTS = 200;
+const WAL_SWITCH_PAUSE_MS = 10;
+/** Exported as a test seam only (the attempts and the pause are parameters so that the give-up path can be tested quickly). */
+export function switchToWal(db: DatabaseSync, attempts: number = WAL_SWITCH_ATTEMPTS, pauseMs: number = WAL_SWITCH_PAUSE_MS): Record<string, unknown> | undefined {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return db.prepare('PRAGMA journal_mode = WAL').get() as Record<string, unknown> | undefined;
+    } catch (e) {
+      const code = (e as { errcode?: unknown } | null)?.errcode;
+      const busy = typeof code === 'number' && ((code & 0xff) === 5 || (code & 0xff) === 6);
+      if (!busy || attempt >= attempts) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pauseMs);
+    }
+  }
+}
+
 /** Static pragma set (no user input is ever interpolated into these statements). */
 function configureConnection(db: DatabaseSync, readOnly: boolean, memory: boolean): void {
   db.exec('PRAGMA foreign_keys = ON');
@@ -368,7 +391,7 @@ function configureConnection(db: DatabaseSync, readOnly: boolean, memory: boolea
     db.exec('PRAGMA query_only = ON');
   } else if (!memory) {
     // WAL gives readers and the single writer independence; it needs a real file (not :memory:) and write access.
-    const row = db.prepare('PRAGMA journal_mode = WAL').get();
+    const row = switchToWal(db);
     const mode = row?.['journal_mode'];
     if (mode !== 'wal') log.warn('journal_mode_not_wal', { mode: String(mode) });
   }

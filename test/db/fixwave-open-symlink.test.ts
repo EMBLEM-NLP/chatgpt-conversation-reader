@@ -14,7 +14,7 @@
  */
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -212,7 +212,7 @@ describe('ATK-01: EEXIST from open(path, "wx") is success only for a regular fil
 
   // TQ-05 (mutation U1: remove the foreign-owner refusal). Root can chown, a normal user cannot, so ownership is simulated the
   // way test/cli/db-safety.adversarial.test.ts does it: process.getuid is stubbed to return somebody else's uid. The file is
-  // really ours, so the same test runs unchanged as root and as an ordinary user.
+  // really ours, so the same test runs as root and as an ordinary user (where root may chown, it additionally meets a really foreign file).
   it('a regular file that appeared meanwhile but is owned by ANOTHER user is refused ("created by another user in the meantime"), untouched', (t) => {
     const realGetuid = process.getuid;
     if (realGetuid === undefined) return t.skip('this platform has no process.getuid (no file owners)');
@@ -223,24 +223,38 @@ describe('ATK-01: EEXIST from open(path, "wx") is success only for a regular fil
     assert.equal(statSync(path).uid, me, 'premise: the file really is ours; only the process identity is simulated');
     // Control: with the real identity the very same file is the normal "concurrent creator" case and is accepted.
     assert.doesNotThrow(() => createPrivateFile(path, 'planted.sqlite'));
+    const refusal = (e: unknown): boolean => {
+      assert.ok(e instanceof GcrError, `expected a GcrError, got ${String(e)}`);
+      assert.equal(e.code, 'DB_ERROR');
+      assert.equal(e.details?.['reason'], 'cannot_create');
+      assert.equal(e.message, 'The database file was created by another user in the meantime; GCR will not write into it.');
+      assert.equal(JSON.stringify([e.message, e.remedy, e.details]).includes(dir), false, 'no absolute directory in the error');
+      return true;
+    };
     for (const otherUid of [me + 1, me === 0 ? 65534 : 0]) {
       process.getuid = () => otherUid;
       try {
-        assert.throws(
-          () => createPrivateFile(path, 'planted.sqlite'),
-          (e) => {
-            assert.ok(e instanceof GcrError, `expected a GcrError, got ${String(e)}`);
-            assert.equal(e.code, 'DB_ERROR');
-            assert.equal(e.details?.['reason'], 'cannot_create');
-            assert.equal(e.message, 'The database file was created by another user in the meantime; GCR will not write into it.');
-            assert.equal(JSON.stringify([e.message, e.remedy, e.details]).includes(dir), false, 'no absolute directory in the error');
-            return true;
-          },
-          `as uid ${otherUid}`,
-        );
+        assert.throws(() => createPrivateFile(path, 'planted.sqlite'), refusal, `as uid ${otherUid}`);
       } finally {
         process.getuid = realGetuid;
       }
+    }
+    // As root the identity can be REAL as well: give the file to another user for good and meet it with the true uid, no stub. An
+    // implementation that exempts root (`uid !== 0 && existing.uid !== uid`) is caught only here, because the simulated uids above
+    // are never 0 when the tests run as root. Where even root may not chown (a user namespace), the stubbed cases above stand alone.
+    let handedOver = false;
+    if (me === 0) {
+      try {
+        chownSync(path, 65534, 65534);
+        handedOver = true;
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== 'EPERM' && code !== 'EINVAL') throw e;
+      }
+    }
+    if (handedOver) {
+      assert.equal(statSync(path).uid, 65534, 'premise: the file now really belongs to somebody else');
+      assert.throws(() => createPrivateFile(path, 'planted.sqlite'), refusal, 'as root, with the file really owned by uid 65534');
     }
     assert.equal(readFileSync(path, 'utf8'), 'planted by somebody else', 'a refused file is left exactly as it was');
   });

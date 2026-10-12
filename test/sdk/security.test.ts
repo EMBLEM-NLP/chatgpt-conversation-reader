@@ -221,7 +221,8 @@ describe('SQL and FTS injection are inert', () => {
       const attacks = ['\' OR 1=1; DROP TABLE messages; --', '"; DELETE FROM conversations; --', 'quokka) OR (1=1', 'NEAR(a b)', 'col:quokka', '-quokka', '* OR *', 'a" OR "b'];
       // The oracle for "operators are inert in plain mode": a hostile query finds exactly what the same query finds with every
       // operator character replaced by a space (its words only), item for item; or it is refused with the same code as that query.
-      const outcome = (query: string): unknown => {
+      type Outcome = { items: string[] } | { error: string | undefined };
+      const outcome = (query: string): Outcome => {
         try {
           return { items: t.gcr.search({ query, limit: 100 }).data.items.map((i) => `${i.kind}:${i.conversationId}:${'messageId' in i ? String(i.messageId) : ''}`) };
         } catch (e) {
@@ -231,7 +232,12 @@ describe('SQL and FTS injection are inert', () => {
       for (const q of attacks) {
         const words = q.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
         assert.notEqual(words, '', `${q}: the oracle query has words`);
-        assert.deepEqual(outcome(q), outcome(words), `${q}: plain mode treats operators as ordinary text (same result as ${JSON.stringify(words)})`);
+        const got = outcome(q);
+        // The two absolute bounds this test always had stay: the oracle alone would pass when BOTH queries fail the same wrong way
+        // (say, a bare word that became an FTS operator makes the words-only query a syntax error too).
+        if ('error' in got) assert.equal(got.error, 'INVALID_ARGUMENT', `${q}: only INVALID_ARGUMENT is acceptable`);
+        else assert.ok(got.items.length < 9, `${q}: plain mode treats operators as ordinary words`);
+        assert.deepEqual(got, outcome(words), `${q}: plain mode treats operators as ordinary text (same result as ${JSON.stringify(words)})`);
         t.gcr.search({ query: 'quokka', conversationId: q.slice(0, 100) });
         t.gcr.search({ query: 'quokka', role: q });
         t.gcr.list({ provider: q });

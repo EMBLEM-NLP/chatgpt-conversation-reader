@@ -24,7 +24,7 @@ describe('normalizeRef: strings', () => {
   });
 
   it('only ASCII whitespace is trimmed from a bare UUID: padding with NBSP, BOM or U+2003 is INVALID_UUID (TQ-03), ASCII padding is accepted', () => {
-    for (const ch of [' ', '﻿', ' ']) {
+    for (const ch of ['\u00a0', '\ufeff', '\u2003']) {
       assert.equal(`${ch}${UUID}`.trim(), UUID, 'premise: String.prototype.trim() would have accepted this');
       for (const padded of [`${ch}${UUID}`, `${UUID}${ch}`, `${ch}${UUID}${ch}`, ` ${ch}${UUID} `]) {
         const e = assertCode(() => normalizeRef('ref', padded), 'INVALID_UUID');

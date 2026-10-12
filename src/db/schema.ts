@@ -280,7 +280,11 @@ export function applyMigrations(db: DatabaseSync, migrations: ReadonlyArray<Migr
     // create our tables inside it.
     const appId = readIntPragma(db, 'application_id');
     if (appId !== 0 && appId !== GCR_APPLICATION_ID) throw notGcrDatabase();
-    if (appId === 0 && userObjectCount(db) > 0) throw notGcrDatabase();
+    if (appId === 0 && userObjectCount(db) > 0) {
+      // user_version, application_id and the object count are three separate reads: a concurrent opener may have created OUR schema
+      // in between (several processes creating one new database at once). Look once more; only a file that is still not ours is foreign.
+      if (readUserVersion(db) === 0 && readIntPragma(db, 'application_id') !== GCR_APPLICATION_ID) throw notGcrDatabase();
+    }
   }
 
   let current = from;
