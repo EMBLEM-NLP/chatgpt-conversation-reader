@@ -12,18 +12,30 @@
  */
 import type { OutputFormat } from '../domain/types.js';
 import type { Warning } from '../errors.js';
+import { escapeJsonHazards } from '../format/scrub.js';
 
-const HAZARD = new RegExp(
-  [
-    '[\\u007f-\\u009f]',
-    `[${[0x2028, 0x2029, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069].map((c) => `\\u${c.toString(16)}`).join('')}]`,
-    '\\uDB40[\\uDC00-\\uDC7F]',
-  ].join('|'),
-  'g',
-);
-
-function escapeHazards(json: string): string {
-  return json.replace(HAZARD, (m) => Array.from({ length: m.length }, (_, i) => `\\u${m.charCodeAt(i).toString(16).padStart(4, '0')}`).join(''));
+/**
+ * The warnings a rendered thread must carry: the SDK envelope's warnings FIRST (in the envelope's own order, so
+ * SOURCE_NOT_FULL_HISTORY stays first for every non-`exported_tree` source: FR-09), then the thread-level ones the envelope
+ * does not already hold. Duplicates are removed by CODE: the envelope of `get` / `thread` is built from the thread's warnings
+ * plus the conversation-level ones, so a thread warning normally reappears there, and listing the same code twice would only
+ * make the output longer.
+ *
+ * Why this exists: `renderThread` prints `ThreadResult.warnings` and nothing else. The envelope's lead warning
+ * (SOURCE_NOT_FULL_HISTORY), the one thing that tells a reader that a partial or rendered-only source is not the whole
+ * history, lives only on the envelope, so without this merge `gcr get` and `gcr thread` printed fewer warnings than the SDK
+ * and MCP for the same call (SPEC-02). Pure and deterministic.
+ */
+export function mergeWarningsByCode(envelope: readonly Warning[], thread: readonly Warning[]): Warning[] {
+  const copy = (w: Warning): Warning => (w.ids === undefined ? { code: w.code, message: w.message } : { code: w.code, message: w.message, ids: [...w.ids] });
+  const codes = new Set(envelope.map((w) => w.code));
+  const out = envelope.map(copy);
+  for (const w of thread) {
+    if (codes.has(w.code)) continue;
+    codes.add(w.code);
+    out.push(copy(w));
+  }
+  return out;
 }
 
 function isWarning(v: unknown): v is Warning {
@@ -48,7 +60,7 @@ export function withEnvelopeWarnings(rendered: string, format: OutputFormat, ext
     if (format === 'json') {
       const doc = JSON.parse(rendered) as Record<string, unknown>;
       doc['warnings'] = merged(doc['warnings'], extra);
-      return `${escapeHazards(JSON.stringify(doc, null, 2))}\n`;
+      return `${escapeJsonHazards(JSON.stringify(doc, null, 2))}\n`;
     }
     if (format === 'jsonl') {
       const lines = rendered.trimEnd().split('\n');
@@ -56,7 +68,7 @@ export function withEnvelopeWarnings(rendered: string, format: OutputFormat, ext
       const footer = JSON.parse(lines[last] ?? '') as Record<string, unknown>;
       if (footer['type'] !== 'footer') return rendered;
       footer['warnings'] = merged(footer['warnings'], extra);
-      lines[last] = escapeHazards(JSON.stringify(footer));
+      lines[last] = escapeJsonHazards(JSON.stringify(footer));
       return `${lines.join('\n')}\n`;
     }
   } catch {

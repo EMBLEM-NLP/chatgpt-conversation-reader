@@ -25,6 +25,10 @@ import { installStdoutGuard } from './stdout-guard.js';
  *   GCR_APPROVED_IMPORT_ROOTS   absolute directories (platform path delimiter) that gcr_import_export may read from
  *   GCR_MCP_MAX_RESULT_BYTES    result size cap, 8192 to 3000000 (default 200000)
  *   GCR_LOG_LEVEL / GCR_DEBUG   stderr log threshold (error | warn | info | debug)
+ *
+ * Known and documented (docs/MCP_TOOLS.md sections 5 and 9, ATK-11): one request or response frame over the SDK transport's
+ * 10 MiB read buffer does not fail a single call, it closes the connection and this process exits (logged as
+ * `mcp_transport_error`). GCR keeps its own frames below the limit with the result cap; a hostile CLIENT can still end the session.
  */
 
 export interface McpArgs {

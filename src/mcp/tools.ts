@@ -240,21 +240,26 @@ export function buildToolTable(deps: ToolDeps): readonly ToolEntry[] {
 
   const search = defineTool({
     name: 'gcr_search',
-    title: 'Search messages and titles',
-    description: `Full-text search over imported messages, conversation titles or both (scope). Plain mode treats the query as words; raw mode takes FTS5 syntax. Stable ranking; page with limit and offset. ${LOCAL_READ} ${UNTRUSTED}`,
+    title: 'Search messages, titles and attachment names',
+    description: `Full-text search over imported messages, titles and attachment file names (scope; names only, never file content). Plain mode: words; raw mode: FTS5 syntax. Page with limit and offset. ${LOCAL_READ} ${UNTRUSTED}`,
     annotations: READ_ONLY,
     input: z.strictObject({
       query: z.string().min(1).max(1000).describe('Words to find (plain mode: all words must match; a trailing * makes a prefix) or an FTS5 expression (raw mode).'),
       mode: z.enum(['plain', 'raw']).optional().describe('plain (default, safe) or raw FTS5 syntax.'),
-      scope: z.enum(['messages', 'titles', 'all']).optional().describe('What to search (default messages). The filters below apply to messages only.'),
+      scope: z
+        .enum(['messages', 'titles', 'attachments', 'all'])
+        .optional()
+        .describe(
+          'What to search (default messages). attachments = file names and MIME types of attachments (metadata only; each word must occur inside the name or type; oldest first). all = titles, then messages, then attachments (attachments are skipped in raw mode, with a warning). The message filters below apply to messages and attachments; titles and all take none of them.',
+        ),
       provider: providerField,
       accountLabel: accountLabelField,
-      conversation: conversationField.optional().describe('Only messages of this conversation (UUID, exact chatgpt.com/c/<uuid> link or stored id). Message scope only.'),
-      role: z.string().min(1).max(128).optional().describe('Only messages by this author role, for example user or assistant. Message scope only.'),
-      channel: z.string().min(1).max(128).optional().describe('Only messages in this channel. Message scope only.'),
-      hasModel: z.boolean().optional().describe('true: only messages whose source named a model; false: only those without. Message scope only.'),
-      createdAfter: isoField('Only messages created at or after this time. Message scope only'),
-      createdBefore: isoField('Only messages created before this time. Message scope only'),
+      conversation: conversationField.optional().describe('Only messages of this conversation (UUID, exact chatgpt.com/c/<uuid> link or stored id). Messages and attachments scopes only.'),
+      role: z.string().min(1).max(128).optional().describe('Only messages by this author role, for example user or assistant. Messages and attachments scopes only.'),
+      channel: z.string().min(1).max(128).optional().describe('Only messages in this channel. Messages and attachments scopes only.'),
+      hasModel: z.boolean().optional().describe('true: only messages whose source named a model; false: only those without. Messages and attachments scopes only.'),
+      createdAfter: isoField('Only messages created at or after this time. Messages and attachments scopes only'),
+      createdBefore: isoField('Only messages created before this time. Messages and attachments scopes only'),
       includeHidden: includeHiddenField,
       allBatches: allBatchesField,
       limit: limitField(200, 20),

@@ -172,10 +172,11 @@ describe('graphQuery: breadth-first neighbourhoods', () => {
     assert.equal(graphStats(h.db).built, false);
   });
 
-  it('an unknown term yields an empty result', async () => {
+  it('an unknown term yields an empty result, never a silent one: the warning NO_MATCHING_NODE says so (SPEC-03)', async () => {
     const db = await buildDb(chainConversations());
     const r = graphQuery(db, { term: 'nosuchthing' });
-    assert.deepEqual([r.seeds, r.nodes, r.edges, r.truncated, r.warnings], [[], [], [], false, []]);
+    assert.deepEqual([r.seeds, r.nodes, r.edges, r.truncated], [[], [], [], false]);
+    assert.deepEqual(r.warnings.map((w) => w.code), ['NO_MATCHING_NODE']);
   });
 });
 

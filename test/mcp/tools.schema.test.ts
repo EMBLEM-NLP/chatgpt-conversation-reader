@@ -62,7 +62,7 @@ const INPUT_SNAPSHOT: Record<string, Record<string, unknown>> = {
     {
       query: str(1, 1000),
       mode: oneOf('plain', 'raw'),
-      scope: oneOf('messages', 'titles', 'all'),
+      scope: oneOf('messages', 'titles', 'attachments', 'all'),
       provider: F.provider,
       accountLabel: F.accountLabel,
       conversation: F.conversation,

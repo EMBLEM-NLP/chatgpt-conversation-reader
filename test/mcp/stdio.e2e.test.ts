@@ -170,7 +170,8 @@ describe('raw bytes on stdout', () => {
 
     const injection = frames.find((f) => f['id'] === 4) as { result: { structuredContent: { data: { thread: { messages: Array<{ text: string }> } } } } };
     const text = injection.result.structuredContent.data.thread.messages[1]?.text ?? '';
-    assert.ok(text.includes(LINE_SEPARATOR) && text.includes(PARAGRAPH_SEPARATOR) && text.includes(NEXT_LINE), 'the separators survive the round trip as data');
+    assert.ok(!text.includes(LINE_SEPARATOR) && !text.includes(PARAGRAPH_SEPARATOR) && !text.includes(NEXT_LINE), 'the separators are no longer raw characters in the data (ATK-04)');
+    assert.ok(text.includes('\\u2028') && text.includes('\\u2029') && text.includes('\\u0085'), 'they arrive as visible escapes');
     for (const escape of ['\\u2028', '\\u2029', '\\u0085']) assert.ok(bytes.toString('utf8').includes(escape), `${escape} crosses the wire as an escape, never raw`);
     assert.ok(bytes.toString('utf8').includes(INJECTION.fakeFrame.replaceAll('"', '\\"')), 'the fake frame travels only as an escaped string inside a result');
 

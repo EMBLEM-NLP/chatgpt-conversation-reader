@@ -140,7 +140,7 @@ describe('bearer-token', () => {
     for (const line of [
       'Authorization: Bearer <token>',
       'Authorization: Bearer ${token}',
-      `Authorization: Basic ${token}`,
+      `Authorization: Digest ${token}`, // Basic credentials have their own rule (basic-auth-header)
       `Authorization: Bearer ${token.slice(0, 19)}`,
       `Bearer ${token}`,
       'the Authorization header carries a Bearer credential',
@@ -358,8 +358,10 @@ describe('scanContent behaviour', () => {
     assert.deepEqual(
       [...CONTENT_RULE_IDS].sort(),
       [
-        'asset-pointer', 'aws-access-key-id', 'bearer-token', 'chatgpt-conversation-url', 'cloudflare-clearance-cookie', 'cookie-header', 'cookie-jar-entry',
-        'device-id', 'github-token', 'high-entropy-blob', 'jwt', 'openai-api-key', 'pem-private-key', 'session-cookie-name', 'slack-token', 'user-id-cookie',
+        'asset-pointer', 'aws-access-key-id', 'aws-secret-access-key', 'basic-auth-header', 'bearer-token', 'chatgpt-conversation-url', 'cloudflare-clearance-cookie',
+        'cookie-header', 'cookie-jar-entry', 'device-id', 'github-token', 'gitlab-token', 'google-api-key', 'high-entropy-blob', 'huggingface-token', 'jwt',
+        'netrc-password', 'npm-token', 'openai-api-key', 'password-parameter', 'pem-private-key', 'session-cookie-name', 'slack-token', 'stripe-key', 'url-credentials',
+        'user-id-cookie',
       ],
     );
   });

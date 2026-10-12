@@ -7,13 +7,13 @@
 import type { AuditCheck } from '../../analysis/audit.js';
 import type { StatsGroupBy } from '../../analysis/stats.js';
 import type { BranchPolicy } from '../../domain/branches.js';
-import type { Page } from '../../domain/results.js';
+import type { Page, ThreadResult } from '../../domain/results.js';
 import type { ResultEnvelope } from '../../domain/types.js';
 import { renderBranchList, renderConversationList, renderEnvelope, renderSearchHits, renderThread } from '../../format/render.js';
 import { notFullHistoryWarning, overallCompleteness, toSourceSummary } from '../../sdk/envelope.js';
 import type { SearchItem, SearchOptions, SearchScope } from '../../sdk/gcr.js';
 import type { CommandContext } from '../context.js';
-import { withEnvelopeWarnings } from '../warnings.js';
+import { mergeWarningsByCode, withEnvelopeWarnings } from '../warnings.js';
 import { accountOption, allBatchesOption, batchOption, cursorOption, includeHiddenOption, limitOption, offsetOption, providerOption, storedIdOption } from '../options.js';
 import type { CommandSpec, OptionSpec } from '../spec.js';
 import { conversationFilterValue, defined, emit, first, refFromArgs } from './common.js';
@@ -101,6 +101,7 @@ export const getCommand: CommandSpec = {
   details: [
     'The active thread is chosen by the export\'s own current-node pointer. If the export has none and the conversation has several branches, GCR refuses to guess (ACTIVE_BRANCH_UNKNOWN) unless you pass --branch, --all-branches or --branch-policy.',
     'A chatgpt.com link succeeds only if that conversation is in your database; otherwise the command fails with NOT_IN_LOCAL_EXPORT. GCR never contacts chatgpt.com.',
+    'Every format lists the same warnings as the SDK and the MCP tools; SOURCE_NOT_FULL_HISTORY comes first when the source is a partial copy or a rendered-only export. Messages that no root reaches (a damaged tree) are stored and searchable but cannot be shown here: the warning NO_BRANCHES says so.',
   ],
   positionals: [REF_ARG],
   options: [
@@ -138,14 +139,17 @@ export const getCommand: CommandSpec = {
     const ro = ctx.renderOptions({ includeHidden });
     const source = env.source[0];
     const threads = env.data.threads;
+    // SPEC-02: the renderer prints only ThreadResult.warnings; the envelope's (SOURCE_NOT_FULL_HISTORY first) are merged in.
+    const withEnv = (t: ThreadResult): ThreadResult => ({ ...t, warnings: mergeWarningsByCode(env.warnings, t.warnings) });
     if (allBranches && ctx.format !== 'json' && threads !== undefined && threads.length > 0 && source !== undefined) {
       // One document per branch. JSON is a single document (renderEnvelope below); the text formats are concatenated.
-      const docs = threads.map((t) => renderThread(t, source, ro));
+      // Each document stands alone, so each carries the conversation-level warnings.
+      const docs = threads.map((t) => renderThread(withEnv(t), source, ro));
       emit(ctx, docs.join(ctx.format === 'jsonl' ? '' : '\n'));
       return;
     }
     if (!allBranches && env.data.thread !== null && source !== undefined) {
-      emit(ctx, renderThread(env.data.thread, source, ro));
+      emit(ctx, renderThread(withEnv(env.data.thread), source, ro));
       return;
     }
     // --all-branches as JSON, or nothing to thread (an empty snapshot): the envelope is the faithful answer.
@@ -160,7 +164,7 @@ export const getCommand: CommandSpec = {
 export const threadCommand: CommandSpec = {
   path: ['thread'],
   summary: 'Show one branch of a conversation as a message thread.',
-  details: ['Like "gcr get" but always a single thread; use --branch to pick one from "gcr branches".'],
+  details: ['Like "gcr get" but always a single thread; use --branch to pick one from "gcr branches". The warnings are the same as in "gcr get": SOURCE_NOT_FULL_HISTORY first for a partial or rendered-only source.'],
   positionals: [REF_ARG],
   options: [
     ...branchOptions(),
@@ -192,7 +196,9 @@ export const threadCommand: CommandSpec = {
     );
     const ro = ctx.renderOptions({ includeHidden });
     const source = env.source[0];
-    emit(ctx, source === undefined ? renderEnvelope(env, ro) : renderThread(env.data, source, ro));
+    // SPEC-02: same merge as `get` (see mergeWarningsByCode): the CLI must show the warnings the SDK and MCP return.
+    const merged: ThreadResult = { ...env.data, warnings: mergeWarningsByCode(env.warnings, env.data.warnings) };
+    emit(ctx, source === undefined ? renderEnvelope(env, ro) : renderThread(merged, source, ro));
   },
 };
 
@@ -226,7 +232,7 @@ export const branchesCommand: CommandSpec = {
 // search
 // ---------------------------------------------------------------------------------------------------------------
 
-const SEARCH_SCOPES: readonly SearchScope[] = ['messages', 'titles', 'all'];
+const SEARCH_SCOPES: readonly SearchScope[] = ['messages', 'titles', 'attachments', 'all'];
 
 /** Titles/all results are rendered generically; make the snippet match markers (U+0001 / U+0002) visible text first. */
 function plainSnippets(env: ResultEnvelope<Page<SearchItem>>): ResultEnvelope<unknown> {
@@ -236,21 +242,23 @@ function plainSnippets(env: ResultEnvelope<Page<SearchItem>>): ResultEnvelope<un
 
 export const searchCommand: CommandSpec = {
   path: ['search'],
-  summary: 'Full-text search over message text and conversation titles.',
+  summary: 'Full-text search over message text, conversation titles and attachment file names.',
   details: [
     'The query is treated as plain words (operators and quotes are inert; a trailing * makes a prefix). Case and accents are ignored and CJK text matches by character. Use --raw to pass SQLite FTS5 syntax through.',
-    'Hidden messages are skipped unless --include-hidden. A query that starts with "-" goes after "--".',
+    'Folded when matching: case, accents, character width (fullwidth letters), ligatures (fi) and CJK substrings. Not folded: "ß" is not "ss". Emoji and other symbols are not indexed (only letters, digits and combining marks are), so a query made only of them is refused with INVALID_ARGUMENT: search for words.',
+    '--scope attachments matches the file NAMES and MIME types of attachments (metadata only: attachment files are never read and no attachment content is searched, not even the text a Claude export carries inline; a ChatGPT export may not contain the files). Each search word must occur anywhere inside the folded name or type (so "notes", "diagram" and "synthetic-notes.txt" all find synthetic-notes.txt, and "image/png" finds every PNG). Results are not ranked: oldest message first. --scope all lists titles, then messages, then attachments (attachment names are part of "all"); with --raw the attachment part is skipped and ATTACHMENTS_NOT_SEARCHED says so.',
+    'Hidden messages (and their attachments) are skipped unless --include-hidden. A query that starts with "-" goes after "--".',
   ],
   positionals: [{ name: 'query', description: 'Words to search for (quote it when it has spaces).' }],
   options: [
     { name: 'raw', kind: 'boolean', description: 'Pass the query to SQLite FTS5 unchanged (AND/OR/NEAR/phrases). A syntax error is FTS_SYNTAX_ERROR.' },
-    { name: 'scope', kind: 'choice', valueName: 'scope', choices: SEARCH_SCOPES, description: 'Search message text, conversation titles, or both (titles first).', defaultText: 'messages' },
-    { name: 'role', kind: 'string', valueName: 'role', description: 'Only messages by this author role (user, assistant, system, tool, ...). Messages scope only.' },
-    { name: 'channel', kind: 'string', valueName: 'channel', description: 'Only messages on this channel (for example final). Messages scope only.' },
-    { name: 'has-model', kind: 'boolean', description: 'Only messages whose export states the model explicitly. Messages scope only.' },
-    { name: 'conversation', kind: 'string', valueName: 'ref', description: 'Only inside this conversation (UUID, chatgpt.com link or stored id). Messages scope only.' },
-    { name: 'after', kind: 'string', valueName: 'ISO', description: 'Only messages created at or after this ISO-8601 UTC time. Messages scope only.' },
-    { name: 'before', kind: 'string', valueName: 'ISO', description: 'Only messages created before this ISO-8601 UTC time. Messages scope only.' },
+    { name: 'scope', kind: 'choice', valueName: 'scope', choices: SEARCH_SCOPES, description: 'Search message text, conversation titles, attachment file names and MIME types, or all three (titles, then messages, then attachments).', defaultText: 'messages' },
+    { name: 'role', kind: 'string', valueName: 'role', description: 'Only messages by this author role (user, assistant, system, tool, ...). Messages and attachments scopes only.' },
+    { name: 'channel', kind: 'string', valueName: 'channel', description: 'Only messages on this channel (for example final). Messages and attachments scopes only.' },
+    { name: 'has-model', kind: 'boolean', description: 'Only messages whose export states the model explicitly. Messages and attachments scopes only.' },
+    { name: 'conversation', kind: 'string', valueName: 'ref', description: 'Only inside this conversation (UUID, chatgpt.com link or stored id). Messages and attachments scopes only.' },
+    { name: 'after', kind: 'string', valueName: 'ISO', description: 'Only messages created at or after this ISO-8601 UTC time. Messages and attachments scopes only.' },
+    { name: 'before', kind: 'string', valueName: 'ISO', description: 'Only messages created before this ISO-8601 UTC time. Messages and attachments scopes only.' },
     includeHiddenOption('messages'),
     allBatchesOption('the same message can then appear once per snapshot'),
     providerOption(),
@@ -262,6 +270,7 @@ export const searchCommand: CommandSpec = {
   examples: [
     { command: 'search "marsupial habitat"', note: 'Messages containing both words, best match first.' },
     { command: 'search roadmap --scope titles --format json', note: 'Conversation titles that mention "roadmap".' },
+    { command: 'search "report pdf" --scope attachments', note: 'Attachments whose file name or type contains both "report" and "pdf" (metadata only).' },
     { command: 'search "quok*" --role assistant --after 2025-01-01T00:00:00Z --limit 5', note: 'Prefix match, assistant messages from 2025 on.' },
     { command: 'search --conversation 00000000-0000-4000-8000-000000000001 -- "-draft"', note: 'Inside one conversation; "--" lets the query start with a dash.' },
   ],
@@ -376,11 +385,14 @@ export const AUDIT_FLAGS: ReadonlyArray<{ flag: string; check: AuditCheck; descr
   { flag: 'hidden', check: 'hidden', description: 'Messages the export marks as hidden.' },
 ];
 
+const BRANCH_PROVENANCE_NOT_COMPUTED_TEXT = 'not computed (no tree-based check selected: use --tree, --no-current-node or --timestamps)';
+
 export const auditCommand: CommandSpec = {
   path: ['audit'],
   summary: 'Check the imported data for gaps: missing models, empty or untitled conversations, broken trees.',
   details: [
     'Without check flags every check runs; with one or more flags only those do. The report holds counts and sample ids, never message text, and states how many branches have a known active branch and how many assistant messages state a model.',
+    'Branch provenance (known and unknown active branches, branch counts) is measured by the tree pass, which runs only when --tree, --no-current-node or --timestamps is selected (or no flag at all). Without them branchProvenance is null ("not computed") and the warning BRANCH_PROVENANCE_NOT_COMPUTED says so; it is never reported as zeros.',
   ],
   positionals: [],
   options: [
@@ -392,7 +404,7 @@ export const auditCommand: CommandSpec = {
   ],
   examples: [
     { command: 'audit', note: 'Run every check.' },
-    { command: 'audit --missing-model --untitled --empty', note: 'Only these three checks.' },
+    { command: 'audit --missing-model --untitled --empty', note: 'Only these three checks (no tree check, so branchProvenance is null: not computed).' },
     { command: 'audit --no-current-node --tree --format json', note: 'Branch provenance and tree integrity, machine-readable.' },
   ],
   errors: [...DB_READ_ERRORS],
@@ -409,7 +421,11 @@ export const auditCommand: CommandSpec = {
         sampleSize: a.int('sample'),
       }),
     );
-    emit(ctx, renderEnvelope(env, ctx.renderOptions()));
+    // SPEC-07: null is the machine-readable "not measured" (json/jsonl); the generic text renderers would print a bare "null",
+    // so the human formats say what it means.
+    const human = ctx.format === 'markdown' || ctx.format === 'compact';
+    const shown: ResultEnvelope<unknown> = human && env.data.branchProvenance === null ? { ...env, data: { ...env.data, branchProvenance: BRANCH_PROVENANCE_NOT_COMPUTED_TEXT } } : env;
+    emit(ctx, renderEnvelope(shown, ctx.renderOptions()));
   },
 };
 

@@ -1,0 +1,64 @@
+#!/bin/sh
+# gcr-privacy-hook v1 (pre-commit)
+#
+# Opt-in hook, installed by `node scripts/install-git-hooks.mjs` (never installed automatically, nothing global is set).
+# It runs the GCR privacy scan on exactly what THIS commit would record: the index, not the work tree. For `git commit -a`
+# and `git commit <paths>` git points GIT_INDEX_FILE at a temporary index; the scanner honours it in --staged mode.
+# It refuses the commit when the scan reports a finding AND when the scan cannot run at all (fail closed).
+#
+# Only shell built-ins (printf, command) run before the node check, so the refusal and its explanation work even with an empty PATH.
+# Edit the original in scripts/git-hooks/, not the copy in .git/hooks/, and re-run the installer to update the copy.
+
+gcr_say() {
+  printf '%s\n' "$@" >&2
+}
+
+gcr_bypass_warning() {
+  gcr_say \
+    "  Bypass knowingly: git commit --no-verify" \
+    "  Do not bypass it unless you are certain the flagged content is synthetic or harmless. A conversation export, a database or a" \
+    "  credential that enters a commit stays in Git history after the file is deleted, and once pushed it has to be treated as leaked" \
+    "  (rotate the credential, rewrite history, tell the people who hold clones)."
+}
+
+if ! command -v node >/dev/null 2>&1; then
+  gcr_say \
+    "gcr privacy hook (pre-commit): \`node\` was not found on PATH, so the privacy scan cannot run." \
+    "The commit is REFUSED (the hook fails closed, because \"could not check\" must not mean \"nothing to find\")." \
+    "  Fix: install Node.js 22.16 or newer, and make sure \`node\` is on the PATH of the program that runs git (graphical git clients" \
+    "  often start with a shorter PATH than your terminal)."
+  gcr_bypass_warning
+  exit 1
+fi
+
+root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$root" ]; then
+  gcr_say "gcr privacy hook (pre-commit): could not find the top level of the work tree. The commit is REFUSED (fail closed)."
+  gcr_bypass_warning
+  exit 1
+fi
+
+scanner="$root/scripts/privacy-scan.mjs"
+if [ ! -f "$scanner" ]; then
+  gcr_say \
+    "gcr privacy hook (pre-commit): $scanner does not exist (a branch without the scanner?). The commit is REFUSED (fail closed)." \
+    "  Fix: switch to a branch that has scripts/privacy-scan.mjs, or remove the hook with: node scripts/install-git-hooks.mjs --uninstall"
+  gcr_bypass_warning
+  exit 1
+fi
+
+node "$scanner" --root "$root" --staged
+status=$?
+if [ "$status" -eq 0 ]; then
+  exit 0
+fi
+gcr_say ""
+if [ "$status" -eq 2 ]; then
+  gcr_say "gcr privacy hook (pre-commit): the scanner could not run (exit status 2). If it says to run \`npm run build\`, do that first."
+fi
+gcr_say \
+  "gcr privacy hook (pre-commit): the commit was REFUSED." \
+  "  Fix the findings above (remove the file from the index with \`git rm --cached <path>\`, or delete the secret), then commit again." \
+  "  A known-safe file can be listed by exact path in .privacy-scan-allow; that is reviewable, a bypass is not."
+gcr_bypass_warning
+exit 1

@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
 import { GcrError } from '../../src/errors.js';
-import { MAX_FINDINGS_PER_FILE, SYNTHETIC_MARKER, main, scanRepo } from '../../src/devtools/privacy-scan.js';
+import { LARGE_FILE_HEAD_BYTES, MAX_FINDINGS_PER_FILE, SYNTHETIC_MARKER, main, scanRepo } from '../../src/devtools/privacy-scan.js';
 import type { Finding } from '../../src/devtools/privacy-scan.js';
 import { withTempDir } from '../helpers/tmp.js';
 
@@ -231,12 +231,15 @@ describe('renamed private data is recognised by its content signature', () => {
     });
   }
 
-  it('also recognises it when the file is too large to be read (the large files are the interesting ones)', async () => {
+  it('also recognises it when the file is too large to be read in full (the large files are the interesting ones), and says the rest was not judged', async () => {
     await inRepo(async (dir) => {
       await put(dir, 'dump', withBody(sqliteHeader, 3 * 1024 * 1024));
       const result = await scanRepo(dir);
       assert.equal(result.skippedLarge, 1);
-      assert.deepEqual(summarize(result.findings), [['forbidden-file-signature', 'dump', undefined]]);
+      assert.deepEqual(summarize(result.findings), [
+        ['forbidden-file-signature', 'dump', undefined],
+        ['unscanned-large-file', 'dump', undefined],
+      ]);
     });
   });
 
@@ -346,15 +349,28 @@ describe('fixtures must prove they are synthetic', () => {
     });
   });
 
-  it('cannot verify the marker of a raw-export-named fixture that exceeds the scan limit, so it fails closed', async () => {
+  it('cannot verify the marker of a raw-export-named fixture whose marker lies beyond the head and tail windows, so it fails closed', async () => {
     await inRepo(async (dir) => {
-      const text = chatgpt.replace('TITLE', `${SYNTHETIC_MARKER} F97`).padEnd(5000, ' ');
+      const pad = ' '.repeat(LARGE_FILE_HEAD_BYTES);
+      const text = `${chatgpt.replace('TITLE', 'padding')}${pad}\n${SYNTHETIC_MARKER} F97\n${pad}`;
       await put(dir, 'fixtures/chatgpt/conversations.json', text);
-      assert.deepEqual((await scanRepo(dir)).findings, []);
+      assert.deepEqual((await scanRepo(dir)).findings, []); // read in full (the default limit is larger): the marker is found
       const limited = await scanRepo(dir, { maxFileBytes: 1024 });
-      assert.deepEqual(summarize(limited.findings), [['synthetic-marker-missing', 'fixtures/chatgpt/conversations.json', undefined]]);
+      assert.deepEqual(summarize(limited.findings), [
+        ['synthetic-marker-missing', 'fixtures/chatgpt/conversations.json', undefined],
+        ['unscanned-large-file', 'fixtures/chatgpt/conversations.json', undefined],
+      ]);
       assert.match(limited.findings[0]?.detail ?? '', /scan limit/);
       assert.equal(limited.skippedLarge, 1);
+    });
+  });
+
+  it('accepts a marker that is inside the head window of a file the limit makes partial (the fixture size cap still applies)', async () => {
+    await inRepo(async (dir) => {
+      const text = chatgpt.replace('TITLE', `${SYNTHETIC_MARKER} F96`).padEnd(LARGE_FILE_HEAD_BYTES * 3, ' ');
+      await put(dir, 'fixtures/chatgpt/conversations.json', text);
+      const limited = await scanRepo(dir, { maxFileBytes: 1024 });
+      assert.deepEqual(summarize(limited.findings), [['unscanned-large-file', 'fixtures/chatgpt/conversations.json', undefined]]);
     });
   });
 });

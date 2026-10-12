@@ -31,8 +31,8 @@ import { closeDatabase, isSqliteError, openDatabase, toDbError } from '../db/ope
 import type { GcrDatabase } from '../db/open.js';
 import { Repository } from '../db/repo.js';
 import type { ListConversationsOptions } from '../db/repo.js';
-import { SEARCH_LIMIT_MAX, searchConversationTitles, searchMessages } from '../db/search.js';
-import type { SearchMode, SearchQuery, TitleHit } from '../db/search.js';
+import { MAX_ATTACHMENTS_SCANNED_PER_MESSAGE, SEARCH_LIMIT_MAX, countMessageHits, searchAttachments, searchConversationTitles, searchMessages } from '../db/search.js';
+import type { AttachmentHit, AttachmentSearchQuery, SearchMode, SearchQuery, TitleHit } from '../db/search.js';
 import { computeStats } from '../analysis/stats.js';
 import type { StatsOptions, StatsResult } from '../analysis/stats.js';
 import { runAudit } from '../analysis/audit.js';
@@ -146,7 +146,11 @@ export interface GetResult {
   threads?: ThreadResult[];
 }
 
-export type SearchScope = 'messages' | 'titles' | 'all';
+/**
+ * What `search` looks at. "attachments" matches the file NAMES and MIME types of attachment references (metadata only, never file
+ * content). "all" is titles, then messages, then attachments: since attachment search exists, "all" includes attachment names.
+ */
+export type SearchScope = 'messages' | 'titles' | 'attachments' | 'all';
 
 export interface SearchOptions {
   query: string;
@@ -154,19 +158,19 @@ export interface SearchOptions {
   mode?: SearchMode;
   provider?: string;
   accountLabel?: string;
-  /** Raw id, bare UUID or chatgpt.com link. Message scope only. */
+  /** Raw id, bare UUID or chatgpt.com link. Message and attachment scopes only. */
   conversationId?: string;
-  /** Message scope only. */
+  /** Message and attachment scopes only. */
   role?: string;
-  /** Message scope only. */
+  /** Message and attachment scopes only. */
   channel?: string;
-  /** Message scope only: true = only messages with an explicit model slug, false = only those without. */
+  /** Message and attachment scopes only: true = only messages with an explicit model slug, false = only those without. */
   hasModel?: boolean;
-  /** Message scope only; inclusive ISO-8601 UTC. */
+  /** Message and attachment scopes only; inclusive ISO-8601 UTC. */
   createdAfter?: string;
-  /** Message scope only; exclusive ISO-8601 UTC. */
+  /** Message and attachment scopes only; exclusive ISO-8601 UTC. */
   createdBefore?: string;
-  /** Message scope only. */
+  /** Message and attachment scopes only. */
   includeHidden?: boolean;
   /** Search superseded snapshots too (default: newest snapshot of each conversation). */
   allBatches?: boolean;
@@ -175,14 +179,16 @@ export interface SearchOptions {
   offset?: number;
   /** Keyset cursor from a previous page's `nextCursor`. Message scope only. */
   cursor?: string;
-  /** "messages" (default), "titles" or "all" (titles first, then messages). */
+  /** "messages" (default), "titles", "attachments" (file names and MIME types) or "all" (titles, then messages, then attachments). */
   scope?: SearchScope;
 }
 
 export type MessageSearchItem = SearchHit & { kind: 'message' };
 export type TitleSearchItem = TitleHit & { kind: 'title' };
-/** Discriminated by `kind`: scope "all" interleaves nothing, it lists every title hit first and then the message hits. */
-export type SearchItem = MessageSearchItem | TitleSearchItem;
+/** One matching attachment of one message (file name / MIME type only; no file content). */
+export type AttachmentSearchItem = AttachmentHit & { kind: 'attachment' };
+/** Discriminated by `kind`: scope "all" interleaves nothing, it lists every title hit first, then the message hits, then the attachment hits. */
+export type SearchItem = MessageSearchItem | TitleSearchItem | AttachmentSearchItem;
 
 /** The FormatProfile an import observed, for batches imported through THIS handle (it is not persisted in the database). */
 export interface BatchFormatProfile {
@@ -256,7 +262,7 @@ export interface LocalAnnotationListData extends Page<AnnotationDto> {
 
 const ACTORS: readonly LocalActor[] = ['cli', 'mcp', 'sdk'];
 const BRANCH_POLICIES: readonly BranchPolicy[] = ['last_child', 'latest_leaf'];
-const SEARCH_SCOPES: readonly SearchScope[] = ['messages', 'titles', 'all'];
+const SEARCH_SCOPES: readonly SearchScope[] = ['messages', 'titles', 'attachments', 'all'];
 const SEARCH_MODES: readonly SearchMode[] = ['plain', 'raw'];
 
 const OPEN_KEYS = ['dbPath', 'readOnly', 'create', 'actor', 'clock'];
@@ -401,7 +407,28 @@ function echoId(id: string): string {
   return id.length > 128 ? `${id.slice(0, 127)}…` : id;
 }
 
+/** What one attachment scan met besides hits. `complete` is false when a full page stopped the scan early (the counts are then lower bounds). */
+interface AttachmentScanStats {
+  unreadable: number;
+  truncated: number;
+  complete: boolean;
+}
+
+function addScanStats(into: AttachmentScanStats, res: { page: Page<unknown>; unreadableMessages: number; truncatedMessages: number }): void {
+  into.unreadable = res.unreadableMessages;
+  into.truncated = res.truncatedMessages;
+  into.complete = res.page.nextOffset === null;
+}
+
 function branchNotFound(s: ConversationSummary, analysis: TreeAnalysis, branchId: string): GcrError {
+  // SPEC-06: a stored message that no root reaches (it lies on or below a parent cycle, or is its own parent) is NOT an unknown
+  // id: its text is in the database and `search` finds it. Saying "No such branch" would send the reader looking for a typo.
+  if (analysis.unreachableIds.includes(branchId)) {
+    return new GcrError('BRANCH_NOT_FOUND', 'This message is stored, but no root reaches it (it lies on or below a cycle of parent pointers, or is its own parent), so it is not part of any branch and cannot be read as a thread.', {
+      remedy: 'Its text can still be found with search. Branches that can be read are listed by "gcr branches <conversation>" (none if every message is unreachable); "gcr audit --tree" lists damaged trees.',
+      details: { conversationId: s.conversationId, branchId: echoId(branchId), branchCount: analysis.branches.length, reason: 'unreachable' },
+    });
+  }
   const skippedByLimits = analysis.leafIds.includes(branchId);
   return new GcrError('BRANCH_NOT_FOUND', skippedByLimits ? 'This leaf exists but its branch was not enumerated (the tree exceeds the branch limits).' : 'No such branch in this conversation.', {
     remedy: 'List the branches (gcr branches <conversation>) and pass one of the returned branch ids; a branch id is the id of its leaf message.',
@@ -409,11 +436,43 @@ function branchNotFound(s: ConversationSummary, analysis: TreeAnalysis, branchId
   });
 }
 
-function noBranches(s: ConversationSummary): GcrError {
+/** Real (non-structural) messages of a snapshot. */
+function countRealMessages(messages: readonly MessageRecord[]): number {
+  let n = 0;
+  for (const m of messages) if (m.nodeKind === 'message') n++;
+  return n;
+}
+
+function noBranches(s: ConversationSummary, messages: readonly MessageRecord[]): GcrError {
+  const stored = countRealMessages(messages);
+  if (stored > 0) {
+    // SPEC-06: not empty, unreachable. Same distinction as the NO_BRANCHES warning of get().
+    return new GcrError('BRANCH_NOT_FOUND', `This conversation has no branches: ${stored} message(s) are stored but none is reachable from a root (cycle in the parent pointers).`, {
+      remedy: 'These messages cannot be read as a thread. They can still be found with search; "gcr audit --tree" lists conversations with damaged trees.',
+      details: { conversationId: s.conversationId, branchCount: 0, reason: 'no_branches', unreachableMessages: stored },
+    });
+  }
   return new GcrError('BRANCH_NOT_FOUND', 'This conversation has no branches (its stored message tree is empty).', {
     remedy: 'There is nothing to read in this snapshot. Import an export that contains messages for it.',
     details: { conversationId: s.conversationId, branchCount: 0, reason: 'no_branches' },
   });
+}
+
+/**
+ * Text of the NO_BRANCHES warning (SPEC-06). Two different situations produce "no branch to build":
+ *  - the snapshot stores no message at all: the tree really is empty (the original wording is kept);
+ *  - messages ARE stored but no root reaches any of them (every node lies on a parent cycle or is its own parent, so there is no
+ *    root): the tree is not empty, the nodes are unreachable. Saying "empty" there would be false, and the reader should learn
+ *    that the text is still findable by search although get / thread cannot show it (the CYCLE_DETECTED / SELF_PARENT warnings
+ *    next to this one say why). Only real messages are counted (structural placeholder nodes carry no text).
+ */
+function noBranchesMessage(messages: readonly MessageRecord[]): string {
+  const stored = countRealMessages(messages);
+  if (stored === 0) return 'The stored message tree of this snapshot is empty: there is no thread to show.';
+  return (
+    `${stored} message(s) are stored for this snapshot but none of them is reachable from a root (their parent pointers form a cycle or point at themselves), ` +
+    'so there is no branch and no thread to show. The text is still stored and can be found with search, but it is not part of any thread that get or thread can read.'
+  );
 }
 
 const ACTIVE_BRANCH_REMEDY =
@@ -495,7 +554,7 @@ function selectPrimary(a: {
     return { branch: b, path: b.path, activeness: b.activeness, policy: 'explicit_branch', warnings: [], supersedes: [] };
   }
   if (branches.length === 0) {
-    if (a.required) throw noBranches(summary);
+    if (a.required) throw noBranches(summary, a.messages);
     return null;
   }
 
@@ -1149,7 +1208,7 @@ export class Gcr {
           warnings: mergeWarnings(primary.warnings, shared),
         });
       } else if (analysis.branches.length === 0) {
-        extra.push({ code: 'NO_BRANCHES', message: 'The stored message tree of this snapshot is empty: there is no thread to show.', ids: [summary.conversationId] });
+        extra.push({ code: 'NO_BRANCHES', message: noBranchesMessage(record.messages), ids: [summary.conversationId] });
       } else {
         // Only reachable with allBranches: say plainly why `thread` is null instead of leaving it to be guessed.
         extra.push({
@@ -1248,11 +1307,14 @@ export class Gcr {
 
   /**
    * Full-text search. Scope "messages" (default) returns message hits; "titles" returns conversations whose title matched;
-   * "all" lists every title hit first and then the message hits (the two rankings are not comparable, so they are not
-   * interleaved). Every item carries `kind` so a client can tell which is which.
+   * "attachments" returns attachments whose file NAME or MIME type matched (metadata only: attachment content is never searched; the
+   * message filters apply, `cursor` does not; no raw mode); "all" lists every title hit first, then the message hits, then the
+   * attachment hits (the rankings are not comparable, so they are not interleaved; with `mode: "raw"` the attachment part is
+   * skipped and ATTACHMENTS_NOT_SEARCHED says so). Every item carries `kind` so a client can tell which is which.
    */
   search(opts: SearchOptions & { scope?: 'messages' }): ResultEnvelope<Page<MessageSearchItem>>;
   search(opts: SearchOptions & { scope: 'titles' }): ResultEnvelope<Page<TitleSearchItem>>;
+  search(opts: SearchOptions & { scope: 'attachments' }): ResultEnvelope<Page<AttachmentSearchItem>>;
   search(opts: SearchOptions): ResultEnvelope<Page<SearchItem>>;
   search(opts: SearchOptions): ResultEnvelope<Page<SearchItem>> {
     return this.read(() => {
@@ -1262,7 +1324,10 @@ export class Gcr {
       const idFilter = conversationFilter(o['conversationId']);
       const conversationId = idFilter?.id;
       const includeHidden = optBool('includeHidden', o['includeHidden']);
-      if (scope !== 'messages') {
+      if (scope === 'attachments') {
+        // Attachments belong to messages, so the message filters apply; only the keyset cursor does not (offset paging only).
+        if (o['cursor'] !== undefined) throw invalidArgument('cursor', 'applies to message hits only; page attachment hits with offset', { scope });
+      } else if (scope !== 'messages') {
         for (const k of MESSAGE_ONLY_FILTERS) {
           if (o[k] !== undefined) throw invalidArgument(k, `applies to message hits only and cannot be combined with scope "${scope}"`, { scope });
         }
@@ -1280,6 +1345,9 @@ export class Gcr {
 
       let page: Page<SearchItem>;
       let contributions: Contribution[];
+      // What the attachment scan met (exact when it read everything, a lower bound when a full page stopped it early).
+      const scan: AttachmentScanStats = { unreadable: 0, truncated: 0, complete: true };
+      let attachmentsSkipped = false;
       if (scope === 'messages') {
         const hits = searchMessages(this.db, {
           ...base,
@@ -1293,32 +1361,68 @@ export class Gcr {
         const hits = searchConversationTitles(this.db, { ...base, ...pickDefined(o, ['limit', 'offset']) } as unknown as Parameters<typeof searchConversationTitles>[1]);
         page = { ...hits, items: hits.items.map((h): SearchItem => ({ kind: 'title', ...h })) };
         contributions = hits.items.map((h) => ({ batchId: h.batchId, completeness: normalizeCompleteness(h.completeness) }));
+      } else if (scope === 'attachments') {
+        const res = searchAttachments(this.db, {
+          ...base,
+          ...pickDefined(o, ['role', 'channel', 'hasModel', 'createdAfter', 'createdBefore', 'limit', 'offset']),
+          ...(conversationId === undefined ? {} : { conversationId }),
+          ...(includeHidden === undefined ? {} : { includeHidden }),
+        } as unknown as AttachmentSearchQuery);
+        page = { ...res.page, items: res.page.items.map((h): SearchItem => ({ kind: 'attachment', ...h })) };
+        contributions = this.messageHitContributions(res.page.items);
+        addScanStats(scan, res);
       } else {
         const limit = optInt('limit', o['limit'], 1, SEARCH_LIMIT_MAX) ?? 20;
         const offset = optInt('offset', o['offset'], 0, MAX_ALL_SCOPE_WINDOW) ?? 0;
-        page = this.searchAll(base, limit, offset);
+        // FTS5 syntax (raw mode) has no meaning for file names: the attachment part of "all" is then skipped, and said so.
+        attachmentsSkipped = mode === 'raw';
+        const all = this.searchAll(base, limit, offset, !attachmentsSkipped);
+        page = all.page;
+        scan.unreadable = all.scan.unreadable;
+        scan.truncated = all.scan.truncated;
+        scan.complete = all.scan.complete;
         contributions = [
           ...page.items.filter((i): i is TitleSearchItem => i.kind === 'title').map((h) => ({ batchId: h.batchId, completeness: normalizeCompleteness(h.completeness) })),
-          ...this.messageHitContributions(page.items.filter((i): i is MessageSearchItem => i.kind === 'message')),
+          ...this.messageHitContributions(page.items.filter((i): i is MessageSearchItem | AttachmentSearchItem => i.kind !== 'title')),
         ];
       }
       const warnings: Warning[] =
         o['allBatches'] === true
           ? [{ code: 'SUPERSEDED_SNAPSHOTS_INCLUDED', message: 'Superseded import snapshots were searched too: the same message can appear once per snapshot.' }]
           : [];
+      if (attachmentsSkipped) {
+        warnings.push({
+          code: 'ATTACHMENTS_NOT_SEARCHED',
+          message: 'Attachment file names were not searched: raw mode passes FTS5 syntax, which cannot be applied to file names. Use plain mode (or scope "attachments") to include them.',
+        });
+      }
+      if (scan.unreadable > 0) {
+        warnings.push({
+          code: 'STORED_JSON_INVALID',
+          message: `${scan.complete ? '' : 'At least '}${scan.unreadable} message(s) have a stored attachment list that could not be read; their attachments were not searched.`,
+        });
+      }
+      if (scan.truncated > 0) {
+        warnings.push({
+          code: 'ATTACHMENTS_PARTLY_SEARCHED',
+          message:
+            `${scan.complete ? '' : 'At least '}${scan.truncated} message(s) list more than ${MAX_ATTACHMENTS_SCANNED_PER_MESSAGE.toLocaleString('en-US')} attachments: only the first ` +
+            `${MAX_ATTACHMENTS_SCANNED_PER_MESSAGE.toLocaleString('en-US')} of each were searched, so an attachment further down such a list cannot be found by name here (gcr get lists them all).`,
+        });
+      }
       return this.envelope({
         data: page,
         contributions,
         warnings,
         ids: {
           conversationIds: page.items.map((i) => i.conversationId),
-          messageIds: page.items.filter((i): i is MessageSearchItem => i.kind === 'message').map((i) => i.messageId),
+          messageIds: page.items.filter((i): i is MessageSearchItem | AttachmentSearchItem => i.kind !== 'title').map((i) => i.messageId),
         },
       });
     });
   }
 
-  private messageHitContributions(hits: readonly SearchHit[]): Contribution[] {
+  private messageHitContributions(hits: ReadonlyArray<Pick<SearchHit, 'provider' | 'accountLabel' | 'conversationId' | 'batchId'>>): Contribution[] {
     const cache = new Map<string, Completeness>();
     return hits.map((h) => {
       const key = `${h.provider}\0${h.accountLabel}\0${h.conversationId}\0${h.batchId}`;
@@ -1331,8 +1435,12 @@ export class Gcr {
     });
   }
 
-  /** Scope "all": title hits first (exact count found by paging the title stream), then message hits. */
-  private searchAll(base: Record<string, unknown>, limit: number, offset: number): Page<SearchItem> {
+  /**
+   * Scope "all": title hits first (exact count found by paging the title stream), then message hits, then (plain mode only)
+   * attachment hits. Each stream starts where the previous one ends, so the page [offset, offset+limit) is cut out of the
+   * concatenation; the size of the message stream is counted (no snippets) to know where the attachment stream begins.
+   */
+  private searchAll(base: Record<string, unknown>, limit: number, offset: number, withAttachments: boolean): { page: Page<SearchItem>; scan: AttachmentScanStats } {
     const window = offset + limit;
     if (window > MAX_ALL_SCOPE_WINDOW) {
       throw invalidArgument('offset', `offset + limit may not exceed ${MAX_ALL_SCOPE_WINDOW} with scope "all"`, { scope: 'all' });
@@ -1349,22 +1457,54 @@ export class Gcr {
       }
     }
     const items: SearchItem[] = titleHits.slice(offset, window).map((h): SearchItem => ({ kind: 'title', ...h }));
-    let moreMessages = false;
-    if (titlesExhausted) {
+    const scan: AttachmentScanStats = { unreadable: 0, truncated: 0, complete: true };
+    let more: boolean;
+    if (!titlesExhausted) {
+      more = true;
+    } else if (!withAttachments) {
+      more = false;
       const want = limit - items.length;
       if (want > 0) {
         // Messages start where the titles end; skip as many of them as the requested offset reaches past the titles.
         const skip = Math.max(0, offset - titleHits.length);
         const hits = searchMessages(this.db, { ...base, limit: want, offset: skip } as unknown as SearchQuery);
         items.push(...hits.items.map((h): SearchItem => ({ kind: 'message', ...h })));
-        moreMessages = hits.nextOffset !== null;
+        more = hits.nextOffset !== null;
       } else {
         // The page is full of titles and the titles ended exactly here: are there messages after them?
-        moreMessages = searchMessages(this.db, { ...base, limit: 1, offset: 0 } as unknown as SearchQuery).items.length > 0;
+        more = searchMessages(this.db, { ...base, limit: 1, offset: 0 } as unknown as SearchQuery).items.length > 0;
+      }
+    } else {
+      const titleCount = titleHits.length;
+      // Messages occupy [titleCount, titleCount + messageCount) of the concatenation. Counting stops one past the window: a
+      // count that reaches the cap means messages continue beyond this page, so no attachment can be on it.
+      const cap = Math.max(window - titleCount, 0) + 1;
+      const messageCount = countMessageHits(this.db, base as unknown as SearchQuery, cap);
+      const messagesBeyondWindow = messageCount >= cap;
+      const msgFrom = Math.max(offset, titleCount);
+      const msgTo = Math.min(window, titleCount + messageCount);
+      if (msgTo > msgFrom) {
+        const hits = searchMessages(this.db, { ...base, limit: msgTo - msgFrom, offset: msgFrom - titleCount } as unknown as SearchQuery);
+        items.push(...hits.items.map((h): SearchItem => ({ kind: 'message', ...h })));
+      }
+      if (messagesBeyondWindow) {
+        more = true;
+      } else {
+        const attachmentStart = titleCount + messageCount;
+        const attFrom = Math.max(offset, attachmentStart);
+        const want = window - attFrom;
+        // want = 0: the page ends exactly where the attachments would begin; one probe tells whether any exist.
+        const res = searchAttachments(this.db, { ...base, limit: want > 0 ? want : 1, offset: want > 0 ? attFrom - attachmentStart : 0 } as unknown as AttachmentSearchQuery);
+        addScanStats(scan, res);
+        if (want > 0) {
+          items.push(...res.page.items.map((h): SearchItem => ({ kind: 'attachment', ...h })));
+          more = res.page.nextOffset !== null;
+        } else {
+          more = res.page.items.length > 0;
+        }
       }
     }
-    const more = !titlesExhausted || moreMessages;
-    return { items, limit, offset, nextOffset: more ? offset + items.length : null, nextCursor: null };
+    return { page: { items, limit, offset, nextOffset: more ? offset + items.length : null, nextCursor: null }, scan };
   }
 
   // ------------------------------------------------------------------------------------------- stats / audit / batches

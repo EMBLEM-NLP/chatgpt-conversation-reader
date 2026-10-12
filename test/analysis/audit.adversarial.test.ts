@@ -88,6 +88,7 @@ describe('finding 2: branchProvenance agrees with no_current_node when branch en
     ]);
     const r = runAudit(db, {});
     const bp = r.branchProvenance;
+    assert.ok(bp !== null, 'the default checks include the tree pass');
     assert.equal(bp.conversationsWithKnownActiveBranch + bp.conversationsWithUnknownActiveBranch, r.scanned.conversations);
     assert.equal(bp.conversationsWithUnknownActiveBranch, finding(r, 'no_current_node').count);
     assert.equal(bp.conversationsWithKnownActiveBranch, 2);

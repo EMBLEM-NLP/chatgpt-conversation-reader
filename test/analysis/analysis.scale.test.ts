@@ -142,10 +142,10 @@ describe('50,000-message scale (NFR-05)', { timeout: 300_000 }, () => {
     assert.equal(by('missing_model')?.total, counters.assistantVisibleWithModel + counters.assistantVisibleWithoutModel);
     assert.equal(by('tree_integrity')?.count, 0);
     assert.equal(by('empty')?.count, 0);
-    assert.equal(r.branchProvenance.maxBranchesInOneConversation, STAR_LEAVES);
-    assert.equal(r.branchProvenance.conversationsWithMultipleBranches, 1);
-    assert.equal(r.branchProvenance.conversationsWithKnownActiveBranch, CHAINS + 1 - counters.noCurrentNode);
-    assert.equal(r.branchProvenance.conversationsWithUnknownActiveBranch, counters.noCurrentNode);
+    assert.equal(r.branchProvenance?.maxBranchesInOneConversation, STAR_LEAVES);
+    assert.equal(r.branchProvenance?.conversationsWithMultipleBranches, 1);
+    assert.equal(r.branchProvenance?.conversationsWithKnownActiveBranch, CHAINS + 1 - counters.noCurrentNode);
+    assert.equal(r.branchProvenance?.conversationsWithUnknownActiveBranch, counters.noCurrentNode);
   });
 
   it('bounded memory: audit + every groupBy finish in a child limited to 48 MB of old space; a materialising control dies', async () => {

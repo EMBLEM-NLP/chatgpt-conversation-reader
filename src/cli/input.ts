@@ -11,6 +11,9 @@
  *    (after resolving both). A link planted next to a document that points at `/etc/...` or at a key in the home
  *    directory is refused instead of being read into a local database. The file is then opened by its resolved path with
  *    O_NOFOLLOW, so a swap of the link between the check and the open fails closed.
+ *  - HARD LINKS are NOT detected (ATK-10, documented in docs/SECURITY_AND_BOUNDARIES.md section 9): a hard link is a second name for
+ *    the same file, so neither the symlink rule above nor `realpath` can tell that a name in this directory is a file that lives
+ *    elsewhere. The CLI is not fenced (the operator names the path); the MCP import refuses multi-link files (mcp/approved-roots.ts).
  *  - ENCODING: strict UTF-8. Invalid bytes are an error, not replacement characters, so what is stored is what the
  *    operator wrote.
  * Error messages never contain file contents; they name the file by its basename only.

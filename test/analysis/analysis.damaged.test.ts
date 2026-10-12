@@ -26,7 +26,7 @@ describe('damaged stored JSON', () => {
     assert.match(w.message, /^1 conversation snapshot/);
     assert.equal(r.scanned.conversations, 2);
     assert.equal(r.findings.find((f) => f.check === 'tree_integrity')?.count, 1, 'the missing declaration shows up as a parent/child disagreement, not as silence');
-    assert.equal(r.branchProvenance.conversationsWithKnownActiveBranch, 2);
+    assert.equal(r.branchProvenance?.conversationsWithKnownActiveBranch, 2);
   });
 
   it('a child list of the wrong JSON type (numbers, object) is treated the same way', async () => {

@@ -15,6 +15,7 @@
 // ---- the facade ---------------------------------------------------------------------------------------------------
 export { Gcr } from './sdk/gcr.js';
 export type {
+  AttachmentSearchItem,
   AuditReport,
   BatchFormatProfile,
   BranchesOptions,
@@ -89,7 +90,7 @@ export type {
   ThreadResult,
 } from './domain/results.js';
 export type { BranchPolicy } from './domain/branches.js';
-export type { SearchMode } from './db/search.js';
+export type { AttachmentHit, SearchMode } from './db/search.js';
 
 // ---- rendering ----------------------------------------------------------------------------------------------------
 export { renderBranchList, renderConversationList, renderEnvelope, renderImportReport, renderSearchHits, renderThread } from './format/render.js';

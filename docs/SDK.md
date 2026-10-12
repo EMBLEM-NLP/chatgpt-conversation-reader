@@ -84,11 +84,11 @@ Reads (synchronous, return `ResultEnvelope<...>` unless noted):
 | `getByUrl(url, opts?)` | `GetResult` | `get` for a link only (a bare UUID is `INVALID_URL`) |
 | `branches(ref, opts?)` | `BranchListResult` | every branch with `activeness`, tree warnings |
 | `thread(ref, opts?)` | `ThreadResult` | one thread, chosen by the [branch rules](#branch-selection) |
-| `search(opts)` | `Page<SearchItem>` | scopes `messages` (default), `titles`, `all`; offset or cursor paging |
+| `search(opts)` | `Page<SearchItem>` | scopes `messages` (default), `titles`, `attachments` (file names and MIME types, metadata only), `all` (titles, then messages, then attachments); offset paging, cursor paging for `messages` only |
 | `stats(opts)` | `StatsReport` | message statistics + the `FormatProfile`s of batches imported through this handle |
-| `audit(opts?)` | `AuditReport` | data-quality and provenance findings (counts and ids only) |
+| `audit(opts?)` | `AuditReport` | data-quality and provenance findings (counts and ids only); `branchProvenance` is `null` when no tree check was selected |
 | `listBatches()` | `BatchInfo[]` (not an envelope) | every import batch in import order |
-| `graphQuery(q)` | `GraphQueryResult` | neighbourhood of a term |
+| `graphQuery(q)` | `GraphQueryResult` | neighbourhood of a term; a compound term (`EMBLEM-NLP`) that matches no node as a whole is split into keywords (`TERM_SPLIT`); no match at all is `NO_MATCHING_NODE` |
 | `graphPath(from, to, opts?)` | `PathResult` | fewest-hop path between node ids |
 | `graphNeighbors(nodeId, opts?)` | `NeighborsResult` | |
 | `graphGodNodes(opts?)` | `GodNode[]` | most connected nodes |
@@ -150,7 +150,8 @@ built from imported labels).
 
 Warnings added by the facade itself (besides the tree and importer warnings above): `SOURCE_NOT_FULL_HISTORY` (first, see above), `SUPERSEDED_SNAPSHOTS_INCLUDED` (a search with
 `allBatches`), `GRAPH_STALE` (a graph answer whose conversations have a newer imported snapshot than the one the graph was built from), `EVIDENCE_TRUNCATED` (`graphExplain`
-listed fewer citations than the edge has), `NO_BRANCHES` and `ACTIVE_BRANCH_UNKNOWN` (as a warning with `allBranches`).
+listed fewer citations than the edge has), `NO_BRANCHES` (no thread to show: the stored tree is empty, or N messages are stored but no root reaches them) and `ACTIVE_BRANCH_UNKNOWN` (as a warning with `allBranches`),
+`ATTACHMENTS_NOT_SEARCHED` (scope `all` in raw mode skips attachment names), `ATTACHMENTS_PARTLY_SEARCHED` (a message lists more than 5,000 attachments and only the first 5,000 were searched) and, for `graphQuery`, `TERM_SPLIT` / `NO_MATCHING_NODE` (see [Graph](#graph)).
 
 ## Examples
 
@@ -232,12 +233,17 @@ do {
 // offset paging works too
 const page2 = gcr.search({ query: 'marsupial', limit: 20, offset: 20 });
 
-// titles, or titles first and then messages (every item carries `kind` so you can tell which is which)
+// titles; attachment file names; or titles, then messages, then attachments (every item carries `kind` so you can tell which is which)
 const titles = gcr.search({ query: 'roadmap', scope: 'titles' });   // Page<TitleSearchItem>
-const both = gcr.search({ query: 'roadmap', scope: 'all', limit: 50 });
-for (const item of both.data.items) item.kind === 'title' ? console.log('title', item.title) : console.log('message', item.snippet);
+const files = gcr.search({ query: 'report pdf', scope: 'attachments' }); // Page<AttachmentSearchItem>, metadata only
+const everything = gcr.search({ query: 'roadmap', scope: 'all', limit: 50 });
+for (const item of everything.data.items) {
+  if (item.kind === 'title') console.log('title', item.title);
+  else if (item.kind === 'attachment') console.log('attachment', item.attachmentName, item.attachmentMimeType, item.messageId, item.attachmentIndex);
+  else console.log('message', item.snippet);
+}
 
-// filters (message scope only): provider, accountLabel, conversationId (UUID or link), role, channel, hasModel, createdAfter, createdBefore, includeHidden
+// filters (message and attachment scopes): provider, accountLabel, conversationId (UUID or link), role, channel, hasModel, createdAfter, createdBefore, includeHidden
 // a chatgpt.com link as conversationId matches ChatGPT conversations only (a Claude conversation with the same id is not a hit); a bare UUID names no provider
 gcr.search({ query: 'quokka', role: 'assistant', createdAfter: '2025-01-01T00:00:00Z' });
 ```
@@ -245,6 +251,18 @@ gcr.search({ query: 'quokka', role: 'assistant', createdAfter: '2025-01-01T00:00
 `mode: "plain"` (default) treats the query as words: operators and quotes are inert. `mode: "raw"` passes FTS5 syntax through (`FTS_SYNTAX_ERROR` on a syntax error).
 Snippets are plain text; match boundaries are the control characters U+0001/U+0002 (renderers translate them, never raw HTML). Message-only filters combined with
 scope `titles` or `all` are `INVALID_ARGUMENT` instead of being silently ignored. For `all`, `offset + limit` may not exceed 10 000.
+
+A query without any indexed character (only emoji, symbols or punctuation: `"😀"`, `"!!!"`) is `INVALID_ARGUMENT`: "the query contains only symbols or punctuation, which are not indexed; search for words"
+(an empty or blank query: "the query is empty; search for words"). Only letters, digits and combining marks are indexed. Folded: case, accents, character width, compatibility ligatures,
+CJK per character; not folded: `ß` is not `ss`.
+
+**Attachment search (scope `attachments`, FR-15).** `AttachmentSearchItem = { kind: 'attachment', provider, accountLabel, conversationId, conversationTitle, messageId, authorRole, modelSlug, channel,
+createdAt, hidden, attachmentIndex, attachmentId, attachmentName, attachmentMimeType, attachmentSizeBytes, snippet, batchId }`, one per matching attachment (`messageId` + `attachmentIndex` identify it; `attachmentIndex`
+is the position in the message's stored attachment list). It matches **file names and MIME types only, never file content**: every word of the query (plain mode; same folding as above) must occur as a substring of
+the folded name or type of the same attachment. There is no ranking (oldest message first, then conversation, message, position: a total order, so offset paging is stable), `mode: "raw"` and `cursor` are
+`INVALID_ARGUMENT` for this scope, and `includeHidden`, `allBatches` and the message filters work as for messages. `STORED_JSON_INVALID` is added when a stored attachment list cannot be read (those
+attachments were not searched). **Scope `all` includes attachment names** (it was titles plus messages before attachment search existed); `mode: "raw"` with `all` skips them and adds `ATTACHMENTS_NOT_SEARCHED`.
+There is no attachment index: each call scans the messages that have attachments (about 45 to 175 ms on 50,000 synthetic messages, see the user guide), so cost grows with the size of the database. Only the first 5,000 attachments of a message are searched; the warning `ATTACHMENTS_PARTLY_SEARCHED` counts the messages cut that way ("At least N" when a full page stopped the scan early).
 
 ### Branches and threads
 
@@ -267,6 +285,10 @@ console.log(s.data.formatProfiles); // FormatProfiles of batches imported throug
 
 const a = gcr.audit({ checks: ['missing_model', 'untitled', 'no_current_node'] });
 for (const f of a.data.findings) console.log(f.check, f.severity, f.count, f.sampleConversationIds);
+// a.data.branchProvenance is measured because no_current_node is a tree check; with only non-tree checks
+// (missing_model, empty, untitled, unknown_roles, unknown_content_types, hidden) it is null and the warning
+// BRANCH_PROVENANCE_NOT_COMPUTED explains why: null means "not measured", never "zero".
+// modelProvenance is always measured.
 ```
 
 ### Graph
@@ -274,6 +296,11 @@ for (const f of a.data.findings) console.log(f.check, f.severity, f.count, f.sam
 ```ts
 const built = await gcr.buildGraph({ minEntityConversations: 2 });       // derived tables only; imported data is never touched
 const q = gcr.graphQuery({ term: 'quokka', depth: 2, maxNodes: 100 });
+// Keywords are single words, so "EMBLEM-NLP" is stored as the nodes `emblem` and `nlp`. When no node matches the whole term and it
+// contains a hyphen, underscore, dot between letters or white space, graphQuery splits it into the keywords the extractor would
+// produce and seeds every keyword node matching one of them (warning TERM_SPLIT, which names them). No seed at all is an empty
+// graph WITH the warning NO_MATCHING_NODE (GRAPH_EMPTY when the graph has no nodes): never a silent empty answer.
+const compound = gcr.graphQuery({ term: 'EMBLEM-NLP', depth: 2 });
 const convs = q.data.nodes.filter((n) => n.kind === 'conversation');
 if (convs.length >= 2) console.log(gcr.graphPath(convs[0]!.id, convs[1]!.id).data.path.map((n) => n.label));
 console.log(gcr.graphGodNodes({ limit: 5 }).data.map((g) => g.node.label));
@@ -364,7 +391,10 @@ The active branch is **never guessed** (ADR-0009). Precedence for the primary th
   pointer) and **no** `branchPolicy` is applied, because a heuristic would overrule a pointer the source gave. An enumerated branch can still be chosen with `branch`.
 * `allBranches: true` on `get` also returns one `ThreadResult` per branch. Then `thread` is `null` (with an `ACTIVE_BRANCH_UNKNOWN` *warning*, no error) when
   rule 5 would apply. Entries of `threads` have `selectionPolicy: "explicit_branch"` (you asked for all of them).
-* A snapshot with no messages: `get` returns `thread: null` and the warning `NO_BRANCHES`; `thread` throws `BRANCH_NOT_FOUND` (`details.reason: "no_branches"`).
+* A snapshot with no messages: `get` returns `thread: null` and the warning `NO_BRANCHES` ("The stored message tree of this snapshot is empty"); `thread` throws `BRANCH_NOT_FOUND` (`details.reason: "no_branches"`).
+  A snapshot whose messages are stored but unreachable (parent pointers form a cycle, so no root reaches them) gets the same outcome with an honest message: "N message(s) are stored ... none of them is
+  reachable from a root", `details.unreachableMessages` on the error. Those messages are searchable but cannot be read through `get` / `thread` (known limitation).
+  `thread` / `get` with `branch` set to the id of such a stored message (in a conversation with or without other branches) throws `BRANCH_NOT_FOUND` with `details.reason: "unreachable"`; an id that is not in the conversation keeps `"unknown_branch"`.
 * Exports without `children` lists (reported for recent exports) are handled: children are derived from parent pointers and `CHILDREN_ABSENT` is reported.
 
 ## NOT_IN_LOCAL_EXPORT
@@ -465,7 +495,8 @@ The sorted list of runtime export names is pinned by `test/sdk/exports.test.ts`;
   handle needs a directory in which those two files can be created). This comes from `db/open.ts`, not from the SDK.
 * **Large conversations** are loaded whole to compute branches (memory is proportional to the largest conversation). Branch enumeration is capped (10 000 branches); the
   `BRANCH_LIMIT_EXCEEDED` warning says so and `ACTIVE_BRANCH_UNKNOWN` / `BRANCH_NOT_FOUND` explain skipped leaves.
-* **Search scope `all`** concatenates title hits and message hits (their rankings are not comparable) and bounds `offset + limit` to 10 000; use scope `messages` with a cursor for deep paging.
+* **Search scope `all`** concatenates title hits, message hits and attachment hits (their rankings are not comparable) and bounds `offset + limit` to 10 000; use scope `messages` with a cursor for deep paging.
+* **Attachment search is metadata only and unindexed.** File names and MIME types are matched by scanning the messages that have attachments (no FTS table, no schema change); attachment content is never searched (text a Claude export carries inline as `extracted_content` is stored as an `attachment_text` block but not indexed).
 * **Argument errors of mutators** (a hostile getter or Proxy in an options object, a wrong type) are checked before the writer lock and reject with a `GcrError`; the options that were
   validated are the ones used.
 * **Mutators are asynchronous** and reads are refused while one is running (see above); a long import therefore blocks reads on that handle. Use a second read-only handle for reads

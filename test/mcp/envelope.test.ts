@@ -99,12 +99,20 @@ describe('toCallToolResult', () => {
   });
 
   it('drops undefined members and keeps text with special characters intact', () => {
-    const text = `quote " backslash \\ newline \n tab \t nul \u0000 sep ${LINE_SEPARATOR} emoji \u{1F600} lone ${String.fromCharCode(0xd800)}`;
+    const text = `quote " backslash \\ newline \n tab \t nul \u0000 emoji \u{1F600} lone ${String.fromCharCode(0xd800)}`;
     const res = toCallToolResult(envOf({ text, gone: undefined }));
     const parsed = JSON.parse((res.content[0] as { text: string }).text) as McpEnvelope;
     assert.equal((parsed.data as { text: string }).text, text);
     assert.equal('gone' in (parsed.data as object), false);
     assert.deepEqual(res.structuredContent, parsed);
+  });
+
+  it('writes the line separator as its visible escape, in the text block and in structuredContent (ATK-04; test/mcp/fixwave-scrub.test.ts has the full matrix)', () => {
+    const res = toCallToolResult(envOf({ text: `a${LINE_SEPARATOR}b` }));
+    const parsed = JSON.parse((res.content[0] as { text: string }).text) as McpEnvelope;
+    assert.equal((parsed.data as { text: string }).text, 'a\\u2028b');
+    assert.deepEqual(res.structuredContent, parsed);
+    assert.equal((res.content[0] as { text: string }).text.includes(LINE_SEPARATOR), false);
   });
 });
 

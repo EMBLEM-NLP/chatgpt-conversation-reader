@@ -19,7 +19,9 @@
  *    comparison would wrongly accept the sibling `/a/root-evil` for the root `/a/root`.
  *  - Refused before any filesystem call: non-strings, empty or oversized text, NUL bytes, and any literal `..` path segment
  *    (an explicit import path never needs one, and the check is cheap defence in depth).
- *  - Non-existent files, symlinks that leave the root, devices, FIFOs and sockets are refused. EVERY refusal of the path
+ *  - Non-existent files, symlinks that leave the root, devices, FIFOs and sockets are refused, and so is a regular FILE with more
+ *    than one hard link (st_nlink > 1; ATK-10: a hard link is not a symlink, so realpath cannot see that the name inside the root
+ *    is the same file as one outside it; a directory is exempt). EVERY refusal of the path
  *    itself has the same message and details, so the tool cannot be used as an oracle for which files exist outside the roots.
  *  - The refusal never echoes the candidate path or the configured roots.
  *
@@ -98,7 +100,7 @@ function hasDotDotSegment(p: string): boolean {
 function notAllowed(): GcrError {
   return new GcrError('IMPORT_PATH_NOT_ALLOWED', 'The import path is not allowed.', {
     remedy:
-      'Pass the path of an export file or folder that exists and lies inside one of the approved import roots the operator configured (GCR_APPROVED_IMPORT_ROOTS). Paths with ".." segments, symlinks that leave an approved root and missing files are refused.',
+      'Pass the path of an export file or folder that exists and lies inside one of the approved import roots the operator configured (GCR_APPROVED_IMPORT_ROOTS). Paths with ".." segments, symlinks that leave an approved root, files with more than one hard link and missing files are refused.',
     details: { reason: 'not_under_approved_root' },
   });
 }
@@ -131,6 +133,11 @@ export async function resolveApprovedImportPath(candidate: unknown, approved: Ap
   try {
     const st = await stat(real);
     if (!st.isFile() && !st.isDirectory()) throw notAllowed(); // device, FIFO, socket: opening it could block or read endlessly
+    // A regular file with more than one name (ATK-10). A hard link is a second NAME for the same inode, so `realpath` has nothing to
+    // resolve and the containment test above passes for a name inside the root that is the very same file as one outside it.
+    // The names cannot be told apart from here, so every multi-link file is refused (copy it into the root instead). Directories
+    // always have several links and are exempt; files INSIDE an approved directory are walked by the importer, not checked here.
+    if (st.isFile() && st.nlink > 1) throw notAllowed();
   } catch {
     throw notAllowed();
   }

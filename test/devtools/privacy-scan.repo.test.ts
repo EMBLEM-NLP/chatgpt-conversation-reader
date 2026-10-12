@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
 import { GcrError } from '../../src/errors.js';
-import { FIXTURE_MAX_BYTES, SYNTHETIC_MARKER, formatFindings, main, scanRepo } from '../../src/devtools/privacy-scan.js';
+import { FIXTURE_MAX_BYTES, LARGE_FILE_HEAD_BYTES, LARGE_FILE_TAIL_BYTES, SYNTHETIC_MARKER, formatFindings, main, scanRepo } from '../../src/devtools/privacy-scan.js';
 import type { Finding } from '../../src/devtools/privacy-scan.js';
 import { withTempDir } from '../helpers/tmp.js';
 
@@ -529,11 +529,14 @@ describe('history mode', () => {
 describe('large and binary files', () => {
   const key = join_('sk-', rnd(40, 90));
 
-  it('skips and counts oversized files: content unread, path rules still applied', async () => {
+  // Above head + tail the middle of a file is never read; below it the "large" file is simply read in full.
+  const BIG = LARGE_FILE_HEAD_BYTES + LARGE_FILE_TAIL_BYTES + 5000;
+
+  it('judges only the head and tail of oversized files, counts them, and FAILS CLOSED instead of skipping them', async () => {
     await inRepo(async (dir) => {
       await putAll(dir, {
-        'big.txt': `${key}\n${'x'.repeat(5000)}`,
-        'big.sqlite': 'x'.repeat(5000),
+        'big.txt': `${key}\n${'x'.repeat(BIG)}`,
+        'big.sqlite': 'x'.repeat(BIG),
         'small.txt': 'fine\n',
         'fixtures/huge.txt': 'y'.repeat(FIXTURE_MAX_BYTES + 10),
       });
@@ -542,17 +545,26 @@ describe('large and binary files', () => {
       assert.equal(result.scannedFiles, 1);
       assert.deepEqual(summarize(result.findings), [
         ['forbidden-extension', 'big.sqlite', undefined],
+        ['unscanned-large-file', 'big.sqlite', undefined],
+        ['unscanned-large-file', 'big.txt', undefined],
+        ['openai-api-key', 'big.txt', 1], // the head of a large file is judged by every content rule
         ['fixture-too-large', 'fixtures/huge.txt', undefined],
+        ['unscanned-large-file', 'fixtures/huge.txt', undefined],
       ]);
+      assert.equal(result.unscannedLarge, 0);
     });
   });
 
-  it('scans a file exactly at the limit and skips one byte over', async () => {
+  it('reads a file above the limit in full when it fits inside the head and tail windows (nothing is left unjudged)', async () => {
     await inRepo(async (dir) => {
       await putAll(dir, { 'at.txt': `${key}${'\n'.repeat(1024 - key.length)}`, 'over.txt': `${key}${'\n'.repeat(1025 - key.length)}` });
       const result = await scanRepo(dir, { maxFileBytes: 1024 });
-      assert.deepEqual(summarize(result.findings), [['openai-api-key', 'at.txt', 1]]);
-      assert.equal(result.skippedLarge, 1);
+      assert.deepEqual(summarize(result.findings), [
+        ['openai-api-key', 'at.txt', 1],
+        ['openai-api-key', 'over.txt', 1],
+      ]);
+      assert.equal(result.skippedLarge, 0);
+      assert.equal(result.scannedFiles, 2);
     });
   });
 
@@ -881,7 +893,7 @@ describe('main()', () => {
       const out = await main(['--root', dir, '--json']);
       assert.equal(out.exitCode, 1);
       const doc = JSON.parse(out.stdout) as Record<string, unknown>;
-      assert.deepEqual(Object.keys(doc), ['ok', 'findings', 'scannedFiles', 'skippedLarge', 'skippedBinary', 'skippedNonRegular', 'listedFiles', 'allowListedFiles', 'history', 'notes']);
+      assert.deepEqual(Object.keys(doc), ['ok', 'findings', 'scannedFiles', 'skippedLarge', 'skippedBinary', 'skippedNonRegular', 'listedFiles', 'allowListedFiles', 'unscannedLarge', 'staged', 'history', 'notes']);
       assert.equal(doc['ok'], false);
       assert.equal(doc['history'], null);
       assert.equal(doc['scannedFiles'], 2); // both are text: a forbidden extension does not make a file binary
@@ -889,21 +901,39 @@ describe('main()', () => {
     });
   });
 
-  it('supports --history, --max-file-bytes and --max-history-bytes and surfaces truncation on stderr', async () => {
+  it('supports --history, --max-file-bytes and --max-history-bytes; a cut history is a finding unless --allow-large-unscanned is given', async () => {
     await inRepo(async (dir) => {
       await put(dir, 'big.txt', 'x'.repeat(4000));
       await commitAll(dir, 'one');
       const limited = JSON.parse((await main(['--root', dir, '--json', '--max-file-bytes', '100'])).stdout) as { skippedLarge: number };
-      assert.equal(limited.skippedLarge, 1);
+      assert.equal(limited.skippedLarge, 0); // 4000 bytes fit inside the head and tail windows, so the file is read in full
       const capped = await main(['--root', dir, '--history', '--max-history-bytes', '300']);
-      assert.equal(capped.exitCode, 0);
+      assert.equal(capped.exitCode, 1); // history the scanner could not read is history it could not judge: fail closed
+      assert.match(capped.stdout, /^\(git history\): \[scan-truncated\] history scan truncated/m);
       assert.match(capped.stderr, /^privacy-scan: note: history scan truncated/);
       assert.match(capped.stdout, /; history: /);
+      const accepted = await main(['--root', dir, '--history', '--max-history-bytes', '300', '--allow-large-unscanned']);
+      assert.equal(accepted.exitCode, 0); // local use: the same truncation is only a note
+      assert.match(accepted.stderr, /^privacy-scan: note: history scan truncated/);
+    });
+  });
+
+  it('counts a file above --max-file-bytes that is larger than the windows, and fails unless --allow-large-unscanned', async () => {
+    await inRepo(async (dir) => {
+      await put(dir, 'big.txt', 'x'.repeat(LARGE_FILE_HEAD_BYTES + LARGE_FILE_TAIL_BYTES + 100));
+      const failing = await main(['--root', dir, '--json', '--max-file-bytes', '100']);
+      assert.equal(failing.exitCode, 1);
+      assert.equal((JSON.parse(failing.stdout) as { skippedLarge: number }).skippedLarge, 1);
+      const local = await main(['--root', dir, '--json', '--max-file-bytes', '100', '--allow-large-unscanned']);
+      assert.equal(local.exitCode, 0);
+      const doc = JSON.parse(local.stdout) as { skippedLarge: number; unscannedLarge: number; notes: string[] };
+      assert.deepEqual([doc.skippedLarge, doc.unscannedLarge], [1, 1]);
+      assert.match(doc.notes.join('\n'), /1 large file\(s\) were judged only in part and not reported .*: big\.txt/);
     });
   });
 
   it('exits 2 on usage errors without scanning', async () => {
-    for (const argv of [['--nope'], ['stray'], ['--root'], ['--root='], ['--max-file-bytes', 'abc'], ['--max-file-bytes', '0'], ['--max-history-bytes', '-5']]) {
+    for (const argv of [['--nope'], ['stray'], ['--root'], ['--root='], ['--max-file-bytes', 'abc'], ['--max-file-bytes', '0'], ['--max-history-bytes', '-5'], ['--staged', '--history']]) {
       const out = await main(argv);
       assert.equal(out.exitCode, 2, argv.join(' '));
       assert.equal(out.stdout, '');

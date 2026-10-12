@@ -79,7 +79,7 @@ export function offsetOption(): OptionSpec {
 }
 
 export function cursorOption(): OptionSpec {
-  return { name: 'cursor', kind: 'string', valueName: 'cursor', description: 'Continue after the `nextCursor` printed by the previous page.' };
+  return { name: 'cursor', kind: 'string', valueName: 'cursor', description: 'Continue after the `nextCursor` printed by the previous page (messages scope only; the other scopes page with --offset).' };
 }
 
 export function includeHiddenOption(what: string): OptionSpec {

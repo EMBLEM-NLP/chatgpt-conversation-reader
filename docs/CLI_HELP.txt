@@ -28,8 +28,8 @@ Commands:
   list                  List imported conversations.
   get                   Show one imported conversation (its active thread, or
                         every branch).
-  search                Full-text search over message text and conversation
-                        titles.
+  search                Full-text search over message text, conversation titles
+                        and attachment file names.
   branches              List the branches of a conversation (edited prompts,
                         regenerated answers).
   thread                Show one branch of a conversation as a message thread.
@@ -399,6 +399,11 @@ A chatgpt.com link succeeds only if that conversation is in your database;
 otherwise the command fails with NOT_IN_LOCAL_EXPORT. GCR never contacts
 chatgpt.com.
 
+Every format lists the same warnings as the SDK and the MCP tools;
+SOURCE_NOT_FULL_HISTORY comes first when the source is a partial copy or a
+rendered-only export. Messages that no root reaches (a damaged tree) are stored
+and searchable but cannot be shown here: the warning NO_BRANCHES says so.
+
 Arguments:
   <ref>                         Conversation UUID or an exact
                                 https://chatgpt.com/c/<uuid> link. The link is
@@ -472,7 +477,8 @@ contacts chatgpt.com.
 ================================================================================
 $ gcr search --help
 ================================================================================
-gcr search - Full-text search over message text and conversation titles.
+gcr search - Full-text search over message text, conversation titles and
+  attachment file names.
 
 Usage:
   gcr search <query> [options]
@@ -481,8 +487,23 @@ The query is treated as plain words (operators and quotes are inert; a trailing
 * makes a prefix). Case and accents are ignored and CJK text matches by
 character. Use --raw to pass SQLite FTS5 syntax through.
 
-Hidden messages are skipped unless --include-hidden. A query that starts with
-"-" goes after "--".
+Folded when matching: case, accents, character width (fullwidth letters),
+ligatures (fi) and CJK substrings. Not folded: "ß" is not "ss". Emoji and other
+symbols are not indexed (only letters, digits and combining marks are), so a
+query made only of them is refused with INVALID_ARGUMENT: search for words.
+
+--scope attachments matches the file NAMES and MIME types of attachments
+(metadata only: attachment files are never read and no attachment content is
+searched, not even the text a Claude export carries inline; a ChatGPT export may
+not contain the files). Each search word must occur anywhere inside the folded
+name or type (so "notes", "diagram" and "synthetic-notes.txt" all find
+synthetic-notes.txt, and "image/png" finds every PNG). Results are not ranked:
+oldest message first. --scope all lists titles, then messages, then attachments
+(attachment names are part of "all"); with --raw the attachment part is skipped
+and ATTACHMENTS_NOT_SEARCHED says so.
+
+Hidden messages (and their attachments) are skipped unless --include-hidden. A
+query that starts with "-" goes after "--".
 
 Arguments:
   <query>                       Words to search for (quote it when it has
@@ -492,22 +513,26 @@ Options:
       --raw                     Pass the query to SQLite FTS5 unchanged
                                 (AND/OR/NEAR/phrases). A syntax error is
                                 FTS_SYNTAX_ERROR.
-      --scope <scope>           Search message text, conversation titles, or
-                                both (titles first). One of: messages, titles,
-                                all. (default: messages)
+      --scope <scope>           Search message text, conversation titles,
+                                attachment file names and MIME types, or all
+                                three (titles, then messages, then attachments).
+                                One of: messages, titles, attachments, all.
+                                (default: messages)
       --role <role>             Only messages by this author role (user,
-                                assistant, system, tool, ...). Messages scope
-                                only.
+                                assistant, system, tool, ...). Messages and
+                                attachments scopes only.
       --channel <channel>       Only messages on this channel (for example
-                                final). Messages scope only.
+                                final). Messages and attachments scopes only.
       --has-model               Only messages whose export states the model
-                                explicitly. Messages scope only.
+                                explicitly. Messages and attachments scopes
+                                only.
       --conversation <ref>      Only inside this conversation (UUID, chatgpt.com
-                                link or stored id). Messages scope only.
+                                link or stored id). Messages and attachments
+                                scopes only.
       --after <ISO>             Only messages created at or after this ISO-8601
-                                UTC time. Messages scope only.
+                                UTC time. Messages and attachments scopes only.
       --before <ISO>            Only messages created before this ISO-8601 UTC
-                                time. Messages scope only.
+                                time. Messages and attachments scopes only.
       --include-hidden          Include messages the export marks as hidden
                                 (system scaffolding, memory, ...).
       --all-batches             Include superseded import snapshots, not only
@@ -520,7 +545,8 @@ Options:
       --limit <n>               Maximum number of hits (1-200). (default: 20)
       --offset <n>              Number of results to skip (paging). (default: 0)
       --cursor <cursor>         Continue after the `nextCursor` printed by the
-                                previous page.
+                                previous page (messages scope only; the other
+                                scopes page with --offset).
 
 Global options:
       --db <path>               SQLite database file. (default: $GCR_DB, else
@@ -542,6 +568,9 @@ Examples:
       Messages containing both words, best match first.
   gcr search roadmap --scope titles --format json
       Conversation titles that mention "roadmap".
+  gcr search "report pdf" --scope attachments
+      Attachments whose file name or type contains both "report" and "pdf"
+      (metadata only).
   gcr search "quok*" --role assistant --after 2025-01-01T00:00:00Z --limit 5
       Prefix match, assistant messages from 2025 on.
   gcr search --conversation 00000000-0000-4000-8000-000000000001 -- "-draft"
@@ -628,7 +657,8 @@ Usage:
   gcr thread <ref> [options]
 
 Like "gcr get" but always a single thread; use --branch to pick one from "gcr
-branches".
+branches". The warnings are the same as in "gcr get": SOURCE_NOT_FULL_HISTORY
+first for a partial or rendered-only source.
 
 Arguments:
   <ref>                         Conversation UUID or an exact
@@ -777,6 +807,12 @@ report holds counts and sample ids, never message text, and states how many
 branches have a known active branch and how many assistant messages state a
 model.
 
+Branch provenance (known and unknown active branches, branch counts) is measured
+by the tree pass, which runs only when --tree, --no-current-node or --timestamps
+is selected (or no flag at all). Without them branchProvenance is null ("not
+computed") and the warning BRANCH_PROVENANCE_NOT_COMPUTED says so; it is never
+reported as zeros.
+
 Options:
       --missing-model           Assistant messages whose export does not state a
                                 model.
@@ -820,7 +856,8 @@ Examples:
   gcr audit
       Run every check.
   gcr audit --missing-model --untitled --empty
-      Only these three checks.
+      Only these three checks (no tree check, so branchProvenance is null: not
+      computed).
   gcr audit --no-current-node --tree --format json
       Branch provenance and tree integrity, machine-readable.
 
@@ -929,6 +966,13 @@ Usage:
 The term is matched against node labels and ids (plain text). Results are
 bounded by --depth and --max-nodes, and truncation is reported.
 
+Keywords are single words: a name such as EMBLEM-NLP is stored as the keywords
+"emblem" and "nlp". When no node matches the whole term and it contains a
+hyphen, underscore, dot between letters or space, it is split the same way and
+every keyword node that matches one of its words is a seed (warning TERM_SPLIT
+names the words). When nothing matches, the answer is an empty graph with the
+warning NO_MATCHING_NODE, never a silent one.
+
 Arguments:
   <term>                        Word or phrase to look for in node labels (quote
                                 it when it has spaces).
@@ -963,6 +1007,9 @@ Examples:
       Everything within two hops of nodes that mention "quokka".
   gcr graph query "release notes" --depth 1 --kinds url --format json
       URL nodes next to "release notes", machine-readable.
+  gcr graph query "EMBLEM-NLP" --depth 2
+      A hyphenated name is split into its keywords (emblem, nlp) when no node
+      has that exact name; TERM_SPLIT says so.
 
 Exit codes:
   0   success

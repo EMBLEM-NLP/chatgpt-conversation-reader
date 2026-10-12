@@ -24,6 +24,11 @@
  *      contains the text `\u202E` is indistinguishable from an escaped U+202E in Markdown/compact; JSON is the lossless format.
  *   5. JSON/JSONL strings additionally get a LOSSLESS pass: the same characters (which JSON.stringify leaves raw) are
  *      written as `\uXXXX` escapes, so `JSON.parse` returns the exact original text but the raw bytes never reach a terminal.
+ *      The implementation is `escapeJsonHazards` in `./scrub.ts`, shared with the MCP envelope (which needs the visible,
+ *      not lossless, form because a tool result is consumed as parsed data too).
+ *   6. An output too large for V8 to build as one string (about 512 MiB: `get --all-branches --format json` of a 500,000-node
+ *      conversation) is a coded error, not an unexpected RangeError: every public renderer maps the size failure to
+ *      INVALID_ARGUMENT / `details.reason = "OUTPUT_TOO_LARGE"` with a remedy (`outputTooLargeError`, `isOutputSizeFailure`).
  *
  * Rendered Markdown/compact never contains `rawSource` or `rawMetadata`; JSON shapes are explicit allow-lists, so extra
  * properties on the objects passed in (for example secrets a caller attached) are not copied to the output.
@@ -33,6 +38,7 @@ import type { ErrorEnvelope, Warning } from '../errors.js';
 import type { BranchListResult, ConversationSummary, ImportReport, Page, SearchHit, ThreadResult } from '../domain/results.js';
 import type { Branch, Completeness, ContentBlock, MessageRecord, OutputFormat, ResultEnvelope, SourceSummary } from '../domain/types.js';
 import { TOOL_NAME, TOOL_VERSION } from '../version.js';
+import { escapeJsonHazards } from './scrub.js';
 import { assertValidTimeZone, formatInTimeZone, formatUtc } from './time.js';
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -102,8 +108,6 @@ const HAZARD_PATTERN = String.raw`[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028
 const HAZARD_RE = new RegExp(HAZARD_PATTERN, 'g');
 /** Single-line variant: additionally treats LF and TAB as things to show visibly. */
 const SINGLE_LINE_RE = new RegExp(String.raw`[\n\t]|${HAZARD_PATTERN}`, 'g');
-/** JSON-only subset: what JSON.stringify leaves raw but that must not reach a terminal (C0 and lone surrogates are already escaped by JSON.stringify). */
-const JSON_HAZARD_RE = /[\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]|\uDB40[\uDC00-\uDC7F]/g;
 
 function hex4(codeUnit: number): string {
   return codeUnit.toString(16).toUpperCase().padStart(4, '0');
@@ -321,13 +325,6 @@ function toJsonValue(value: unknown, depth = 0, ancestors: readonly object[] = [
     if (child !== undefined) entries.push([key, child]);
   }
   return Object.fromEntries(entries);
-}
-
-/** Lossless escaping of characters JSON.stringify emits raw but a terminal must never receive (see header, defense 5). */
-function escapeJsonHazards(json: string): string {
-  return json.replace(JSON_HAZARD_RE, (m) =>
-    m.length === 2 ? `\\u${m.charCodeAt(0).toString(16).padStart(4, '0')}\\u${m.charCodeAt(1).toString(16).padStart(4, '0')}` : `\\u${m.charCodeAt(0).toString(16).padStart(4, '0')}`,
-  );
 }
 
 function jsonText(value: unknown, pretty: boolean): string {
@@ -833,7 +830,7 @@ function compactMessageLines(view: MessageView): string[] {
   return out;
 }
 
-export function renderThread(result: ThreadResult, source: SourceSummary, opts: RenderOptions): string {
+function renderThreadUnguarded(result: ThreadResult, source: SourceSummary, opts: RenderOptions): string {
   const ro = resolveOptions(opts);
   const src = shapeSource(source);
   const selection = selectThreadMessages(result, ro);
@@ -921,7 +918,7 @@ export function renderThread(result: ThreadResult, source: SourceSummary, opts: 
 // renderConversationList
 // ---------------------------------------------------------------------------------------------------------------
 
-export function renderConversationList(page: Page<ConversationSummary>, source: SourceSummary[], opts: RenderOptions): string {
+function renderConversationListUnguarded(page: Page<ConversationSummary>, source: SourceSummary[], opts: RenderOptions): string {
   const ro = resolveOptions(opts);
   const sources = source.map(shapeSource);
   const items = page.items.map(shapeSummary);
@@ -1069,7 +1066,7 @@ function shapeHit(hit: SearchHit): Record<string, unknown> {
   };
 }
 
-export function renderSearchHits(page: Page<SearchHit>, source: SourceSummary[], opts: RenderOptions & { query: string }): string {
+function renderSearchHitsUnguarded(page: Page<SearchHit>, source: SourceSummary[], opts: RenderOptions & { query: string }): string {
   const ro = resolveOptions(opts);
   if (typeof opts.query !== 'string') throw badOption('query', 'expected a string');
   const query = opts.query;
@@ -1146,7 +1143,7 @@ function hitsTable(headers: string[], rows: string[][], snippets: string[]): str
 // renderBranchList
 // ---------------------------------------------------------------------------------------------------------------
 
-export function renderBranchList(result: BranchListResult, source: SourceSummary, opts: RenderOptions): string {
+function renderBranchListUnguarded(result: BranchListResult, source: SourceSummary, opts: RenderOptions): string {
   const ro = resolveOptions(opts);
   const src = shapeSource(source);
   const conv = result.conversation;
@@ -1319,7 +1316,7 @@ function importWarnings(report: ImportReport): Warning[] {
   return report.warnings.map((w) => ({ code: w.code, message: `${w.count} occurrence(s)`, ids: [...w.sampleIds] }));
 }
 
-export function renderImportReport(report: ImportReport, opts: RenderOptions): string {
+function renderImportReportUnguarded(report: ImportReport, opts: RenderOptions): string {
   const ro = resolveOptions(opts);
   const sourceLabel = basenameOnly(report.sourceLabel);
   // Explicit allow-list copy so nothing beyond the ImportReport contract is ever printed (and no path).
@@ -1407,7 +1404,7 @@ export function renderImportReport(report: ImportReport, opts: RenderOptions): s
 // renderEnvelope (generic)
 // ---------------------------------------------------------------------------------------------------------------
 
-export function renderEnvelope<T>(env: ResultEnvelope<T> | ErrorEnvelope, opts: RenderOptions): string {
+function renderEnvelopeUnguarded<T>(env: ResultEnvelope<T> | ErrorEnvelope, opts: RenderOptions): string {
   const ro = resolveOptions(opts);
   if (typeof env !== 'object' || env === null) throw new GcrError('INVALID_ARGUMENT', 'renderEnvelope needs an envelope object.', { details: { option: 'env' } });
 
@@ -1486,4 +1483,76 @@ export function renderEnvelope<T>(env: ResultEnvelope<T> | ErrorEnvelope, opts: 
     },
     ro,
   );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Size failures
+// ---------------------------------------------------------------------------------------------------------------
+
+/**
+ * V8 cannot build a string longer than about 512 MiB (`buffer.constants.MAX_STRING_LENGTH`) nor an array or typed array past its
+ * own limits. A conversation that is well inside the IMPORT limits (500,000 nodes) renders as `get --all-branches --format json`
+ * into a ~300 MB document, and JSON.stringify of a bigger one throws `RangeError: Invalid string length`: before this guard
+ * that surfaced as a generic INTERNAL_ERROR that told the operator nothing (ATK-06).
+ *
+ * Only the failures that mean "this output does not fit in memory as one value" are recognised. A stack overflow is also a
+ * RangeError and means something else (deeply nested data), so it is NOT mapped: it must stay visible as the bug it is.
+ */
+const SIZE_FAILURE_MESSAGE = /^(?:Invalid string length|Invalid array length|Invalid typed array length|Array buffer allocation failed|Cannot create a string longer than)/;
+
+export function isOutputSizeFailure(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const code = (e as { code?: unknown }).code;
+  // Node's own wrappers for the same two limits (Buffer#toString, Buffer allocation).
+  if (code === 'ERR_STRING_TOO_LONG' || code === 'ERR_BUFFER_TOO_LARGE') return true;
+  return e instanceof RangeError && SIZE_FAILURE_MESSAGE.test(e.message);
+}
+
+/**
+ * The coded error for an output that is too large. `INVALID_ARGUMENT` is the closest code that exists (src/errors.ts has no
+ * RESULT_TOO_LARGE and is a contract file): the request, not the program, asks for more than one text can hold, and the fix is a
+ * different request. `details.reason` is the stable discriminator. The V8 message is kept as `cause` (shown by --debug only).
+ */
+export function outputTooLargeError(format: string | undefined, cause?: unknown): GcrError {
+  const jsonlHint = format === 'jsonl' ? '' : 'use --format jsonl (one JSON value per line), ';
+  return new GcrError('INVALID_ARGUMENT', 'The output is too large to build as one text.', {
+    remedy: `Ask for less: ${jsonlHint}narrow the scope (one conversation or branch instead of --all-branches or a whole list), lower --limit, or page through the result with --offset.`,
+    details: { reason: 'OUTPUT_TOO_LARGE', ...(format === undefined ? {} : { format }) },
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
+/** Run one renderer; turn a size failure into the coded error, let every other failure through unchanged. */
+function guardOutputSize(opts: unknown, render: () => string): string {
+  try {
+    return render();
+  } catch (e) {
+    if (!isOutputSizeFailure(e)) throw e;
+    const format = typeof opts === 'object' && opts !== null && typeof (opts as { format?: unknown }).format === 'string' ? (opts as { format: string }).format : undefined;
+    throw outputTooLargeError(format, e);
+  }
+}
+
+export function renderThread(result: ThreadResult, source: SourceSummary, opts: RenderOptions): string {
+  return guardOutputSize(opts, () => renderThreadUnguarded(result, source, opts));
+}
+
+export function renderConversationList(page: Page<ConversationSummary>, source: SourceSummary[], opts: RenderOptions): string {
+  return guardOutputSize(opts, () => renderConversationListUnguarded(page, source, opts));
+}
+
+export function renderSearchHits(page: Page<SearchHit>, source: SourceSummary[], opts: RenderOptions & { query: string }): string {
+  return guardOutputSize(opts, () => renderSearchHitsUnguarded(page, source, opts));
+}
+
+export function renderBranchList(result: BranchListResult, source: SourceSummary, opts: RenderOptions): string {
+  return guardOutputSize(opts, () => renderBranchListUnguarded(result, source, opts));
+}
+
+export function renderImportReport(report: ImportReport, opts: RenderOptions): string {
+  return guardOutputSize(opts, () => renderImportReportUnguarded(report, opts));
+}
+
+export function renderEnvelope<T>(env: ResultEnvelope<T> | ErrorEnvelope, opts: RenderOptions): string {
+  return guardOutputSize(opts, () => renderEnvelopeUnguarded(env, opts));
 }

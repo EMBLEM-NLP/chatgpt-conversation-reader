@@ -9,12 +9,47 @@ coverage/
 *.sqlite3
 *.db
 .gcr/
+# SQLite sidecars and the other common SQLite extensions: a WAL or journal file holds the same private rows as its database
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.db3
+*.db3-wal
+*.db3-shm
+*.db3-journal
 # ChatGPT / Claude export archives and raw exports (synthetic fixtures live under fixtures/ and are allow-listed)
 *.zip
 /conversations*.json
 /export/
 /exports/
 /private/
+# The natural places an export is unpacked, at ANY depth (the rules above are anchored to the repository root, which is
+# the one place an export is rarely put): the files an official export contains, and the directories it lands in.
+**/conversations*.json
+**/user.json
+**/chat.html
+**/message_feedback.json
+**/shared_conversations.json
+**/user_settings.json
+**/model_comparisons.json
+**/group_chats.json
+**/conversation_asset_file_names.json
+**/library_files.json
+**/export_manifest.json
+**/export/**/*.json
+**/exports/**/*.json
+**/private/**/*.json
+chatgpt-export*/
+claude-export*/
+# The only sanctioned raw-export-shaped files are synthetic fixtures (the privacy scan demands their marker).
+!fixtures/**/conversations*.json
+# Files GCR itself writes (graph pages hold conversation titles and entity labels) and captures that hold sessions
+*graph*.html
+*.har
 # secrets
 .env
 .env.*
@@ -22,7 +57,38 @@ coverage/
 *.pem
 *.key
 cookies*.json
+cookies.txt
+cookie.json
+cookie.txt
 session*.json
+auth.json
+storage_state.json
+id_rsa*
+# The other SSH key types (id_ed25519 is today's default) and the credential stores and key containers the privacy scan refuses under any name
+id_dsa*
+id_ecdsa*
+id_ed25519*
+.netrc
+_netrc
+.pgpass
+.git-credentials
+.htpasswd
+*.p12
+*.pfx
+*.jks
+*.kdbx
+# Other archive formats an export gets packed into (*.zip is above)
+*.tar
+*.tgz
+*.gz
+*.7z
+*.rar
+*.xz
+*.bz2
+*.zst
+*.tbz
+*.tbz2
+*.txz
 # editor / OS
 .DS_Store
 .vscode/*
@@ -30,3 +96,6 @@ session*.json
 *.log
 tmp/
 .tmp/
+
+# release artifacts written by scripts/release-checksums.mjs
+release/

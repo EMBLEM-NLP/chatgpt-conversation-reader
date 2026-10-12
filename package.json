@@ -27,6 +27,8 @@
     "smoke": "npm run build && node scripts/ci-smoke.mjs",
     "privacy-scan": "npm run build && node scripts/privacy-scan.mjs",
     "privacy-scan:history": "npm run build && node scripts/privacy-scan.mjs --history",
+    "privacy-scan:staged": "npm run build && node scripts/privacy-scan.mjs --staged",
+    "hooks:install": "node scripts/install-git-hooks.mjs",
     "licenses": "npm run build && node scripts/licenses.mjs",
     "test:browser": "node scripts/test-browser-gated.mjs",
     "capture:cli-help": "npm run build && node scripts/capture-cli-help.mjs",

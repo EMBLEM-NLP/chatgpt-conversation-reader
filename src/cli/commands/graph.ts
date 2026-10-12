@@ -71,7 +71,10 @@ export const graphBuild: CommandSpec = {
 export const graphQuery: CommandSpec = {
   path: ['graph', 'query'],
   summary: 'Show the neighbourhood of a term in the graph (breadth-first).',
-  details: ['The term is matched against node labels and ids (plain text). Results are bounded by --depth and --max-nodes, and truncation is reported.'],
+  details: [
+    'The term is matched against node labels and ids (plain text). Results are bounded by --depth and --max-nodes, and truncation is reported.',
+    'Keywords are single words: a name such as EMBLEM-NLP is stored as the keywords "emblem" and "nlp". When no node matches the whole term and it contains a hyphen, underscore, dot between letters or space, it is split the same way and every keyword node that matches one of its words is a seed (warning TERM_SPLIT names the words). When nothing matches, the answer is an empty graph with the warning NO_MATCHING_NODE, never a silent one.',
+  ],
   positionals: [{ name: 'term', description: 'Word or phrase to look for in node labels (quote it when it has spaces).' }],
   options: [
     { name: 'depth', kind: 'int', valueName: 'n', min: 1, max: 4, description: 'How many hops to follow from the matching nodes (1-4).', defaultText: '2' },
@@ -81,6 +84,7 @@ export const graphQuery: CommandSpec = {
   examples: [
     { command: 'graph query quokka', note: 'Everything within two hops of nodes that mention "quokka".' },
     { command: 'graph query "release notes" --depth 1 --kinds url --format json', note: 'URL nodes next to "release notes", machine-readable.' },
+    { command: 'graph query "EMBLEM-NLP" --depth 2', note: 'A hyphenated name is split into its keywords (emblem, nlp) when no node has that exact name; TERM_SPLIT says so.' },
   ],
   errors: [...GRAPH_ERRORS],
   async run(ctx: CommandContext): Promise<void> {

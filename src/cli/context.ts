@@ -8,13 +8,14 @@
  *  - WRITE commands create the file (the SDK creates it with mode 0600). Only the DEFAULT location's directory
  *    (`./.gcr`) is created on demand, with mode 0700, and only at the moment of a first write. An explicit path
  *    (`--db`, `$GCR_DB`) whose directory does not exist is an error: a typo must not silently create directory trees;
+ *  - ownership: a DEFAULT database (or its directory) that belongs to another user is announced on stderr (ATK-11);
  *  - `:memory:` and `file:` URIs make no sense for a one-shot process (the data would vanish / SQLite options could be
  *    smuggled in), so they are refused up front.
  *
  * The SDK (and with it node:sqlite) is imported lazily so `gcr --help` and `gcr --version` start instantly and never
  * load SQLite.
  */
-import { existsSync, mkdirSync, rmSync, rmdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, rmSync, rmdirSync, statSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import type { OutputFormat } from '../domain/types.js';
 import { GcrError } from '../errors.js';
@@ -113,12 +114,41 @@ export function dbNotFound(path: string): GcrError {
   });
 }
 
+/** The names SQLite may create for one database: the file itself and its three side files. */
+const DATABASE_PATH_SUFFIXES = ['', '-wal', '-shm', '-journal'] as const;
+export type DatabasePathSuffix = (typeof DATABASE_PATH_SUFFIXES)[number];
+/** For each name: did something (anything, a dangling symbolic link included) already have it BEFORE the command ran? */
+export type DatabasePathSnapshot = Readonly<Record<DatabasePathSuffix, boolean>>;
+
 /**
- * Remove a database file this command created (with SQLite's side files) and, when the command also created the default `./.gcr`
- * directory, that directory too (it goes only while empty). Best effort; never throws.
+ * Record, with lstat, which of the database path and its three side files already exist. Taken BEFORE the command opens anything,
+ * so that `removeCreated` can tell what the command itself created from what was the operator's (ATK-05). lstat, not stat: a
+ * dangling symbolic link is a name in use, and an uninspectable name counts as in use (never delete what you cannot vouch for).
  */
-function removeCreated(dbPath: string, createdDir: string | undefined): void {
-  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+export function snapshotDatabasePaths(dbPath: string): DatabasePathSnapshot {
+  const present = (path: string): boolean => {
+    try {
+      lstatSync(path);
+      return true;
+    } catch (e) {
+      const code = (e as { code?: unknown } | null)?.code;
+      return !(code === 'ENOENT' || code === 'ENOTDIR');
+    }
+  };
+  return { '': present(dbPath), '-wal': present(`${dbPath}-wal`), '-shm': present(`${dbPath}-shm`), '-journal': present(`${dbPath}-journal`) };
+}
+
+/**
+ * Remove what this command created: the database file and SQLite's side files, and, when the command also created the default
+ * `./.gcr` directory, that directory too (it goes only while empty). Best effort; never throws.
+ *
+ * A name is removed only if it did NOT exist before the command (`before`, from `snapshotDatabasePaths`) and exists now. A
+ * pre-existing file called `<db>-wal` is somebody's file, not ours: the earlier version unlinked all four names unconditionally
+ * (ATK-05). Exported for tests.
+ */
+export function removeCreated(dbPath: string, createdDir: string | undefined, before: DatabasePathSnapshot): void {
+  for (const suffix of DATABASE_PATH_SUFFIXES) {
+    if (before[suffix]) continue;
     try {
       rmSync(dbPath + suffix, { force: true });
     } catch {
@@ -134,11 +164,36 @@ function removeCreated(dbPath: string, createdDir: string | undefined): void {
   }
 }
 
+const FOREIGN_DEFAULT_DATABASE_WARNING =
+  'warning: the default database ./.gcr/gcr.sqlite (or its directory) is not owned by the current user, so someone else may have placed it in this directory; its contents, provenance and completeness included, are whatever its creator wrote. Use --db <path> or set GCR_DB to choose a database you trust.\n';
+
+/**
+ * ATK-11. The default database is `./.gcr/gcr.sqlite` relative to the CURRENT DIRECTORY, so running `gcr` inside a directory that
+ * someone else prepared (a downloaded project, a shared folder) opens a database they planted, and everything in it, provenance
+ * and completeness fields included, is whatever they wrote (the same trust problem as T34, triggered by the choice of directory).
+ * Returns the warning text when the database or its directory belongs to somebody other than `uid`, otherwise undefined. POSIX
+ * only: without a user id (Windows) there is nothing to compare. The text names neither a path nor a user id. A missing path says
+ * nothing. Not called for `--db` and `GCR_DB`: naming a database is the operator's own choice.
+ */
+export function defaultDatabaseOwnershipWarning(dbPath: string, uid: number | undefined = process.getuid?.()): string | undefined {
+  if (uid === undefined) return undefined;
+  for (const path of [dirname(dbPath), dbPath]) {
+    try {
+      if (lstatSync(path).uid !== uid) return FOREIGN_DEFAULT_DATABASE_WARNING;
+    } catch {
+      // missing or not inspectable: the open reports that in its own words
+    }
+  }
+  return undefined;
+}
+
 /** A database file (and, for the default location, its directory) that THIS command created and may therefore take back. */
 interface FreshDatabase {
   readonly gcr: Gcr;
   /** The `./.gcr` directory when this command created it too. */
   readonly dir: string | undefined;
+  /** Which of the database path and its side files existed before the command: only the others may be taken back. */
+  readonly before: DatabasePathSnapshot;
 }
 
 export class CommandContext {
@@ -155,6 +210,7 @@ export class CommandContext {
   /** Set by a command that finishes normally but wants a non-zero exit (doctor with problems). */
   exitCode = 0;
   private fresh: FreshDatabase | undefined;
+  private foreignWarned = false;
   private readonly keptNotes: string[] = [];
 
   constructor(init: {
@@ -177,6 +233,9 @@ export class CommandContext {
     this.quiet = init.quiet;
     this.debug = init.debug;
     this.db = init.db;
+    // `gcr mcp` hands the path to the MCP entry point and never goes through openRead / openWrite, and a model-driven server over a
+    // planted database is the case ATK-11 worries about most: announce it here (idempotent, so a later explicit call adds nothing).
+    if (this.spec.path.length === 1 && this.spec.path[0] === 'mcp') this.warnIfForeignDefaultDatabase();
   }
 
   get out(): Output {
@@ -217,7 +276,20 @@ export class CommandContext {
     } catch {
       // the file is what matters now
     }
-    removeCreated(this.db.path, fresh.dir);
+    removeCreated(this.db.path, fresh.dir, fresh.before);
+  }
+
+  /**
+   * ATK-11: tell the operator, on stderr only, when the DEFAULT database (./.gcr/gcr.sqlite) or its directory is not theirs. It is
+   * a security warning, not a note, so --quiet does not hide it; stdout is never touched. An explicit --db / GCR_DB is silent.
+   * Public for commands that open their database some other way; `gcr mcp` is announced by the constructor.
+   */
+  warnIfForeignDefaultDatabase(): void {
+    if (this.db.origin !== 'default' || this.foreignWarned) return;
+    const warning = defaultDatabaseOwnershipWarning(this.db.path);
+    if (warning === undefined) return;
+    this.foreignWarned = true; // once per command, whichever of the open calls comes first
+    this.io.out.stderr(warning);
   }
 
   renderOptions(extra: { includeHidden?: boolean } = {}): RenderOptions {
@@ -227,6 +299,7 @@ export class CommandContext {
   /** Open the database read-only (never creates, never migrates). */
   async openRead(): Promise<Gcr> {
     if (!dbExists(this.db.path)) throw dbNotFound(this.db.path);
+    this.warnIfForeignDefaultDatabase();
     const { Gcr: GcrClass } = await import('../sdk/gcr.js');
     let gcr: Gcr;
     try {
@@ -255,8 +328,14 @@ export class CommandContext {
    * they fail with DB_NOT_FOUND instead of leaving an empty database behind.
    */
   async openWrite(opts: { mustExist?: boolean } = {}): Promise<Gcr> {
+    // Before anything is opened or created: what is already there is not ours to take back if this command fails.
+    const before = snapshotDatabasePaths(this.db.path);
     const existed = dbExists(this.db.path);
     if (opts.mustExist === true && !existed) throw dbNotFound(this.db.path);
+    // Also when the database does not exist yet: a foreign ./.gcr directory is the cheapest way to plant the trap (the first import
+    // would create the database in a directory somebody else owns). A missing directory has no owner to compare, and one this
+    // command is about to create is its own.
+    this.warnIfForeignDefaultDatabase();
     const dir = dirname(this.db.path);
     let createdDir: string | undefined;
     if (this.db.origin === 'default' && !existsSync(dir)) {
@@ -277,11 +356,11 @@ export class CommandContext {
     try {
       gcr = GcrClass.open({ dbPath: this.db.path, actor: 'cli' });
     } catch (e) {
-      if (!existed) removeCreated(this.db.path, createdDir); // the open itself failed: take back what was prepared for it
+      if (!existed) removeCreated(this.db.path, createdDir, before); // the open itself failed: take back what was prepared for it
       throw e;
     }
     this.io.lifecycle.add(() => gcr.close());
-    if (!existed) this.fresh = { gcr, dir: createdDir };
+    if (!existed) this.fresh = { gcr, dir: createdDir, before };
     return gcr;
   }
 }

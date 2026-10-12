@@ -260,8 +260,8 @@ describe('audit: tree_integrity', () => {
     assert.deepEqual(f.byCode, { BRANCH_LIMIT_EXCEEDED: 1 });
     assert.equal(f.severity, 'warn');
     assert.deepEqual(f.sampleMessageIds, ['big-l10000'], 'the one leaf the analyzer could not enumerate');
-    assert.equal(r.branchProvenance.maxBranchesInOneConversation, 10_001, 'leaf count is exact even when enumeration was truncated');
-    assert.equal(r.branchProvenance.conversationsWithMultipleBranches, 1);
+    assert.equal(r.branchProvenance?.maxBranchesInOneConversation, 10_001, 'leaf count is exact even when enumeration was truncated');
+    assert.equal(r.branchProvenance?.conversationsWithMultipleBranches, 1);
   });
 
   it('current-node problems are NOT tree integrity (they belong to no_current_node)', async () => {
@@ -466,18 +466,19 @@ describe('audit: branch provenance', () => {
     await importAll(repo, [cyclic('c'), orphaned('o'), selfParent('s'), mismatched('m'), chat('e', [])]);
     const r = runAudit(db);
     const b = r.branchProvenance;
+    assert.ok(b !== null, 'the tree pass ran (default checks), so branchProvenance is measured');
     assert.equal(b.conversationsWithKnownActiveBranch + b.conversationsWithUnknownActiveBranch, 5);
     assert.ok(b.conversationsWithMultipleBranches >= 1, 'the orphan chain is a second root, hence a second branch');
   });
 
-  it('skipping every tree-based check skips the pass and says so instead of reporting measured-looking zeros', async () => {
+  it('skipping every tree-based check skips the pass and reports branchProvenance as null (SPEC-07), not as measured-looking zeros', async () => {
     const { db, repo } = fresh();
     await importAll(repo, [star('s', 3)]);
     const r = runAudit(db, { checks: ['untitled', 'hidden'] });
-    assert.deepEqual(r.branchProvenance, { conversationsWithMultipleBranches: 0, maxBranchesInOneConversation: 0, conversationsWithKnownActiveBranch: 0, conversationsWithUnknownActiveBranch: 0 });
+    assert.equal(r.branchProvenance, null);
     assert.ok(r.warnings.some((w) => w.code === 'BRANCH_PROVENANCE_NOT_COMPUTED'));
     const full = runAudit(db, { checks: ['untitled', 'timestamps'] });
     assert.ok(!full.warnings.some((w) => w.code === 'BRANCH_PROVENANCE_NOT_COMPUTED'));
-    assert.equal(full.branchProvenance.maxBranchesInOneConversation, 3);
+    assert.equal(full.branchProvenance?.maxBranchesInOneConversation, 3);
   });
 });

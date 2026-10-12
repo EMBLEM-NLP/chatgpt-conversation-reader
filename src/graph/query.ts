@@ -20,7 +20,7 @@ import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from 
 import { toDbError } from '../db/open.js';
 import { analyzeTree } from '../domain/branches.js';
 import type { MessageRecord } from '../domain/types.js';
-import { ENTITY_KINDS, normalizeNfkc, sanitizeUrl } from '../entities/extract.js';
+import { ENTITY_KINDS, extractEntities, normalizeNfkc, sanitizeUrl } from '../entities/extract.js';
 import type { EntityKind } from '../entities/extract.js';
 import { GcrError } from '../errors.js';
 import type { Warning } from '../errors.js';
@@ -361,6 +361,95 @@ function findSeeds(db: DatabaseSync, term: string, kinds: ReadonlySet<string> | 
   return { seeds, more };
 }
 
+/**
+ * Characters that make a term "several words" for the split fallback: a hyphen (ASCII, the Unicode hyphens and dashes
+ * U+2010 to U+2015, minus U+2212), an underscore, white space, or a dot with a letter on each side ("node.js"). Anything else
+ * (a plain word, a path with slashes) is not split: the fallback exists for the compound names the keyword extractor takes apart.
+ */
+const SPLIT_TRIGGER = /[\s\-\u2010-\u2015\u2212_]|\p{L}\.\p{L}/u;
+
+/** Most tokens named in a TERM_SPLIT message (a term has at most 512 characters, so the list is short anyway). */
+const MAX_TOKENS_IN_MESSAGE = 16;
+
+/**
+ * The keywords a compound term is made of: EXACTLY the tokens the entity extractor would produce from it (graph build runs the
+ * same `extractEntities`, so a keyword node exists under such a token if and only if some message produced it). Mirroring the
+ * extractor instead of re-implementing its tokenisation keeps the two from drifting: NFKC, lower-case, words of letters, marks
+ * and digits (so "EMBLEM-NLP" is "emblem" and "nlp"), at least three letters, no stop words, no hashes, CJK bigrams.
+ * `[]` when the term has no separator (nothing to split) or yields no keyword. Sorted, de-duplicated: deterministic.
+ * Extraction itself is NOT changed by this fallback and the stored graph is not touched.
+ */
+export function termKeywords(term: string): string[] {
+  const folded = normalizeNfkc(term);
+  if (!SPLIT_TRIGGER.test(folded)) return [];
+  const found = extractEntities({ text: folded }, { maxKeywords: 1000, maxPerKind: 1000 })
+    .filter((e) => e.kind === 'keyword')
+    .map((e) => e.normalized);
+  return Array.from(new Set(found)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** Node ids of keyword entities are `ent:keyword:<word>` (see entityNodeId). */
+const KEYWORD_ID_PREFIX = 'ent:keyword:';
+
+/**
+ * Keyword nodes whose id is the keyword node id of one of `tokens`, heaviest first (the order of findSeeds for non-exact seeds).
+ * `present` lists EVERY token that has an allowed node, also those the seed limit left out, so the warning can tell "no node
+ * exists" from "a node exists but the limit cut it". A term has at most a few hundred tokens, so reading all rows is bounded.
+ */
+function findKeywordSeeds(
+  db: DatabaseSync,
+  tokens: readonly string[],
+  kinds: ReadonlySet<string> | null,
+  limit: number,
+): { seeds: GraphNodeDto[]; more: boolean; present: Set<string> } {
+  const present = new Set<string>();
+  if (tokens.length === 0) return { seeds: [], more: false, present };
+  const ids = tokens.map((t) => entityNodeId('keyword', t));
+  const sql = `SELECT ${NODE_COLUMNS} FROM graph_nodes WHERE node_id IN ${placeholders(ids.length)} ORDER BY weight DESC, node_id ASC`;
+  const seeds: GraphNodeDto[] = [];
+  let more = false;
+  for (const r of db.prepare(sql).iterate(...ids)) {
+    const node = nodeFromRow(r);
+    if (!nodeAllowed(node, kinds)) continue;
+    present.add(node.id.slice(KEYWORD_ID_PREFIX.length));
+    if (seeds.length >= limit) {
+      more = true;
+      continue;
+    }
+    seeds.push(node);
+  }
+  return { seeds, more, present };
+}
+
+function termSplitWarning(tokens: readonly string[], seeds: readonly GraphNodeDto[], present: ReadonlySet<string>): Warning {
+  const used = new Set(seeds.map((n) => n.id.slice(KEYWORD_ID_PREFIX.length)));
+  const usedTokens = tokens.filter((t) => used.has(t));
+  // A token can have a node that the seed limit (--max-nodes) left out: that is not "no node exists", and saying so would be false.
+  const cutTokens = tokens.filter((t) => !used.has(t) && present.has(t));
+  const missing = tokens.filter((t) => !present.has(t));
+  const list = (xs: readonly string[]): string => xs.slice(0, MAX_TOKENS_IN_MESSAGE).join(', ') + (xs.length > MAX_TOKENS_IN_MESSAGE ? `, +${xs.length - MAX_TOKENS_IN_MESSAGE} more` : '');
+  return {
+    code: 'TERM_SPLIT',
+    message:
+      'No node matches the term as a whole, so it was split into the keywords it is made of, the way keywords are extracted from messages ' +
+      `(a hyphen, underscore, dot or space separates words). Keyword nodes used as seeds: ${list(usedTokens)}.` +
+      (cutTokens.length > 0 ? ` Nodes exist for ${list(cutTokens)} but the seed limit (max nodes) left them out.` : '') +
+      (missing.length > 0 ? ` No node exists for: ${list(missing)}.` : ''),
+  };
+}
+
+function noMatchingNodeWarning(kinds: ReadonlySet<string> | null): Warning {
+  return {
+    code: 'NO_MATCHING_NODE',
+    message:
+      'No node matched the term' +
+      (kinds === null ? '' : ' among the requested kinds') +
+      '. Try a different term, or one of the words it is made of (a hyphenated name is stored as separate keywords). ' +
+      'A word of fewer than three letters is never a keyword, and a graph built with the default minimum leaves out an entity that occurs in only one conversation ' +
+      '(gcr graph build --min-conversations 1 keeps it). "gcr graph god-nodes" lists the most connected nodes of this graph.',
+  };
+}
+
 /** Edges among `ids` (each edge is found once, from its src side, using the (src, dst, kind) unique index). */
 function inducedEdges(db: DatabaseSync, ids: readonly string[]): GraphEdgeDto[] {
   if (ids.length === 0) return [];
@@ -376,6 +465,10 @@ function inducedEdges(db: DatabaseSync, ids: readonly string[]): GraphEdgeDto[] 
 /**
  * Breadth-first neighbourhood of every node matching `term`. A node matches when its id equals the term (or its
  * normalized form), or its label contains the term (case-insensitive for ASCII; NFKC lower/upper variants are tried too).
+ * When no node matches and the term contains a hyphen, underscore, dot between letters or white space, it is split into the
+ * keywords the extractor would produce from it and every keyword node matching one of them is a seed (warning TERM_SPLIT).
+ * When there is still no seed the result is an empty graph WITH the warning NO_MATCHING_NODE (or GRAPH_EMPTY when the graph has
+ * no nodes at all): never a silent empty answer (SPEC-03).
  * `kinds` restricts the whole subgraph (seeds and traversal) to those node/entity kinds.
  * Nodes beyond `maxNodes` are not returned and `truncated` is true; edges are those among the returned nodes.
  */
@@ -392,13 +485,28 @@ export function graphQuery(db: DatabaseSync, q: GraphQueryInput): GraphQueryResu
   return guard(() => {
     const warnings: Warning[] = [];
     const cache = new NodeCache(db);
-    const { seeds, more: seedsTruncated } = findSeeds(db, term, kinds, maxNodes);
+    // (a) The whole term, as before: exact node id / normalised label first, then a substring of a label.
+    let found = findSeeds(db, term, kinds, maxNodes);
+    // (b) Nothing matched and the term looks like several words ("EMBLEM-NLP"): the extractor stores such a name as separate
+    // keyword nodes, so seed every keyword node that matches one of its tokens and say that this is what happened.
+    if (found.seeds.length === 0) {
+      const tokens = termKeywords(term);
+      const viaTokens = findKeywordSeeds(db, tokens, kinds, maxNodes);
+      if (viaTokens.seeds.length > 0) {
+        found = viaTokens;
+        warnings.push(termSplitWarning(tokens, viaTokens.seeds, viaTokens.present));
+      }
+    }
+    const { seeds, more: seedsTruncated } = found;
     let truncated = seedsTruncated;
     if (seedsTruncated) {
       warnings.push({ code: 'SEEDS_TRUNCATED', message: `More than ${maxNodes} nodes match the term; only the best ${maxNodes} are used as seeds.` });
     }
-    if (seeds.length === 0 && count(db, 'graph_nodes') === 0) {
-      warnings.push({ code: 'GRAPH_EMPTY', message: 'The graph has no nodes. Import an export and build the graph first.' });
+    if (seeds.length === 0) {
+      // (c) Still nothing: an empty graph is a legitimate answer but never a silent one. Two causes, two messages: there is no
+      // graph at all, or there is one and the term matches none of it.
+      if (count(db, 'graph_nodes') === 0) warnings.push({ code: 'GRAPH_EMPTY', message: 'The graph has no nodes. Import an export and build the graph first.' });
+      else warnings.push(noMatchingNodeWarning(kinds));
     }
 
     const order: string[] = [];

@@ -59,7 +59,7 @@ import { assertUtf8Head, discoverInput } from './layout.js';
 import type { DiscoveredFile, Discovery, InputSource } from './layout.js';
 import { resolveLimits } from './limits.js';
 import type { ImportLimits } from './limits.js';
-import { detectAdapterFromElementText, getAdapter } from './registry.js';
+import { SNIFF_SKIPPED_TOO_LARGE, detectAdapterFromElementText, getAdapter, providerUndetectedError } from './registry.js';
 import type { AdapterId } from './registry.js';
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -639,6 +639,8 @@ interface FileScan {
   wrappers: Set<number>;
   objectElements: number;
   provider: AdapterId | null;
+  /** Some marker-bearing element was too large to sniff: PROVIDER_UNDETECTED then says so (ATK-08b). */
+  sniffSkippedTooLarge: boolean;
   /** A framing error (truncated file, trailing data, ...): elements before it are kept, the rest of the file is lost. */
   failure: GcrError | null;
   /** Expanded indexes that lost duplicate resolution. */
@@ -689,6 +691,7 @@ async function scanAttempt(
   let objectElements = 0;
   let detectAttempts = 0;
   let provider: AdapterId | null = null;
+  let sniffSkippedTooLarge = false;
   let failure: GcrError | null = null;
   let invalidUtf8 = 0;
   const invalidUtf8Where: string[] = [];
@@ -712,7 +715,9 @@ async function scanAttempt(
           // counted): any number of stray objects in front of the first conversation no longer exhausts the attempts.
           if (provider === null && detectAttempts < MAX_DETECT_ATTEMPTS && (peek.hasMapping || peek.chatMessagesIsArray)) {
             detectAttempts++;
-            provider = detectAdapterFromElementText(item.text).adapter;
+            const detection = detectAdapterFromElementText(item.text);
+            provider = detection.adapter;
+            if (detection.adapter === null && detection.reason === SNIFF_SKIPPED_TOO_LARGE) sniffSkippedTooLarge = true;
           }
         }
         if (expanded % PROGRESS_EVERY === 0) progress(file.name, expanded);
@@ -735,6 +740,7 @@ async function scanAttempt(
     wrappers,
     objectElements,
     provider,
+    sniffSkippedTooLarge,
     failure,
     losers: new Set<number>(),
     invalidUtf8,
@@ -1116,12 +1122,7 @@ function resolveProvider(forced: AdapterId | undefined, scans: readonly FileScan
   }
   const only = [...detected][0];
   if (only !== undefined) return only;
-  if (totalObjects > 0) {
-    throw new GcrError('IMPORT_UNSUPPORTED_FORMAT', 'The conversation provider could not be detected: no element has a ChatGPT "mapping" or a Claude "chat_messages" array.', {
-      remedy: 'Check that this is an official export, or select the provider explicitly (--provider chatgpt | claude).',
-      details: { reason: 'PROVIDER_UNDETECTED' },
-    });
-  }
+  if (totalObjects > 0) throw providerUndetectedError({ tooLarge: scans.some((s) => s.sniffSkippedTooLarge) });
   return 'chatgpt'; // an export without any conversation object (for example `[]`): nothing to attribute, the primary provider is used
 }
 

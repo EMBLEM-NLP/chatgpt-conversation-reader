@@ -18,6 +18,18 @@
  *    total, offset pagination and keyset (cursor) pagination return identical sequences with no repeat or skip, as long
  *    as the index does not change between page requests.
  *  - bm25 statistics are computed over the whole index, including superseded snapshots of a conversation.
+ *
+ * Attachment search (FR-15, `searchAttachments`)
+ *  - METADATA ONLY: the file name and the MIME type of an attachment reference, never file content (GCR does not read attachment
+ *    bytes; the export may not even contain them).
+ *  - There is no FTS table for attachments and the schema is not extended for them (a migration is out of scope), so the stored
+ *    `messages.attachments_json` of messages that HAVE attachments is scanned and matched in JavaScript. Matching uses the same
+ *    folding as every other search (NFKC, case, accents, width, ligatures, per-character CJK) on whole tokens of the name; each
+ *    search word must occur as a SUBSTRING of the folded name or MIME type. No ranking: the order is chronological and total.
+ *    The cost is one scan of the messages table per call (about 45 ms for 50,000 synthetic messages with no attachment, 60 to 175 ms
+ *    with attachments on 10% of them: docs/USER_GUIDE.md). Only the first MAX_ATTACHMENTS_SCANNED_PER_MESSAGE attachments of one
+ *    message are searched; the result counts the messages cut that way (`truncatedMessages`) so the caller can warn. SQLite sorts every candidate row before the first one is returned, so
+ *    the early exit once the page is full saves only the JavaScript matching, not the scan.
  */
 import { createHash } from 'node:crypto';
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
@@ -25,7 +37,7 @@ import { isIso8601Utc } from '../domain/validate.js';
 import type { ConversationSummary, Page, SearchHit } from '../domain/results.js';
 import type { Completeness, ConversationProvenance, Provider } from '../domain/types.js';
 import { GcrError } from '../errors.js';
-import { iterateSearchTokens, parsePlainQuery, prepareRawQuery, rawQueryTerms } from './cjk.js';
+import { iterateSearchTokens, parsePlainQuery, prepareRawQuery, rawQueryTerms, tokenizeQuery } from './cjk.js';
 import type { QueryTerm, SearchToken } from './cjk.js';
 import { sqliteErrcode, toDbError } from './open.js';
 
@@ -169,6 +181,14 @@ export function buildMatchExpression(terms: readonly QueryTerm[]): string {
     .join(' ');
 }
 
+/**
+ * Why a query that yields no tokens is refused (SPEC-08). Symbols and emoji are NOT indexed: the index keeps only letters,
+ * digits and combining marks (see cjk.ts, `buildSearchText`), so "😀", "₽" or "!!!" can never match anything. Saying only "no
+ * searchable terms" left users guessing whether the data or the query was at fault; the message names the cause and the remedy.
+ */
+const EMPTY_QUERY_WHY = 'the query is empty; search for words';
+const SYMBOLS_ONLY_WHY = 'the query contains only symbols or punctuation, which are not indexed; search for words';
+
 /** Validate and compile a user query. Empty / punctuation-only queries are INVALID_ARGUMENT. */
 export function compileQuery(query: unknown, mode: unknown): CompiledQuery {
   if (typeof query !== 'string') throw badArg('query', 'expected a string');
@@ -178,11 +198,12 @@ export function compileQuery(query: unknown, mode: unknown): CompiledQuery {
 
   if (mode === 'raw') {
     const match = prepareRawQuery(query);
-    if (match.trim() === '') throw badArg('query', 'the query is empty');
+    // Raw mode turns characters the index does not hold (emoji, currency signs) into spaces first, so "😀" arrives here as blank.
+    if (match.trim() === '') throw badArg('query', query.trim() === '' ? EMPTY_QUERY_WHY : SYMBOLS_ONLY_WHY);
     return { mode: 'raw', match, terms: rawQueryTerms(query) };
   }
   const terms = parsePlainQuery(query);
-  if (terms.length === 0) throw badArg('query', 'the query has no searchable terms (it is empty or only punctuation)');
+  if (terms.length === 0) throw badArg('query', query.trim() === '' ? EMPTY_QUERY_WHY : SYMBOLS_ONLY_WHY);
   const tokenCount = terms.reduce((n, t) => n + t.tokens.length, 0);
   if (terms.length > MAX_QUERY_TERMS || tokenCount > MAX_QUERY_TOKENS) {
     throw badArg('query', `too many terms (limit ${MAX_QUERY_TERMS} terms / ${MAX_QUERY_TOKENS} tokens)`);
@@ -532,6 +553,61 @@ function hitFromRow(row: Row, terms: readonly QueryTerm[], scanLimit: number): {
   return { hit, scanned: snippet.scanned };
 }
 
+/** The validated message filters shared by message search, the attachment scan and the hit counter. */
+interface MessageFilters {
+  provider: string | undefined;
+  accountLabel: string | undefined;
+  conversationId: string | undefined;
+  role: string | undefined;
+  channel: string | undefined;
+  hasModel: boolean | undefined;
+  createdAfter: string | undefined;
+  createdBefore: string | undefined;
+  includeHidden: boolean;
+  allBatches: boolean;
+}
+
+/** Validation (never echoes the offending value). The order of the checks is fixed so the first error reported never changes. */
+function parseMessageFilters(q: Partial<Record<keyof MessageFilters, unknown>>): MessageFilters {
+  return {
+    provider: optString('provider', q.provider),
+    accountLabel: optString('accountLabel', q.accountLabel),
+    conversationId: optString('conversationId', q.conversationId),
+    role: optString('role', q.role),
+    channel: optString('channel', q.channel),
+    hasModel: optBool('hasModel', q.hasModel),
+    createdAfter: optIso('createdAfter', q.createdAfter),
+    createdBefore: optIso('createdBefore', q.createdBefore),
+    includeHidden: optBool('includeHidden', q.includeHidden) === true,
+    allBatches: optBool('allBatches', q.allBatches) === true,
+  };
+}
+
+/**
+ * WHERE fragments and their bound values for the aliases `m` (messages) of a statement. Fixed text only; values are parameters.
+ * Structural nodes are never part of a result, hidden messages only with `includeHidden`.
+ */
+function messageWhere(f: MessageFilters): { fragments: string[]; params: SQLInputValue[] } {
+  const fragments: string[] = ["m.node_kind = 'message' "];
+  const params: SQLInputValue[] = [];
+  const add = (fragment: string, ...values: SQLInputValue[]): void => {
+    fragments.push(fragment);
+    params.push(...values);
+  };
+  if (!f.includeHidden) add('AND m.hidden = 0 ');
+  if (f.provider !== undefined) add('AND m.provider = ? ', f.provider);
+  if (f.accountLabel !== undefined) add('AND m.account_label = ? ', f.accountLabel);
+  if (f.conversationId !== undefined) add('AND m.conversation_id = ? ', f.conversationId);
+  if (f.role !== undefined) add('AND m.author_role = ? ', f.role);
+  if (f.channel !== undefined) add('AND m.channel = ? ', f.channel);
+  if (f.hasModel === true) add('AND m.model_slug IS NOT NULL ');
+  if (f.hasModel === false) add('AND m.model_slug IS NULL ');
+  // Instants, not strings (see CANON_INSTANT). Rows without created_at give NULL and therefore never match a bound.
+  if (f.createdAfter !== undefined) add(`AND ${CANON_INSTANT}m.created_at) >= ${CANON_INSTANT}?) `, f.createdAfter);
+  if (f.createdBefore !== undefined) add(`AND ${CANON_INSTANT}m.created_at) < ${CANON_INSTANT}?) `, f.createdBefore);
+  return { fragments, params };
+}
+
 /**
  * Search message bodies. Structural nodes are never indexed, hidden messages are excluded unless `includeHidden`, and
  * only each conversation's head batch is searched unless `allBatches`.
@@ -543,16 +619,8 @@ export function searchMessages(db: DatabaseSync, q: SearchQuery): Page<SearchHit
   const compiled = compileQuery(q.query, q.mode);
   const limit = intArg('limit', q.limit, 1, SEARCH_LIMIT_MAX, SEARCH_LIMIT_DEFAULT);
   const offset = intArg('offset', q.offset, 0, MAX_OFFSET, 0);
-  const provider = optString('provider', q.provider);
-  const accountLabel = optString('accountLabel', q.accountLabel);
-  const conversationId = optString('conversationId', q.conversationId);
-  const role = optString('role', q.role);
-  const channel = optString('channel', q.channel);
-  const hasModel = optBool('hasModel', q.hasModel);
-  const createdAfter = optIso('createdAfter', q.createdAfter);
-  const createdBefore = optIso('createdBefore', q.createdBefore);
-  const includeHidden = optBool('includeHidden', q.includeHidden) === true;
-  const allBatches = optBool('allBatches', q.allBatches) === true;
+  const filters = parseMessageFilters(q);
+  const { provider, accountLabel, conversationId, role, channel, hasModel, createdAfter, createdBefore, includeHidden, allBatches } = filters;
 
   // The cursor is only valid for the exact query + filters it was issued for (limit and offset may differ).
   const fp = fingerprint([compiled.mode, compiled.match, provider, accountLabel, conversationId, role, channel, hasModel, createdAfter, createdBefore, includeHidden, allBatches]);
@@ -563,25 +631,14 @@ export function searchMessages(db: DatabaseSync, q: SearchQuery): Page<SearchHit
   }
 
   // SQL text below is assembled from FIXED fragments only; every value is a bound parameter.
-  const where: string[] = ["m.node_kind = 'message' "];
+  const built = messageWhere(filters);
+  const where: string[] = [...built.fragments];
   // Bound parameters in textual order: MATCH expression, snippet source length, then the WHERE/cursor values, LIMIT, OFFSET.
-  const params: SQLInputValue[] = [compiled.match, SNIPPET_SOURCE_CHARS];
-  const add = (fragment: string, ...values: SQLInputValue[]): void => {
-    where.push(fragment);
-    params.push(...values);
-  };
-  if (!includeHidden) add('AND m.hidden = 0 ');
-  if (provider !== undefined) add('AND m.provider = ? ', provider);
-  if (accountLabel !== undefined) add('AND m.account_label = ? ', accountLabel);
-  if (conversationId !== undefined) add('AND m.conversation_id = ? ', conversationId);
-  if (role !== undefined) add('AND m.author_role = ? ', role);
-  if (channel !== undefined) add('AND m.channel = ? ', channel);
-  if (hasModel === true) add('AND m.model_slug IS NOT NULL ');
-  if (hasModel === false) add('AND m.model_slug IS NULL ');
-  // Instants, not strings (see CANON_INSTANT). Rows without created_at give NULL and therefore never match a bound.
-  if (createdAfter !== undefined) add(`AND ${CANON_INSTANT}m.created_at) >= ${CANON_INSTANT}?) `, createdAfter);
-  if (createdBefore !== undefined) add(`AND ${CANON_INSTANT}m.created_at) < ${CANON_INSTANT}?) `, createdBefore);
-  if (cursor !== null) add(CURSOR_PREDICATE, ...cursor);
+  const params: SQLInputValue[] = [compiled.match, SNIPPET_SOURCE_CHARS, ...built.params];
+  if (cursor !== null) {
+    where.push(CURSOR_PREDICATE);
+    params.push(...cursor);
+  }
 
   const sql =
     'WITH h AS MATERIALIZED (SELECT rowid AS rid, bm25(messages_fts) AS rank FROM messages_fts WHERE messages_fts MATCH ?) ' +
@@ -658,4 +715,245 @@ export function searchConversationTitles(db: DatabaseSync, q: TitleSearchQuery):
     (r): TitleHit => ({ ...conversationSummaryFromRow(r), snippet: buildSnippet(rowStringOrNull(r, 'title') ?? '', compiled.terms), rank: rowNumber(r, 'rank') }),
   );
   return { items, limit, offset, nextOffset: hasMore ? offset + items.length : null, nextCursor: null };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// countMessageHits
+// ---------------------------------------------------------------------------------------------------------------
+
+/**
+ * How many message hits a query has, counted up to `cap` (the answer is exact below the cap and equals `cap` at or above it).
+ * Same query language and the same filters as `searchMessages` (offset / limit / cursor do not apply). Used to place the
+ * attachment hits after the message hits when scope "all" is paged: no snippets are built, so it is far cheaper than paging.
+ */
+export function countMessageHits(db: DatabaseSync, q: SearchQuery, cap: number): number {
+  if (typeof q !== 'object' || q === null) throw badArg('query', 'expected an object');
+  const compiled = compileQuery(q.query, q.mode);
+  const limit = intArg('cap', cap, 1, 1_000_000, 1);
+  const filters = parseMessageFilters(q);
+  const built = messageWhere(filters);
+  const sql =
+    'WITH h AS MATERIALIZED (SELECT rowid AS rid FROM messages_fts WHERE messages_fts MATCH ?) ' +
+    'SELECT count(*) AS n FROM (SELECT 1 FROM h JOIN messages m ON m.rowid = h.rid ' +
+    'JOIN conversations c ON c.provider = m.provider AND c.account_label = m.account_label AND c.conversation_id = m.conversation_id AND c.source_batch = m.source_batch ' +
+    (filters.allBatches ? '' : HEAD_JOIN) +
+    `WHERE ${built.fragments.join('')}LIMIT ?)`;
+  const row = runFtsQuery(compiled.mode, () => db.prepare(sql).get(compiled.match, ...built.params, limit));
+  return row === undefined ? 0 : rowNumber(row, 'n');
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// searchAttachments
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface AttachmentSearchQuery {
+  /** Words to find in attachment file names and MIME types (plain mode only: see `mode`). */
+  query: string;
+  /** Only 'plain' is meaningful: FTS5 syntax cannot be applied to file names, so 'raw' is INVALID_ARGUMENT. */
+  mode?: SearchMode;
+  provider?: string;
+  accountLabel?: string;
+  conversationId?: string;
+  role?: string;
+  channel?: string;
+  hasModel?: boolean;
+  createdAfter?: string;
+  createdBefore?: string;
+  includeHidden?: boolean;
+  allBatches?: boolean;
+  /** 1..200, default 20. */
+  limit?: number;
+  /** Offset pagination (there is no cursor for attachments). */
+  offset?: number;
+}
+
+/** One attachment of one message whose file name or MIME type matched. METADATA only: no file content is ever read or returned. */
+export interface AttachmentHit {
+  provider: Provider;
+  accountLabel: string;
+  conversationId: string;
+  /** UNTRUSTED */
+  conversationTitle: string | null;
+  messageId: string;
+  authorRole: string;
+  modelSlug: string | null;
+  channel: string | null;
+  createdAt: string | null;
+  hidden: boolean;
+  /** 0-based position of the attachment in the message's attachment list (with messageId it identifies the attachment). */
+  attachmentIndex: number;
+  attachmentId: string | null;
+  /** UNTRUSTED file name as the export gave it. */
+  attachmentName: string | null;
+  attachmentMimeType: string | null;
+  attachmentSizeBytes: number | null;
+  /** UNTRUSTED. Plain text naming the attachment ("name (mime type)"); matched words that align with whole words are wrapped in U+0001 / U+0002. */
+  snippet: string;
+  batchId: string;
+}
+
+export interface AttachmentSearchResult {
+  page: Page<AttachmentHit>;
+  /** Messages whose stored attachment list could not be read as JSON (their attachments were NOT searched). */
+  unreadableMessages: number;
+  /**
+   * Messages whose stored list is longer than the scan cap: only its first MAX_ATTACHMENTS_SCANNED_PER_MESSAGE entries were
+   * searched (the ChatGPT importer accepts far more per message). Like `unreadableMessages` it counts the messages the scan
+   * READ: when the page stopped the scan early (`page.nextOffset !== null`) it is a lower bound.
+   */
+  truncatedMessages: number;
+}
+
+/** Most attachments looked at per message (a damaged or hostile list cannot make one message cost unbounded time). */
+export const MAX_ATTACHMENTS_SCANNED_PER_MESSAGE = 5_000;
+/** An attachment name or MIME type is cut to this many UTF-16 units before it is tokenized (validate.ts allows 4,096). */
+const MAX_ATTACHMENT_FIELD_CHARS = 4_096;
+
+/** The attachment tokens in order, joined by single spaces: the string every search word is looked up in ('' for null). */
+function attachmentHaystack(value: string | null): string {
+  if (value === null || value === '') return '';
+  return tokenizeQuery(value.length > MAX_ATTACHMENT_FIELD_CHARS ? value.slice(0, MAX_ATTACHMENT_FIELD_CHARS) : value).join(' ');
+}
+
+interface StoredAttachment {
+  id: string | null;
+  name: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+}
+
+/**
+ * The stored list (the importer writes objects with these keys), or null when it is not a JSON array of objects. `truncated`
+ * is true when the list was longer than the per-message cap and only its head is returned.
+ */
+function parseStoredAttachments(json: string): { list: StoredAttachment[]; truncated: boolean } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const out: StoredAttachment[] = [];
+  const n = Math.min(parsed.length, MAX_ATTACHMENTS_SCANNED_PER_MESSAGE);
+  const truncated = parsed.length > n;
+  for (let i = 0; i < n; i++) {
+    const el: unknown = parsed[i];
+    if (typeof el !== 'object' || el === null || Array.isArray(el)) {
+      out.push({ id: null, name: null, mimeType: null, sizeBytes: null });
+      continue; // keep the index: attachmentIndex is the position in the stored list
+    }
+    const o = el as Record<string, unknown>;
+    out.push({
+      id: typeof o['id'] === 'string' ? o['id'] : null,
+      name: typeof o['name'] === 'string' ? o['name'] : null,
+      mimeType: typeof o['mimeType'] === 'string' ? o['mimeType'] : null,
+      sizeBytes: typeof o['sizeBytes'] === 'number' && Number.isFinite(o['sizeBytes']) ? o['sizeBytes'] : null,
+    });
+  }
+  return { list: out, truncated };
+}
+
+/** Name and MIME type as one displayable string, e.g. "synthetic-notes.txt (text/plain)". */
+function attachmentLabel(a: StoredAttachment): string {
+  const name = a.name === null || a.name === '' ? '(no name)' : a.name;
+  return a.mimeType === null || a.mimeType === '' ? name : `${name} (${a.mimeType})`;
+}
+
+/**
+ * Search the file names and MIME types of attachment references (FR-15, metadata only; see the file header).
+ *
+ * Matching: the query is compiled exactly like a plain message query (so an empty or symbol-only query is the same
+ * INVALID_ARGUMENT), its terms are reduced to space-joined token strings, and an attachment matches when EVERY term occurs as a
+ * substring of its folded name or of its folded MIME type ("diagram", "notes txt" and "synthetic-notes.txt" all find
+ * synthetic-notes.txt; "image/png" finds every png). Hits are one per matching attachment, ordered by message time (NULL last),
+ * conversation id, message id, provider, account, batch and attachment index: a total order, so offset paging never repeats or
+ * skips an attachment while the data does not change. Structural nodes are skipped, hidden messages only with `includeHidden`,
+ * only each conversation's head batch is searched unless `allBatches`.
+ */
+export function searchAttachments(db: DatabaseSync, q: AttachmentSearchQuery): AttachmentSearchResult {
+  if (typeof q !== 'object' || q === null) throw badArg('query', 'expected an object');
+  if (q.mode === 'raw') {
+    throw new GcrError('INVALID_ARGUMENT', 'Invalid value for "mode": raw FTS5 syntax cannot be applied to attachment file names.', {
+      remedy: 'Use plain mode: attachment names are matched as words (case, accents and width are ignored).',
+      details: { field: 'mode' },
+    });
+  }
+  const compiled = compileQuery(q.query, q.mode);
+  const limit = intArg('limit', q.limit, 1, SEARCH_LIMIT_MAX, SEARCH_LIMIT_DEFAULT);
+  const offset = intArg('offset', q.offset, 0, MAX_OFFSET, 0);
+  const filters = parseMessageFilters(q);
+  const needles = compiled.terms.map((t) => t.tokens.join(' '));
+
+  const built = messageWhere(filters);
+  // Only messages that HAVE attachments are read back; the folded comparison cannot be done by SQLite (its lower() is ASCII only).
+  const sql =
+    'SELECT m.provider AS provider, m.account_label AS account_label, m.conversation_id AS conversation_id, c.title AS title, ' +
+    'm.message_id AS message_id, m.author_role AS author_role, m.model_slug AS model_slug, m.channel AS channel, ' +
+    'm.created_at AS created_at, m.hidden AS hidden, m.attachments_json AS attachments_json, m.source_batch AS source_batch ' +
+    'FROM messages m ' +
+    'JOIN conversations c ON c.provider = m.provider AND c.account_label = m.account_label AND c.conversation_id = m.conversation_id AND c.source_batch = m.source_batch ' +
+    (filters.allBatches ? '' : HEAD_JOIN) +
+    `WHERE ${built.fragments.join('')}AND m.attachments_json <> '[]' ` +
+    `ORDER BY (m.created_at IS NULL) ASC, ${CREATED_KEY} ASC, m.conversation_id ASC, m.message_id ASC, m.provider ASC, m.account_label ASC, m.source_batch ASC`;
+
+  const items: AttachmentHit[] = [];
+  let skipped = 0;
+  let hasMore = false;
+  let unreadableMessages = 0;
+  let truncatedMessages = 0;
+  // The whole scan runs inside runFtsQuery: the rows are streamed, so an SQLite failure can surface in the middle of the loop,
+  // and it must still be mapped to a coded GcrError (never a raw driver error).
+  runFtsQuery('plain', () => {
+    const stmt = db.prepare(sql);
+    scan: for (const row of stmt.iterate(...built.params)) {
+      const parsed = parseStoredAttachments(rowString(row, 'attachments_json'));
+      if (parsed === null) {
+        unreadableMessages++;
+        continue;
+      }
+      if (parsed.truncated) truncatedMessages++;
+      const list = parsed.list;
+      for (let index = 0; index < list.length; index++) {
+        const a = list[index];
+        if (a === undefined) continue;
+        const name = attachmentHaystack(a.name);
+        const mime = attachmentHaystack(a.mimeType);
+        if (name === '' && mime === '') continue;
+        if (!needles.every((n) => name.includes(n) || mime.includes(n))) continue;
+        if (skipped < offset) {
+          skipped++;
+          continue;
+        }
+        if (items.length >= limit) {
+          hasMore = true; // one more match exists beyond the page: stop reading (the early exit that bounds the cost)
+          break scan;
+        }
+        items.push({
+          provider: rowString(row, 'provider') as Provider,
+          accountLabel: rowString(row, 'account_label'),
+          conversationId: rowString(row, 'conversation_id'),
+          conversationTitle: rowStringOrNull(row, 'title'),
+          messageId: rowString(row, 'message_id'),
+          authorRole: rowString(row, 'author_role'),
+          modelSlug: rowStringOrNull(row, 'model_slug'),
+          channel: rowStringOrNull(row, 'channel'),
+          createdAt: rowStringOrNull(row, 'created_at'),
+          hidden: rowNumber(row, 'hidden') === 1,
+          attachmentIndex: index,
+          attachmentId: a.id,
+          attachmentName: a.name,
+          attachmentMimeType: a.mimeType,
+          attachmentSizeBytes: a.sizeBytes,
+          snippet: buildSnippet(attachmentLabel(a), compiled.terms),
+          batchId: rowString(row, 'source_batch'),
+        });
+      }
+    }
+  });
+  return {
+    page: { items, limit, offset, nextOffset: hasMore ? offset + items.length : null, nextCursor: null },
+    unreadableMessages,
+    truncatedMessages,
+  };
 }

@@ -261,6 +261,20 @@ You then choose, explicitly:
 A conversation whose `current_node` is null (tried above) is also stored with completeness `unknown` instead of `exported_tree` (warning `COMPLETENESS_LOWERED`, reason `no_current_node`), and every result for it starts with a `NOTICE:` line. A heuristic is a **labelled guess**; do not treat its answer as what you saw on screen. A wrong branch id is `BRANCH_NOT_FOUND` (exit 3). A conversation with no `current_node` but only one branch is shown with `selection=only_branch` (nothing to guess) and a `NO_CURRENT_NODE` warning.
 Hidden messages (system scaffolding, memory, reasoning) are left out unless you pass `--include-hidden`.
 
+### Warnings printed by `get` and `thread`
+
+Every format (`markdown`, `compact`, `json`, `jsonl`) lists the same warnings that the SDK and the MCP tools return for the same call: first the warnings of the whole result, in their own order, then the warnings of the thread that are not already listed (one entry per code). `SOURCE_NOT_FULL_HISTORY` is the **first** warning whenever the source is not a complete exported tree (a manual copy, a Claude export, a damaged tree), so a partial source is never mistaken for the whole history; the `NOTICE:` line of the human formats says the same in one sentence. In `markdown` the warnings are the `## Warnings` section, in `compact` the `# warnings:` line, in `json` the `warnings` array and in `jsonl` the `footer` line.
+
+```bash
+gcr import-copy copy.json --db ./mc.sqlite                      # a manual copy (section h)
+gcr get 00000000-0000-4000-8000-0000000000aa --db ./mc.sqlite --format json
+# warnings: SOURCE_NOT_FULL_HISTORY, NO_CURRENT_NODE, PARTIAL_USER_SUPPLIED
+```
+
+### Known limitation: messages that no root reaches
+
+If a damaged export gives messages parent pointers that form a cycle with no root (the synthetic fixture `fixtures/chatgpt/broken-trees.json`, case "cycle with no root"), those messages are stored but they are **not part of any branch**. `get` then returns no thread and the warning `NO_BRANCHES` says so ("2 message(s) are stored for this snapshot but none of them is reachable from a root ..."; the tree is not empty, its nodes are unreachable), `thread` fails with `BRANCH_NOT_FOUND` (`details.reason` is `no_branches`, `details.unreachableMessages` counts them) and `branches` lists nothing. Naming such a message with `--branch <message id>` (for example an id copied from a search hit) fails with `BRANCH_NOT_FOUND` too, but with `details.reason` `unreachable` and the text "This message is stored, but no root reaches it ...", never with the generic "No such branch"; an id that is not in the conversation at all keeps `unknown_branch`. The text is still in the database: **`gcr search` finds it, but no command can read such a message in full** (there is no option to show unreachable nodes). `gcr audit --tree` lists the damaged conversation (`CYCLE_DETECTED`). A snapshot with no message at all keeps the wording "The stored message tree of this snapshot is empty".
+
 ---
 
 ## d. Search
@@ -281,11 +295,12 @@ Each hit shows `conversation-id/message-id`, the title, and a snippet with the m
 
 The prefix, accent and CJK examples below use the `copy.sqlite` database built in [section h](#h-manual-copy-import-mode-b); the others use `demo.sqlite`.
 
-* Case and accents are ignored: `cafe` finds `café` and `CAFÉ` finds it too (Latin tested; Cyrillic `привет` and Greek `ελληνικα` also matched in a synthetic test).
+* **Folded** (these find each other): case (`cafe`, `Café`, `CAFE`), accents (also the decomposed form `Cafe` + U+0301), character width (fullwidth `ＡＢＣ` finds `abc` and the other way round), compatibility ligatures (`ﬁne` finds `fine`), Cyrillic and Greek case and accents (`привет` finds `ПРИВЕТ`, `ελληνικα` finds `Ελληνικά`), and CJK substrings (below). **Not folded:** `ß` is not `ss` (`strasse` does not find `Straße`), and Thai, Lao, Khmer and Myanmar text is not split into words.
 * **All words must be present** (implicit AND). Words like `OR`, `NEAR` and a leading `-` are ordinary text or punctuation, **not** operators. `gcr search "synthetic OR reply NEAR"` returned 0 hits on the demo: all four words must be present, and "or" and "near" are searched as words.
 * A trailing `*` makes a prefix: `marsup*` finds `marsupials`.
 * **CJK** is matched by character, so one character is enough: `語` and `日本語` both found `これは日本語のテスト` (synthetic manual copy).
-* A query with no searchable characters (`!!!`) is `INVALID_ARGUMENT`. A query that starts with `-` must follow `--`: `gcr search --conversation <uuid> -- "-answer"` (the dash is dropped as punctuation; it searched `answer`).
+* **Emoji and other symbols are not indexed.** Only letters, digits and combining marks are (SQLite `unicode61` tokenisation after GCR's own folding); every other character is a separator: emoji (`😀`, family sequences), currency signs (`₽`), mathematical symbols and punctuation. So the emoji itself can never be searched for, and a query made only of such characters (`😀`, `!!!`, `""`) is `INVALID_ARGUMENT` with the message "the query contains only symbols or punctuation, which are not indexed; search for words" (a blank query of spaces says "the query is empty; search for words"; an empty command-line argument is refused by the CLI itself before the search). A symbol next to a word is simply dropped: `grin 😀` searches `grin`. Two exceptions to keep in mind: a compatibility character that Unicode folds into letters or digits is searched in its folded form (`™` is `tm`, `Ⅳ` is `iv`, `²` is `2`, so a query of only those is not refused), and with `--raw` ASCII punctuation is FTS5 syntax (`!!!` is `FTS_SYNTAX_ERROR`; an emoji-only raw query is still `INVALID_ARGUMENT`).
+* A query that starts with `-` must follow `--`: `gcr search --conversation <uuid> -- "-answer"` (the dash is dropped as punctuation; it searched `answer`).
 
 ### Raw FTS5 mode
 
@@ -303,17 +318,38 @@ exit=2
 
 | Option | Effect |
 |---|---|
-| `--scope messages` (default) / `titles` / `all` | message text, conversation titles, or both (titles first); with `titles` or `all` the item shape adds `kind: "title"` |
-| `--role <role>` , `--channel <name>` , `--has-model` | only that author role or channel; only messages whose export states a model (messages scope only) |
-| `--conversation <uuid or link>` | only inside one conversation |
-| `--after <ISO>` , `--before <ISO>` | message creation time window (ISO-8601 UTC) |
+| `--scope messages` (default) / `titles` / `attachments` / `all` | message text, conversation titles, attachment file names and MIME types (below), or all three: titles first, then messages, then attachments. **`all` includes attachment names** (it used to mean titles plus messages only). Items carry `kind: "message"`, `"title"` or `"attachment"` outside the plain messages scope |
+| `--role <role>` , `--channel <name>` , `--has-model` | only that author role or channel; only messages whose export states a model (messages and attachments scopes only; `titles` and `all` refuse them) |
+| `--conversation <uuid or link>` | only inside one conversation (messages and attachments scopes only) |
+| `--after <ISO>` , `--before <ISO>` | message creation time window (ISO-8601 UTC; messages and attachments scopes only) |
 | `--provider`, `--account` | restrict to a provider or account label |
-| `--include-hidden` | also search hidden messages (system scaffolding, memory...). On the demo with `--limit 200`: 28 hits for `synthetic` by default, 34 with `--include-hidden` (the default `--limit` is 20, so without it both print `hits=20`) |
+| `--include-hidden` | also search hidden messages (system scaffolding, memory...) and, with `--scope attachments`, their attachments. On the demo with `--limit 200`: 28 hits for `synthetic` by default, 34 with `--include-hidden` (the default `--limit` is 20, so without it both print `hits=20`) |
 | `--all-batches` | include superseded snapshots (the same message can then appear once per snapshot) |
+
+### Attachment names (`--scope attachments`)
+
+```bash
+gcr search "diagram png" --scope attachments --db ./att.sqlite --format compact       # att.sqlite = fixtures/chatgpt/attachments-citations.json
+```
+
+```text
+  items[0].kind: attachment      items[0].conversationId: 00000000-0000-4000-8000-00000000000b
+  items[0].messageId: 00000000-0000-4000-8000-000000000010      items[0].attachmentIndex: 1
+  items[0].attachmentName: synthetic-diagram.png      items[0].attachmentMimeType: image/png
+  items[0].snippet: synthetic-[[diagram]].[[png]] (image/[[png]])
+```
+
+* **Metadata only.** The search looks at the **file name** and the **MIME type** of each attachment reference (FR-15). It never searches attachment content: GCR does not open attachment files, a ChatGPT export may not even contain them, and text a Claude export carries inside an attachment (`extracted_content`) is kept as an `attachment_text` block of the message (and in the raw source) but is **not searched** by this scope or by message search. Message text is not searched by this scope either: use the default scope for that.
+* **Matching.** The query is read like a plain message query (the same folding as above; operators and quotes are inert), and **every word must occur as a substring** of the folded file name or of the folded MIME type of the same attachment. `notes`, `diagram`, `ynthetic-note`, `synthetic-notes.txt` and `NOTES.TXT` all find `synthetic-notes.txt`; `diagram png` and `png diagram` find `synthetic-diagram.png` (one word in the name, one in the type is fine: `diagram image`); `image/png` finds every PNG; a quoted `"synthetic notes"` is the two words in sequence. A symbol-only query is refused as above. `--raw` is `INVALID_ARGUMENT` for this scope: FTS5 syntax cannot be applied to file names.
+* **One hit per attachment**, with the conversation, message and attachment position (`attachmentIndex`, the place in the message's stored attachment list), the author role, time, `hidden`, the file name, type and size as the export gave them, and a snippet that names the attachment (`name (type)`, matched whole words marked). The hit is identified by `messageId` + `attachmentIndex`.
+* **No relevance ranking.** Hits are ordered oldest message first (messages without a time last), then by conversation, message and attachment position; paging with `--limit` / `--offset` is stable. There is no `--cursor` for attachments (`INVALID_ARGUMENT`).
+* **`--include-hidden`, `--all-batches` and the message filters apply** as in the messages scope (see the table). With `--scope all --raw` the attachment part is skipped and the warning `ATTACHMENTS_NOT_SEARCHED` says so.
+* **Cost.** Attachments have no search index (adding one would change the database schema), so every call reads the messages that have attachments and folds their names in memory. On the synthetic 50,000-message performance corpus (two runs on a shared 4-CPU sandbox, warm cache, attachments injected into a scratch copy) a call took about 45 ms with no attachments at all, about 50 ms with attachments on 1% of the messages and 60 to 175 ms with attachments on 10% of them (the upper figure is a query that matches nothing or only late: the whole scan runs). The cost grows roughly linearly with the size of the database, because a message row is read to get at its attachment list (a cold cache or a database of long messages costs more); message search stays at about 0.4 ms. A real export may behave differently.
+* **Lists that are not fully searched say so.** Only the first 5,000 attachments of one message are searched (a ChatGPT export can list up to 50,000 per message); each message cut that way is counted in the warning `ATTACHMENTS_PARTLY_SEARCHED`, and a stored list that cannot be read in `STORED_JSON_INVALID`. Both counts read "At least N" when the page was full before the scan finished (a lower bound).
 
 ### Pagination
 
-`--limit` 1 to 200 (default 20), `--offset`, or the opaque `--cursor` printed as `nextCursor` (JSON) / "Next cursor" (Markdown). Order is stable: relevance, then time, conversation, message id.
+`--limit` 1 to 200 (default 20), `--offset`, or the opaque `--cursor` printed as `nextCursor` (JSON) / "Next cursor" (Markdown); the cursor is for the messages scope only, the other scopes page with `--offset`. Order is stable: relevance, then time, conversation, message id.
 On the demo, `--limit 2 --cursor <nextCursor>` returned the same two hits as `--limit 2 --offset 2`.
 
 An empty result means "not in the data you imported", never "never existed". Imported text can contain anything; the output escapes control characters and quotes message bodies as data.
@@ -351,6 +387,7 @@ default model (SPEC FR-16). Everything else is the single group `unknown (not su
 
 `gcr audit` runs every check by default or only the ones you name: `--missing-model --empty --untitled --tree --no-current-node --unknown-roles --unknown-content-types --timestamps --hidden`.
 It reports counts, severity and sample ids, never message text, plus `branchProvenance` (how many conversations have a known active branch) and `modelProvenance`.
+`branchProvenance` comes from the tree pass, which runs only when `--tree`, `--no-current-node` or `--timestamps` is selected (or no flag at all). With other flags only (the SPEC form `gcr audit --missing-model --empty --untitled`) it was **not measured**: it is `null` in `json` / `jsonl`, reads "not computed" in `markdown` / `compact`, and the warning `BRANCH_PROVENANCE_NOT_COMPUTED` explains it. It is never reported as zeros. `modelProvenance` is always measured.
 
 ```text
 $ gcr audit --db ./demo.sqlite --format compact          (demo, abridged)
@@ -388,6 +425,14 @@ $ gcr graph explain 36 --limit 3 --db ./demo.sqlite --format compact      # edge
 
 Node ids look like `ent:keyword:synthetic`, `conv:chatgpt:default:<conversation uuid>` and `tool:<name>`; commands print them. A node id that does not exist is `NOT_IN_LOCAL_EXPORT` ("The node is not a node of the local graph").
 Rebuild after importing more data. On a database without a graph, queries come back empty with a `GRAPH_EMPTY` warning.
+
+**How `graph query` matches the term.** Keywords are single words, so a hyphenated name is stored as separate keywords: `EMBLEM-NLP` in a message becomes the keyword nodes `emblem` and `nlp`, never a node `emblem-nlp`.
+
+1. The whole term is looked up first (an exact node id, a normalised label, or a substring of a label; case is ignored).
+2. If nothing matches and the term contains a hyphen, an underscore, a dot between letters or white space (`EMBLEM-NLP`, `emblem nlp`, `emblem_nlp`), it is split into the same keywords the extractor would produce from it (lower case, at least three letters, no stop words), **every keyword node that matches one of them becomes a seed**, and the warning `TERM_SPLIT` names the words that were used (and any word that has no node; a word whose node exists but was left out by `--max-nodes` is named as cut by the limit, not as missing). `gcr graph query "EMBLEM-NLP" --depth 2` therefore returns the neighbourhood of `emblem` and `nlp`.
+3. If there is still no seed the answer is an empty graph **with the warning `NO_MATCHING_NODE`** (try another term, or list `gcr graph god-nodes`; a word of fewer than three letters is never a keyword, and a name that occurs in only one conversation is left out by the default `graph build`, `--min-conversations 1` keeps it); an empty graph is never silent. (A database without any graph says `GRAPH_EMPTY` instead.)
+
+Extraction is not changed by this and the stored graph is not touched; only the lookup is.
 Keywords in the demo are mostly the fixtures' placeholder words ("synthetic", "answer", "turn"): on real data the output reflects your vocabulary.
 
 ### The offline HTML page

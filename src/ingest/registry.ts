@@ -73,6 +73,13 @@ export function listAdapters(): AdapterInfo[] {
  */
 export const DEFAULT_MAX_DETECT_CHARS = 64 * 1024 * 1024;
 
+/**
+ * The reason of a detection that was SKIPPED (not failed) because the element is over the sniffing limit (ATK-08b). Exported so
+ * that the import runner can tell this case from "no marker found" without parsing prose: an element this large DOES have a
+ * mapping (or chat_messages), nobody looked, and the operator must pass the provider. Still contains "sniffing limit".
+ */
+export const SNIFF_SKIPPED_TOO_LARGE = 'The element is too large to sniff (longer than the sniffing limit); pass the provider explicitly with --provider chatgpt|claude.';
+
 export interface DetectOptions {
   /** Override the sniffing size limit (must be a positive finite number, otherwise the default applies). */
   maxChars?: number;
@@ -97,7 +104,7 @@ function sniff(text: string, options: DetectOptions): AdapterDetection {
   const requested: unknown = typeof options === 'object' && options !== null ? options.maxChars : undefined;
   const max = typeof requested === 'number' && Number.isFinite(requested) && requested > 0 ? requested : DEFAULT_MAX_DETECT_CHARS;
   // Checked BEFORE parsing so a hostile huge element costs nothing.
-  if (text.length > max) return undetected('The element is longer than the sniffing limit; select the provider explicitly.');
+  if (text.length > max) return undetected(SNIFF_SKIPPED_TOO_LARGE);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
@@ -134,4 +141,27 @@ export function detectAdapterFromElementText(text: string, options: DetectOption
   } catch {
     return undetected('Detection failed unexpectedly; select the provider explicitly.');
   }
+}
+
+/**
+ * The error of an import in which no element identified a provider and none was forced (`resolveProvider` in import-runner.ts).
+ * Code and `details.reason` are the ones the runner has always used; only the text differs when `tooLarge` says that at least one
+ * element carrying a provider marker was NOT sniffed because it is over `DEFAULT_MAX_DETECT_CHARS`: then "no element has a mapping"
+ * would be untrue (ATK-08b: a conversation with a 100 MB message was reported that way although it has a mapping).
+ */
+export function providerUndetectedError(opts: { tooLarge: boolean }): GcrError {
+  if (opts.tooLarge) {
+    return new GcrError(
+      'IMPORT_UNSUPPORTED_FORMAT',
+      `The conversation provider could not be detected: an element is too large to sniff (over ${DEFAULT_MAX_DETECT_CHARS / (1024 * 1024)} Mi characters), so its "mapping" or "chat_messages" marker was not looked at.`,
+      {
+        remedy: 'The provider must be passed explicitly for an element this large: --provider chatgpt|claude.',
+        details: { reason: 'PROVIDER_UNDETECTED', sniffSkipped: 'ELEMENT_TOO_LARGE', maxDetectChars: DEFAULT_MAX_DETECT_CHARS },
+      },
+    );
+  }
+  return new GcrError('IMPORT_UNSUPPORTED_FORMAT', 'The conversation provider could not be detected: no element has a ChatGPT "mapping" or a Claude "chat_messages" array.', {
+    remedy: 'Check that this is an official export, or select the provider explicitly (--provider chatgpt | claude).',
+    details: { reason: 'PROVIDER_UNDETECTED' },
+  });
 }

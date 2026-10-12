@@ -306,9 +306,20 @@ describe('export-shaped data that is not named like an export', () => {
   });
 
   it('leaves source code, docs and configuration that merely mention the keys alone', () => {
+    // "Mention" = the text is prose or code around the keys. A file whose CONTENT starts like JSON is judged by shape
+    // whatever its extension (see the next test), so the samples here begin with prose.
     for (const path of ['src/ingest/registry.ts', 'test/a.test.ts', 'docs/ARCHITECTURE.md', 'README.md', '.github/workflows/ci.yml', 'scripts/x.mjs', 'src/a.tsx']) {
-      assert.deepEqual(rules(path, chatgpt), [], path);
-      assert.deepEqual(rules(path, claude), [], path);
+      assert.deepEqual(rules(path, `Example of the shape:\n${chatgpt}\n`), [], path);
+      assert.deepEqual(rules(path, `Example of the shape:\n${claude}\n`), [], path);
+      assert.deepEqual(rules(path, `const sample = ${chatgpt};\n`), [], path);
+    }
+  });
+
+  it('judges a file by its content when that starts like JSON, whatever the extension (a renamed export)', () => {
+    for (const path of ['report.md', 'notes.yml', 'chats.csv', 'export.out', 'a/b/chats.backup1', 'docs/ARCHITECTURE.md', 'src/dump.ts']) {
+      assert.deepEqual(rules(path, chatgpt), ['synthetic-marker-missing'], path);
+      assert.deepEqual(rules(path, `\uFEFF\n  ${claude}`), ['synthetic-marker-missing'], path);
+      assert.deepEqual(rules(path, marked(chatgpt)), [], path);
     }
   });
 

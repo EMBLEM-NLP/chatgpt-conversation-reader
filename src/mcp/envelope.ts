@@ -15,6 +15,17 @@
  *  - Any thrown value that is not a `GcrError` is reported as the generic INTERNAL_ERROR: raw messages from SQLite, the file
  *    system or JavaScript can embed paths or conversation text (NFR-07).
  *
+ * HAZARDOUS CHARACTERS (ATK-04)
+ *  `JSON.stringify` writes only U+0000-U+001F as escapes. C1 controls (U+009B is an 8-bit CSI, U+0085 a NEXT LINE), the bidi
+ *  controls (U+200E, U+200F, U+061C, U+202A-U+202E, U+2066-U+2069), the invisible TAG block (U+E0000-U+E007F), DEL and
+ *  U+2028 / U+2029 stay raw, so imported text could steer a host that prints a tool result to a terminal, reorder what a person
+ *  or a model reads, or smuggle invisible text. The CLI writes the same characters as visible escapes. `toCallToolResult` does
+ *  the same here, with the ONE shared implementation (`visibleEscapes`, src/format/scrub.ts): in EVERY string and EVERY object
+ *  key of the result each such character becomes its six visible characters (backslash, u, four hex digits). It cannot be the
+ *  lossless JSON escape the CLI uses: `structuredContent` is an object, and a parse would turn that escape back into the raw
+ *  character. Keys of the envelope, numbers and booleans are untouched; so are letters of every script, TAB, LF and CR.
+ *  The size cap is measured on the escaped form (`wireSize`), because an escape is longer than the character it replaces.
+ *
  * SIZE CAP (default 200 000 bytes, `GCR_MCP_MAX_RESULT_BYTES`)
  *  The envelope appears twice in the response and the text copy is JSON-escaped a second time, so the wire size is about 2.1x
  *  the cap for ordinary text and up to 3x for text made of quotes or backslashes (each costs 2 bytes in the envelope, 4 in the
@@ -42,6 +53,7 @@ import * as z from 'zod';
 import type { Completeness, ResultEnvelope, SourceSummary } from '../domain/types.js';
 import { ERROR_CODES, GcrError } from '../errors.js';
 import type { ErrorCode, Warning } from '../errors.js';
+import { visibleEscapes } from '../format/scrub.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // Types and schema
@@ -183,11 +195,25 @@ export function errorEnvelope(err: GcrError): McpEnvelope {
   };
 }
 
+/**
+ * JSON.stringify replacer: the visible-escape pass of the file header. Strings are escaped; an object whose KEYS hold a
+ * hazardous character (role names and content types come from the export) is rebuilt with escaped keys; everything else passes.
+ * If two keys collapse into one after escaping, the later wins: both were written by the same untrusted source.
+ */
+function scrubReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === 'string') return visibleEscapes(value);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  const keys = Object.keys(value);
+  if (!keys.some((k) => visibleEscapes(k) !== k)) return value;
+  return Object.fromEntries(keys.map((k) => [visibleEscapes(k), (value as Record<string, unknown>)[k]]));
+}
+
 /** Envelope -> tool result: the same JSON in the text block and in structuredContent; `isError` iff ok is false. */
 export function toCallToolResult(env: McpEnvelope): CallToolResult {
-  const text = JSON.stringify(env);
+  const text = JSON.stringify(env, scrubReplacer);
   // Parsing the text back (instead of passing `env`) guarantees the two copies are identical, drops `undefined` members and
-  // proves the envelope is plain JSON before it reaches the transport.
+  // proves the envelope is plain JSON before it reaches the transport. The escapes are already part of the text, so they are
+  // part of the parsed strings too (the file header explains why they cannot be lossless).
   return { content: [{ type: 'text', text }], structuredContent: JSON.parse(text) as Record<string, unknown>, ...(env.ok ? {} : { isError: true }) };
 }
 
@@ -251,8 +277,11 @@ export function fixPage(container: Record<string, unknown>, kept: number, total:
  * Exact for the plain JSON data an envelope holds (the rules of JSON.stringify: members that are `undefined`, functions or
  * symbols are omitted from objects and become `null` in arrays; non-finite numbers are `null`; a BigInt throws, like
  * JSON.stringify). A value with `toJSON` (a Date) is measured through JSON.stringify itself.
+ *
+ * `text` (default: none) is applied to every string and every key before it is measured, for a caller that serializes through
+ * a transform (the envelope is sent with its hazardous characters escaped, see `wireSize`). It must never return a SHORTER string.
  */
-export function jsonByteSize(value: unknown, limit: number): number {
+export function jsonByteSize(value: unknown, limit: number, text: (s: string) => string = identity): number {
   let used = 0;
   const add = (n: number): boolean => {
     used += n;
@@ -261,12 +290,13 @@ export function jsonByteSize(value: unknown, limit: number): number {
   const walk = (v: unknown, inArray: boolean): boolean => {
     switch (typeof v) {
       case 'string':
-        // An escaped string takes at least as many bytes as it has UTF-16 units, plus the quotes: no need to copy a huge one.
+        // An escaped string takes at least as many bytes as it has UTF-16 units, plus the quotes (and `text` never shortens a string):
+        // no need to copy a huge one.
         if (v.length > limit) {
           used = limit + 1;
           return false;
         }
-        return add(Buffer.byteLength(JSON.stringify(v), 'utf8'));
+        return add(Buffer.byteLength(JSON.stringify(text(v)), 'utf8'));
       case 'number':
         return add(Number.isFinite(v) ? String(v).length : 4);
       case 'boolean':
@@ -291,7 +321,7 @@ export function jsonByteSize(value: unknown, limit: number): number {
           if (member === undefined || typeof member === 'function' || typeof member === 'symbol') continue;
           if (!first && !add(1)) return false;
           first = false;
-          if (!add(Buffer.byteLength(JSON.stringify(key), 'utf8') + 1)) return false;
+          if (!add(Buffer.byteLength(JSON.stringify(text(key)), 'utf8') + 1)) return false;
           if (!walk(member, false)) return false;
         }
         return true;
@@ -303,8 +333,18 @@ export function jsonByteSize(value: unknown, limit: number): number {
   return walk(value, false) ? used : limit + 1;
 }
 
+function identity(s: string): string {
+  return s;
+}
+
+/**
+ * The size that matters for the cap: the bytes of the envelope AS IT WILL BE SENT, i.e. with the hazardous characters of the
+ * file header already written as their (longer) visible escapes. Exact up to `limit`, `limit + 1` beyond.
+ */
+const wireSize = (value: unknown, limit: number): number => jsonByteSize(value, limit, visibleEscapes);
+
 /** Envelope size, exact up to `maxBytes`, `maxBytes + 1` beyond (see `jsonByteSize`). */
-const sizeOf = (env: McpEnvelope, maxBytes: number): number => jsonByteSize(env, maxBytes);
+const sizeOf = (env: McpEnvelope, maxBytes: number): number => wireSize(env, maxBytes);
 
 function getAt(root: unknown, path: readonly string[]): unknown {
   let cur: unknown = root;
@@ -432,12 +472,12 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
   // When it alone takes more than a quarter of the cap it is cut to the longest prefix that fits in that quarter. `completeness`
   // was computed over ALL batches and stays as it is; the warning says how many entries are shown.
   const sourceBudget = Math.floor(maxBytes / 4);
-  if (jsonByteSize(source, sourceBudget) > sourceBudget) {
+  if (wireSize(source, sourceBudget) > sourceBudget) {
     let lo = 0;
     let hi = source.length - 1;
     while (lo < hi) {
       const mid = Math.ceil((lo + hi) / 2);
-      if (jsonByteSize(source.slice(0, mid), sourceBudget) <= sourceBudget) lo = mid;
+      if (wireSize(source.slice(0, mid), sourceBudget) <= sourceBudget) lo = mid;
       else hi = mid - 1;
     }
     notes.push(`source: kept ${lo} of ${source.length} import batches (completeness still describes all of them)`);
@@ -450,7 +490,7 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
   // such warnings fill the whole cap and nothing else can be cut to make room. When the lists together take more than a quarter of
   // the cap, every warning keeps only its first ids (the message of an SDK warning already states the total).
   const warningPaths = plan.flatMap((step) => (step.kind === 'warnings' ? [step.path] : []));
-  const warningBytes = [baseWarnings, ...warningPaths.map((path) => getAt(data, path))].reduce<number>((sum, list) => sum + (Array.isArray(list) ? jsonByteSize(list, sourceBudget) : 0), 0);
+  const warningBytes = [baseWarnings, ...warningPaths.map((path) => getAt(data, path))].reduce<number>((sum, list) => sum + (Array.isArray(list) ? wireSize(list, sourceBudget) : 0), 0);
   if (warningBytes > sourceBudget) {
     baseWarnings = slimWarnings(baseWarnings);
     for (const path of warningPaths) {
@@ -471,7 +511,7 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
 
     if (step.kind === 'drop') {
       if (target === undefined) continue;
-      const bytes = jsonByteSize(target, maxBytes);
+      const bytes = wireSize(target, maxBytes);
       if (bytes * 4 <= maxBytes) continue; // small enough to keep: only a member that dominates the cap is sacrificed
       data = updateAt(data, step.path, (container, key) => {
         if (Array.isArray(container[key])) container[key] = [];
@@ -543,7 +583,7 @@ export function boundEnvelope(env: McpEnvelope, plan: readonly Reduction[], maxB
     let estimate = emptySize;
     let upper = 0;
     for (let i = 0; i < total; i++) {
-      estimate += jsonByteSize(items[i], maxBytes - estimate) + 1;
+      estimate += wireSize(items[i], maxBytes - estimate) + 1;
       if (estimate > maxBytes) break;
       upper = i + 1;
     }

@@ -15,7 +15,9 @@
  *    (Node's `readline`, Python's `splitlines`) treat them as line terminators. An imported message containing one would then
  *    be cut in the middle of a frame by such a client (a way to smuggle a "fake frame" out of conversation text). `rpcOut`
  *    rewrites them to the JSON escapes (backslash, u, four hex digits): still valid JSON, identical after parsing, never a
- *    line break.
+ *    line break. (Tool results no longer carry these characters in the first place: mcp/envelope.ts writes them, and the other
+ *    hazardous ones, as visible escapes in the data itself, ATK-04. This frame-level rewrite is lossless and stays as the second
+ *    line of defence for every other frame.)
  *  - A client that vanishes while we write raises EPIPE on BOTH the real stdout and our wrapper; an unhandled 'error' event
  *    on either would kill the process with exit code 1. Both get a handler that treats EPIPE as a normal shutdown request.
  *

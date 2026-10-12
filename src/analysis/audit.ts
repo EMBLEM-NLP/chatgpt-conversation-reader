@@ -87,16 +87,19 @@ export interface AuditResult {
   scanned: { conversations: number; messages: number };
   findings: AuditFinding[];
   /**
-   * Always present. Computed from the tree pass; see the BRANCH_PROVENANCE_NOT_COMPUTED warning. "Known" means the source
-   * gave a VALID active-branch pointer (the complement of the no_current_node finding), even if branch enumeration was
-   * truncated before that branch; "unknown" is exactly the conversations no_current_node flags.
+   * Computed from the tree pass, so it is `null` (NOT zeros) when no tree-based check (tree_integrity, no_current_node,
+   * timestamps) was selected: zeros would read as a measurement ("no conversation has a known active branch"), and a script
+   * that ignores warnings would believe it (SPEC-07). The BRANCH_PROVENANCE_NOT_COMPUTED warning accompanies the null.
+   * "Known" means the source gave a VALID active-branch pointer (the complement of the no_current_node finding), even if branch
+   * enumeration was truncated before that branch; "unknown" is exactly the conversations no_current_node flags.
    */
   branchProvenance: {
     conversationsWithMultipleBranches: number;
     maxBranchesInOneConversation: number;
     conversationsWithKnownActiveBranch: number;
     conversationsWithUnknownActiveBranch: number;
-  };
+  } | null;
+  /** Always present: a single pass over the assistant messages, independent of the tree pass (so it never needs a null). */
   modelProvenance: {
     assistantMessagesWithModel: number;
     assistantMessagesWithoutModel: number;
@@ -693,8 +696,8 @@ function timestampSeverity(byCode: Record<string, number>): 'info' | 'warn' {
  * the Repository. Throws INVALID_ARGUMENT for a bad option and a content-free DB_ERROR for a database failure.
  *
  * The tree pass (tree_integrity, no_current_node, timestamps) is the only expensive part. When none of those checks is
- * selected it is skipped and `branchProvenance` is reported as zeros TOGETHER WITH a BRANCH_PROVENANCE_NOT_COMPUTED
- * warning, so zeros are never mistaken for a measurement.
+ * selected it is skipped and `branchProvenance` is `null` TOGETHER WITH a BRANCH_PROVENANCE_NOT_COMPUTED warning, so an
+ * unmeasured value is never mistaken for a measured zero.
  */
 export function runAudit(db: DatabaseSync | Repository, opts: AuditOptions = {}): AuditResult {
   const handle = resolveDb(db);
@@ -751,7 +754,7 @@ function audit(db: DatabaseSync, f: Filters): AuditResult {
   if (pass === null) {
     warnings.push({
       code: 'BRANCH_PROVENANCE_NOT_COMPUTED',
-      message: 'branchProvenance is all zeros because no tree-based check (tree_integrity, no_current_node, timestamps) was selected; it was not measured.',
+      message: 'branchProvenance is null because no tree-based check (tree_integrity, no_current_node, timestamps) was selected; it was not measured.',
     });
   } else if (pass.unreadableChildLists > 0) {
     warnings.push({
@@ -937,12 +940,15 @@ function audit(db: DatabaseSync, f: Filters): AuditResult {
   return {
     scanned,
     findings,
-    branchProvenance: {
-      conversationsWithMultipleBranches: pass === null ? 0 : pass.branch.multiple,
-      maxBranchesInOneConversation: pass === null ? 0 : pass.branch.max,
-      conversationsWithKnownActiveBranch: pass === null ? 0 : pass.branch.known,
-      conversationsWithUnknownActiveBranch: pass === null ? 0 : pass.branch.unknown,
-    },
+    branchProvenance:
+      pass === null
+        ? null
+        : {
+            conversationsWithMultipleBranches: pass.branch.multiple,
+            maxBranchesInOneConversation: pass.branch.max,
+            conversationsWithKnownActiveBranch: pass.branch.known,
+            conversationsWithUnknownActiveBranch: pass.branch.unknown,
+          },
     modelProvenance,
     warnings,
   };
