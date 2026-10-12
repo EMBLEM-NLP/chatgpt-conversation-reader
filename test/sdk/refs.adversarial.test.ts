@@ -103,6 +103,29 @@ describe('a chatgpt.com link inside an object reference', () => {
   });
 });
 
+describe('a bare UUID string reference is only trimmed of ASCII whitespace (TQ-03)', () => {
+  it('NBSP, BOM and U+2003 padding is INVALID_UUID on every reading method; ASCII padding resolves the conversation', async () => {
+    const t = await standardDb();
+    try {
+      for (const ch of [' ', '﻿', ' ']) {
+        for (const padded of [`${ch}${ID.linear}`, `${ID.linear}${ch}`, `${ch}${ID.linear}${ch}`]) {
+          for (const [name, call] of [
+            ['get', () => t.gcr.get(padded)],
+            ['branches', () => t.gcr.branches(padded)],
+            ['thread', () => t.gcr.thread(padded)],
+          ] as const) {
+            const e = assertCode(call, 'INVALID_UUID');
+            assert.equal(e.details?.['reason'], 'not_a_uuid', `${name} ${JSON.stringify(padded)}`);
+          }
+        }
+      }
+      assert.equal(t.gcr.get(` \t${ID.linear.toUpperCase()}\n`).data.conversation.conversationId, ID.linear);
+    } finally {
+      await t.cleanup();
+    }
+  });
+});
+
 describe('object-form links never reach the network either', () => {
   it('looking up links (imported, missing, refused) through object references opens no socket and calls no fetch', async () => {
     const t = await standardDb();

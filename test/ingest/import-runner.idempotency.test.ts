@@ -8,6 +8,9 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { closeDatabase, openDatabase } from '../../src/db/open.js';
+import { Repository } from '../../src/db/repo.js';
+import type { ImportBatchInput, ImportBatchResult } from '../../src/db/repo.js';
 import { runImport } from '../../src/ingest/import-runner.js';
 import type { ImportOptions } from '../../src/ingest/import-runner.js';
 import { syntheticUuid } from '../helpers/chatgpt-export-builder.js';
@@ -181,5 +184,80 @@ describe('a NEW export of the same conversations', () => {
     } finally {
       t.close();
     }
+  });
+});
+
+/**
+ * TQ-05 (mutation U2: the "another process stored the same input between our check and the transaction" path of the import
+ * runner could throw, or report a fresh import, and no test noticed). The race is made deterministic WITHOUT touching the
+ * product: two real connections to one database file; the connection that loses runs its normal pre-check (the batch does not
+ * exist yet), and right before its transaction begins the winner's complete import is committed through the other connection.
+ * Everything else (the pre-check, the in-transaction check of the repository, the reports) is the production code.
+ */
+class LosesTheRace extends Repository {
+  readonly results: ImportBatchResult[] = [];
+  private winner: (() => Promise<unknown>) | null;
+
+  constructor(db: ConstructorParameters<typeof Repository>[0], winner: () => Promise<unknown>) {
+    super(db);
+    this.winner = winner;
+  }
+
+  override async importBatch(input: ImportBatchInput): Promise<ImportBatchResult> {
+    const winner = this.winner;
+    this.winner = null; // the winner commits exactly once, before the first transaction of this runner
+    if (winner !== null) await winner();
+    const result = await super.importBatch(input);
+    this.results.push(result);
+    return result;
+  }
+}
+
+describe('two processes import the same input at once (the loser finds the batch inside its transaction)', () => {
+  it('the loser reports the stored batch as the no-op it is: alreadyImported, the winner\'s counts and warnings, no second import pass, no second batch', async () => {
+    await withTempDir(async (dir) => {
+      // One broken element, so the stored batch carries a warning the loser has to reproduce from the batch row.
+      const file = await writeFileIn(dir, 'conversations.json', `[${chatConv(1, { pairs: 2, updateTime: T0 }).text()},${chatConv(2, { updateTime: T0 + 5 }).text()},{"mapping": BROKEN}]`);
+      const dbPath = join(dir, 'race.sqlite');
+      const winnerHandle = openDatabase(dbPath);
+      const loserHandle = openDatabase(dbPath);
+      try {
+        const winnerRepo = new Repository(winnerHandle.db);
+        let winnerReport: Awaited<ReturnType<typeof runImport>> | undefined;
+        const loserRepo = new LosesTheRace(loserHandle.db, async () => {
+          assert.equal(count(loserHandle.db, 'source_batches'), 0, 'premise: at the loser\'s pre-check nothing is stored yet');
+          winnerReport = await runImport(winnerRepo, { source: path(file), clock: fixedClock });
+        });
+        const phases: string[] = [];
+        const loser = await runImport(loserRepo, { source: path(file), clock: () => '2031-01-01T00:00:00.000Z', onProgress: (p) => phases.push(p.phase) });
+
+        assert.ok(winnerReport !== undefined, 'the winner ran between the loser\'s pre-check and its transaction');
+        assert.equal(winnerReport.alreadyImported, false);
+        assert.equal(winnerReport.conversations.stored, 2);
+        assert.equal(winnerReport.conversations.failed, 1);
+
+        // The repository was asked twice: the transaction found the batch (the race), then the report asked for the counts.
+        // A plain re-import is answered by the pre-check with ONE call, so two calls prove the race path ran.
+        assert.equal(loserRepo.results.length, 2);
+        assert.deepEqual(loserRepo.results.map((r) => r.alreadyImported), [true, true]);
+
+        assert.equal(loser.alreadyImported, true);
+        assert.equal(loser.batchId, winnerReport.batchId);
+        assert.deepEqual(loser.conversations, { read: 3, stored: 2, failed: 1, newlyInserted: 0 }, 'the stored counts of the winner; failed is recovered from the stored warning');
+        assert.equal(loser.messages.newlyInserted, 0);
+        assert.equal(loser.messages.stored, winnerReport.messages.stored);
+        assert.deepEqual(loser.warnings, winnerReport.warnings, 'the winner\'s warning summaries come back from the stored batch row');
+        assert.ok(loser.warnings.some((w) => w.code === 'ELEMENT_PARSE_FAILED'));
+        assert.equal(loser.formatProfile, undefined, 'the adapters did not run for the loser');
+        assert.ok(phases.includes('scan'));
+        assert.ok(!phases.includes('import'), 'the loser never started the second (import) pass');
+        assert.equal(winnerRepo.getBatch(winnerReport.batchId)?.importedAt, '2026-02-03T04:05:06.007Z', 'imported_at of the winner is kept');
+        assert.equal(count(loserHandle.db, 'source_batches'), 1);
+        assert.equal(count(loserHandle.db, 'conversations'), 2);
+      } finally {
+        closeDatabase(loserHandle);
+        closeDatabase(winnerHandle);
+      }
+    });
   });
 });

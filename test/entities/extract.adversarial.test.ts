@@ -225,6 +225,21 @@ describe('negative tests for every exported function', () => {
     assert.deepEqual(u, { value: 'https://host.example.com/p/q', normalized: 'host.example.com/p/q' });
   });
 
+  // TQ-04 (mutation survivor `authority.lastIndexOf('@')` -> `indexOf('@')`): the userinfo ends at the LAST '@' of the
+  // authority, so a second '@' inside it belongs to the secret. Splitting at the first '@' would hand "pass@host.example" to the
+  // host parser, which refuses it and silently drops the whole URL.
+  it('sanitizeUrl cuts the userinfo at its LAST "@": a second "@" inside the userinfo is part of the secret, the URL is kept', () => {
+    assert.deepEqual(sanitizeUrl('http://user@pass@host.example/x?token=1'), { value: 'http://host.example/x', normalized: 'host.example/x' });
+    assert.deepEqual(sanitizeUrl('https://a@b:c@d@Host.EXAMPLE:8443/p#f'), { value: 'https://host.example:8443/p', normalized: 'host.example:8443/p' });
+    assert.deepEqual(sanitizeUrl('https://@@host.example/'), { value: 'https://host.example/', normalized: 'host.example/' });
+  });
+
+  it('the same cut applies when the URL is found inside running text: the entity is kept and no part of the userinfo survives anywhere', () => {
+    const text = 'see http://zqxuser@zqxpass@host.example/x?token=zqxquery now';
+    assert.deepEqual(ofKind(extractEntities({ text }), 'url'), ['host.example/x']);
+    assert.equal(dumpOf(text).includes('zqx'), false, 'userinfo or query leaked');
+  });
+
   it('isEntityKind rejects look-alikes, prototype names and non-strings', () => {
     for (const bad of ['', 'URL', 'Url', ' url', 'url ', 'email', 'phone', '__proto__', 'constructor', 'toString', 'hasOwnProperty', null, undefined, 0, ['url'], { kind: 'url' }]) {
       assert.equal(isEntityKind(bad), false, String(bad));

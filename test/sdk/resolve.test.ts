@@ -23,6 +23,17 @@ describe('normalizeRef: strings', () => {
     assert.deepEqual(normalizeRef('ref', `  ${UUID}\n`), { conversationId: UUID });
   });
 
+  it('only ASCII whitespace is trimmed from a bare UUID: padding with NBSP, BOM or U+2003 is INVALID_UUID (TQ-03), ASCII padding is accepted', () => {
+    for (const ch of [' ', '﻿', ' ']) {
+      assert.equal(`${ch}${UUID}`.trim(), UUID, 'premise: String.prototype.trim() would have accepted this');
+      for (const padded of [`${ch}${UUID}`, `${UUID}${ch}`, `${ch}${UUID}${ch}`, ` ${ch}${UUID} `]) {
+        const e = assertCode(() => normalizeRef('ref', padded), 'INVALID_UUID');
+        assert.equal(e.details?.['reason'], 'not_a_uuid');
+      }
+    }
+    assert.deepEqual(normalizeRef('ref', ` \t${UUID}\r\n`), { conversationId: UUID });
+  });
+
   it('an exact https://chatgpt.com/c/<uuid> link implies provider "chatgpt"; trailing slash, query and fragment are ignored', () => {
     const want = { conversationId: UUID, provider: 'chatgpt' };
     assert.deepEqual(normalizeRef('ref', `https://chatgpt.com/c/${UUID}`), want);

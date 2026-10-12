@@ -230,6 +230,25 @@ describe('buildEnvelope: never present a partial source as full history (FR-09)'
     assert.deepEqual(env.warnings[1]?.ids, ['b_ghost']);
   });
 
+  it('an extra batch id whose row vanished next to a REAL contribution is unknown, never complete: "mixed" plus SOURCE_BATCH_MISSING (TQ-04)', () => {
+    const env = buildEnvelope(lookupOf(batch()), {
+      data: 1,
+      contributions: [{ batchId: 'b_one', completeness: 'exported_tree' }],
+      extraBatchIds: ['b_ghost'],
+    });
+    // The real contribution alone would be "exported_tree"; the vanished row must pull the whole result down.
+    assert.equal(env.completeness, 'mixed');
+    assert.deepEqual(env.warnings.map((w) => w.code), [SOURCE_NOT_FULL_HISTORY, 'SOURCE_BATCH_MISSING']);
+    assert.match(env.warnings[0]?.message ?? '', /distinct values: exported_tree, unknown; weakest: unknown/);
+    assert.deepEqual(env.warnings[1]?.ids, ['b_ghost']);
+    // Only the readable batch is a source, and its own completeness is not touched by the missing neighbour.
+    assert.deepEqual(env.source.map((s) => [s.batchId, s.completeness]), [['b_one', 'exported_tree']]);
+    // The same result without the ghost is complete and silent (the control for the assertions above).
+    const control = buildEnvelope(lookupOf(batch()), { data: 1, contributions: [{ batchId: 'b_one', completeness: 'exported_tree' }] });
+    assert.equal(control.completeness, 'exported_tree');
+    assert.deepEqual(control.warnings, []);
+  });
+
   it('notFullHistoryWarning lists at most 20 batch ids', () => {
     const sources = Array.from({ length: 30 }, (_, i) => toSourceSummary(batch({ batchId: `b_${i}`, completeness: 'unknown' })));
     const w = notFullHistoryWarning('unknown', ['unknown'], sources);

@@ -338,6 +338,57 @@ describe('parseConversationRef', () => {
     assert.deepEqual(parseConversationRef(` \t${U}\n`), { conversationId: U, viaUrl: false });
   });
 
+  it('a bare UUID is trimmed of exactly TAB, LF, FF, CR and SPACE (the WHATWG set), each side on its own', () => {
+    for (const ws of [' ', '\t', '\n', '\f', '\r', '  ', ' \t\n\f\r']) {
+      const label = JSON.stringify(ws);
+      assert.deepEqual(parseConversationRef(`${ws}${U}`), { conversationId: U, viaUrl: false }, `leading ${label}`);
+      assert.deepEqual(parseConversationRef(`${U}${ws}`), { conversationId: U, viaUrl: false }, `trailing ${label}`);
+      assert.deepEqual(parseConversationRef(`${ws}${U_UP}${ws}`), { conversationId: U, viaUrl: false }, `both sides ${label}`);
+    }
+  });
+
+  // TQ-03 (mutation survivor `normalizeUuid(input.trim())`): String.prototype.trim() removes every one of these, GCR's own
+  // trim ("Nothing else is trimmed", src/domain/ids.ts) none of them. A padded bare id is not an id: INVALID_UUID / not_a_uuid.
+  const NOT_ASCII_WHITESPACE: ReadonlyArray<readonly [string, string]> = [
+    ['no-break space U+00A0', ' '],
+    ['byte order mark U+FEFF', '﻿'],
+    ['em space U+2003', ' '],
+    ['ideographic space U+3000', '　'],
+    ['vertical tab U+000B', '\u000b'],
+    ['ogham space mark U+1680', ' '],
+    ['en quad U+2000', ' '],
+    ['hair space U+200A', ' '],
+    ['narrow no-break space U+202F', ' '],
+    ['medium mathematical space U+205F', ' '],
+    ['line separator U+2028', ' '],
+    ['paragraph separator U+2029', ' '],
+  ];
+  for (const [label, ch] of NOT_ASCII_WHITESPACE) {
+    it(`a bare UUID padded with ${label} is refused, whichever side carries it (INVALID_UUID not_a_uuid)`, () => {
+      // Premise: this really is a character that String.prototype.trim() would have removed.
+      assert.equal(`${ch}${U}${ch}`.trim(), U, 'premise: trim() strips this character');
+      for (const padded of [`${ch}${U}`, `${U}${ch}`, `${ch}${U}${ch}`, ` ${ch}${U}`, `${U}${ch} `, `\t${ch}${U_UP}\n`]) {
+        expectCode(() => parseConversationRef(padded), 'INVALID_UUID', 'not_a_uuid');
+      }
+      // The same text with ASCII whitespace instead is accepted: the difference is exactly the padding character.
+      assert.deepEqual(parseConversationRef(` ${U} `), { conversationId: U, viaUrl: false });
+    });
+  }
+
+  it('the refusal of a padded bare UUID is the same through normalizeUuid and does not echo the padding', () => {
+    for (const ch of [' ', '﻿', ' ']) {
+      expectCode(() => normalizeUuid(`${ch}${U}`), 'INVALID_UUID', 'not_a_uuid');
+      let caught: unknown;
+      try {
+        parseConversationRef(`${ch}${U}${ch}`);
+      } catch (e) {
+        caught = e;
+      }
+      assert.ok(caught instanceof GcrError);
+      assert.equal(JSON.stringify(caught.toEnvelope()).includes(U), false, 'the rejected text must not be echoed');
+    }
+  });
+
   it('chatgpt.com link: viaUrl=true with the canonical URL', () => {
     assert.deepEqual(parseConversationRef(`HTTPS://ChatGPT.com/c/${U_UP}/?x=1#y`), { conversationId: U, viaUrl: true, canonicalUrl: BASE });
   });

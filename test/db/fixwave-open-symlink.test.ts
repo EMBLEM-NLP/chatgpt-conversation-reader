@@ -209,6 +209,41 @@ describe('ATK-01: EEXIST from open(path, "wx") is success only for a regular fil
     assert.equal(readFileSync(path, 'utf8'), 'x');
   });
 
+  // TQ-05 (mutation U1: remove the foreign-owner refusal). Root can chown, a normal user cannot, so ownership is simulated the
+  // way test/cli/db-safety.adversarial.test.ts does it: process.getuid is stubbed to return somebody else's uid. The file is
+  // really ours, so the same test runs unchanged as root and as an ordinary user.
+  it('a regular file that appeared meanwhile but is owned by ANOTHER user is refused ("created by another user in the meantime"), untouched', (t) => {
+    const realGetuid = process.getuid;
+    if (realGetuid === undefined) return t.skip('this platform has no process.getuid (no file owners)');
+    const me = realGetuid.call(process);
+    const dir = tempDir();
+    const path = join(dir, 'planted.sqlite');
+    writeFileSync(path, 'planted by somebody else', { mode: 0o600 });
+    assert.equal(statSync(path).uid, me, 'premise: the file really is ours; only the process identity is simulated');
+    // Control: with the real identity the very same file is the normal "concurrent creator" case and is accepted.
+    assert.doesNotThrow(() => createPrivateFile(path, 'planted.sqlite'));
+    for (const otherUid of [me + 1, me === 0 ? 65534 : 0]) {
+      process.getuid = () => otherUid;
+      try {
+        assert.throws(
+          () => createPrivateFile(path, 'planted.sqlite'),
+          (e) => {
+            assert.ok(e instanceof GcrError, `expected a GcrError, got ${String(e)}`);
+            assert.equal(e.code, 'DB_ERROR');
+            assert.equal(e.details?.['reason'], 'cannot_create');
+            assert.equal(e.message, 'The database file was created by another user in the meantime; GCR will not write into it.');
+            assert.equal(JSON.stringify([e.message, e.remedy, e.details]).includes(dir), false, 'no absolute directory in the error');
+            return true;
+          },
+          `as uid ${otherUid}`,
+        );
+      } finally {
+        process.getuid = realGetuid;
+      }
+    }
+    assert.equal(readFileSync(path, 'utf8'), 'planted by somebody else', 'a refused file is left exactly as it was');
+  });
+
   it('a symbolic link that appeared meanwhile (dangling or not) is refused, and the target is not created', () => {
     const { dir, shared, attacker } = layout();
     const dangling = join(shared, 'dangling.sqlite');
