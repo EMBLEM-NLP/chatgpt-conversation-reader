@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "overlap": 0.25,
+  "maxFrames": 600,
+  "maxSeekPasses": 80,
+  "stableSamples": 3,
+  "screenshotTimeoutMs": 15000,
+  "screenshotRetries": 3,
+  "timezone": "America/Toronto",
+  "conversations": [
+    {
+      "id": "mountain",
+      "sourceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6acbab4b-1894-83ea-8647-4a0eab6f7769",
+      "expectedFirstId": "ed34fa2b-906d-46af-9c70-4cdee23c2dd8",
+      "expectedUserIds": [
+        "ed34fa2b-906d-46af-9c70-4cdee23c2dd8",
+        "8f937b52-a3fe-48e2-9e30-102051e8d6e6",
+        "0ca16bd5-b919-4148-8012-f43e07d222f0",
+        "29c3c25e-f778-4a92-a197-5b7097357bec",
+        "3d605e9f-0daa-4ae0-a054-83cc2c3d05e9",
+        "f9a5f245-fc5e-4c24-98b3-2be4f76f4299",
+        "df620e98-aa0d-43a6-9df1-077726d50555",
+        "53bd4d9c-5883-47bc-9456-5c94cb9fc6e3",
+        "c1001878-31e2-4b61-809b-1932d04a8399",
+        "8299c33f-6560-48b5-a1e6-09375e68fbdc",
+        "ee093fc9-6f00-4150-8197-254d57ff2ac5",
+        "7ebf0c8c-a412-47c8-b82e-3a12af91e5c2",
+        "ee0f6acb-9f32-42bd-8066-bf888b97cc3a",
+        "3880ed78-cd6f-49fd-b807-aa4074dd1da6",
+        "2311cf6a-6e45-41c9-9063-ae1e2d805ab6",
+        "43a646e2-d0b3-490a-bb45-3af027752f59",
+        "0e59152c-c5f9-4fdf-8990-de86287064c3",
+        "d7a8d4a2-6447-47a0-8d01-92f486e4d97b",
+        "eb826727-16ac-415c-b2ff-f67e190e27d3",
+        "9ab56ad5-72b9-42d3-ba3d-8db7cafe1d5b",
+        "eeb2729e-1b40-41b1-9f3d-c3ac8b6acd29"
+      ],
+      "reference": {
+        "scroller": "[role=\"region\"][aria-label=\"Conversation\"]",
+        "messages": "[data-chatgpt-search-message-ids]",
+        "idAttribute": "data-chatgpt-search-message-ids",
+        "loadingText": "Loading older messages",
+        "content": {
+          "root": "[role=\"region\"][aria-label=\"Conversation\"]",
+          "turns": "[data-turn-key]",
+          "turnIdAttribute": "data-turn-key",
+          "codeBlocks": "pre",
+          "activityButtons": "button[aria-expanded]"
+        }
+      },
+      "candidate": {
+        "scroller": "#messages",
+        "messages": "[data-message-id], [data-message-ids]",
+        "idAttribute": "data-message-id",
+        "alternateIdAttribute": "data-message-ids",
+        "loadingText": "",
+        "content": {
+          "root": "#messages",
+          "turns": "article[data-turn-id]",
+          "turnIdAttribute": "data-turn-id",
+          "codeBlocks": ".user-body pre, .assistant-body pre",
+          "activityButtons": "details.activity > summary"
+        }
+      }
+    },
+    {
+      "id": "street",
+      "sourceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6ace7d3a-de88-83ea-bd89-d266bf699367",
+      "expectedFirstId": "d9f16ad7-40ac-448d-ad0f-fadd9a9d97cd",
+      "expectedUserIds": [
+        "d9f16ad7-40ac-448d-ad0f-fadd9a9d97cd",
+        "4e486ec5-c3e6-4b41-8e7c-59ed1a10e1b2",
+        "62797e64-5537-4d5e-b9b0-63c05e9dfbc5",
+        "11a20d61-369d-48ff-b1b7-2a98fcaa466b",
+        "ed7941de-11d1-462b-82c8-c0982aa2bd37",
+        "90cdce89-156d-4597-bc73-3ac88d1f9382",
+        "a1f422f5-5c05-4804-8f14-6b12b3d36956",
+        "99cc0dce-a97f-4c03-b2dd-ffba51166d24",
+        "3b7c4e82-6ac2-4778-80e2-a11fb78c515d",
+        "7c3fc2c2-9336-481e-8512-18900720563f",
+        "c4de1ba5-6728-4c15-9ded-e65f4f5acc88",
+        "8617995d-9593-4db5-a6fd-9c43dfa85498",
+        "8d8c440d-7438-42d2-8eee-9f72f5e05c3d",
+        "10b39e96-a19b-4beb-a18b-3433995ca935",
+        "e6f2260f-7201-4449-8fb2-f57ca32c2099",
+        "7522febc-a536-4529-ae42-c32ea170186e",
+        "3a288d16-31d4-4621-9673-156c935c7d3e",
+        "d606d23a-580a-46af-84ed-84ea9b30761b"
+      ],
+      "reference": {
+        "scroller": "[role=\"region\"][aria-label=\"Conversation\"]",
+        "messages": "[data-chatgpt-search-message-ids]",
+        "idAttribute": "data-chatgpt-search-message-ids",
+        "loadingText": "Loading older messages",
+        "content": {
+          "root": "[role=\"region\"][aria-label=\"Conversation\"]",
+          "turns": "[data-turn-key]",
+          "turnIdAttribute": "data-turn-key",
+          "codeBlocks": "pre",
+          "activityButtons": "button[aria-expanded]"
+        }
+      },
+      "candidate": {
+        "scroller": "#messages",
+        "messages": "[data-message-id], [data-message-ids]",
+        "idAttribute": "data-message-id",
+        "alternateIdAttribute": "data-message-ids",
+        "loadingText": "",
+        "content": {
+          "root": "#messages",
+          "turns": "article[data-turn-id]",
+          "turnIdAttribute": "data-turn-id",
+          "codeBlocks": ".user-body pre, .assistant-body pre",
+          "activityButtons": "details.activity > summary"
+        }
+      }
+    }
+  ]
+}

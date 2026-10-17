@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "timezone": "America/Toronto",
+  "threshold": 0.1,
+  "maxDiffRatio": 0.02,
+  "cases": [
+    {
+      "id": "mountain-prose-phone",
+      "chat": "mountain",
+      "turn": "0e59152c-c5f9-4fdf-8990-de86287064c3",
+      "part": "assistant",
+      "theme": "dark",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "referenceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6acbab4b-1894-83ea-8647-4a0eab6f7769",
+      "referenceTarget": {
+        "text": "The ZIP also contains a local interactive gallery with before/after reveal sliders for every image. Open INTERACTIVE_VISUAL_AUDIT.html after extracting the ZIP."
+      },
+      "candidateTarget": {
+        "text": "The ZIP also contains a local interactive gallery with before/after reveal sliders for every image. Open INTERACTIVE_VISUAL_AUDIT.html after extracting the ZIP."
+      },
+      "region": "element"
+    },
+    {
+      "id": "street-prose-phone",
+      "chat": "street",
+      "turn": "d606d23a-580a-46af-84ed-84ea9b30761b",
+      "part": "assistant",
+      "theme": "dark",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "referenceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6ace7d3a-de88-83ea-bd89-d266bf699367",
+      "referenceTarget": {
+        "text": "All 12 listings / 13 locations are now indexed."
+      },
+      "candidateTarget": {
+        "text": "All 12 listings / 13 locations are now indexed."
+      },
+      "region": "element"
+    },
+    {
+      "id": "mountain-heading-phone",
+      "chat": "mountain",
+      "turn": "0e59152c-c5f9-4fdf-8990-de86287064c3",
+      "part": "assistant",
+      "theme": "dark",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "referenceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6acbab4b-1894-83ea-8647-4a0eab6f7769",
+      "referenceTarget": {
+        "role": "heading",
+        "name": "Complete image-by-image findings"
+      },
+      "candidateTarget": {
+        "role": "heading",
+        "name": "Complete image-by-image findings"
+      },
+      "region": "element"
+    },
+    {
+      "id": "mountain-prose-desktop",
+      "chat": "mountain",
+      "turn": "0e59152c-c5f9-4fdf-8990-de86287064c3",
+      "part": "assistant",
+      "theme": "light",
+      "viewport": {
+        "width": 1363,
+        "height": 936
+      },
+      "referenceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6acbab4b-1894-83ea-8647-4a0eab6f7769",
+      "referenceTarget": {
+        "text": "The ZIP also contains a local interactive gallery with before/after reveal sliders for every image. Open INTERACTIVE_VISUAL_AUDIT.html after extracting the ZIP."
+      },
+      "candidateTarget": {
+        "text": "The ZIP also contains a local interactive gallery with before/after reveal sliders for every image. Open INTERACTIVE_VISUAL_AUDIT.html after extracting the ZIP."
+      },
+      "region": "element"
+    },
+    {
+      "id": "street-prose-desktop",
+      "chat": "street",
+      "turn": "d606d23a-580a-46af-84ed-84ea9b30761b",
+      "part": "assistant",
+      "theme": "light",
+      "viewport": {
+        "width": 1363,
+        "height": 936
+      },
+      "referenceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6ace7d3a-de88-83ea-bd89-d266bf699367",
+      "referenceTarget": {
+        "text": "All 12 listings / 13 locations are now indexed."
+      },
+      "candidateTarget": {
+        "text": "All 12 listings / 13 locations are now indexed."
+      },
+      "region": "element"
+    },
+    {
+      "id": "mountain-heading-desktop",
+      "chat": "mountain",
+      "turn": "0e59152c-c5f9-4fdf-8990-de86287064c3",
+      "part": "assistant",
+      "theme": "light",
+      "viewport": {
+        "width": 1363,
+        "height": 936
+      },
+      "referenceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6acbab4b-1894-83ea-8647-4a0eab6f7769",
+      "referenceTarget": {
+        "role": "heading",
+        "name": "Complete image-by-image findings"
+      },
+      "candidateTarget": {
+        "role": "heading",
+        "name": "Complete image-by-image findings"
+      },
+      "region": "element"
+    },
+    {
+      "id": "mountain-complete-viewport",
+      "chat": "mountain",
+      "turn": "0e59152c-c5f9-4fdf-8990-de86287064c3",
+      "part": "assistant",
+      "theme": "dark",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "referenceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6acbab4b-1894-83ea-8647-4a0eab6f7769",
+      "referenceTarget": {
+        "text": "The ZIP also contains a local interactive gallery with before/after reveal sliders for every image. Open INTERACTIVE_VISUAL_AUDIT.html after extracting the ZIP."
+      },
+      "candidateTarget": {
+        "text": "The ZIP also contains a local interactive gallery with before/after reveal sliders for every image. Open INTERACTIVE_VISUAL_AUDIT.html after extracting the ZIP."
+      },
+      "region": "viewport"
+    },
+    {
+      "id": "expanded-python-activity",
+      "chat": "mountain",
+      "turn": "9ab56ad5-72b9-42d3-ba3d-8db7cafe1d5b",
+      "part": "assistant",
+      "theme": "dark",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "referenceUrl": "https://chatgpt.com/g/g-p-6acee54e33508191b24400d431578256-marcus-millichap-emblem-nlp/c/6acbab4b-1894-83ea-8647-4a0eab6f7769",
+      "referenceTarget": {
+        "text": "Built and tested RSI v8 visual inspection toolkit"
+      },
+      "candidateTarget": {
+        "selector": ".code-wrap"
+      },
+      "region": "element",
+      "missingReason": "The expanded Python tool activity is visible in IMG_9377.png but was not retained in the captured archive. Recapture is required; no synthetic replacement is permitted."
+    }
+  ]
+}

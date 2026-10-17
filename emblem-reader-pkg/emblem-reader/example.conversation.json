@@ -1,0 +1,61 @@
+{
+  "schema": "emblem.conversation/2",
+  "sourceUrl": "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111",
+  "conversationId": "11111111-1111-4111-8111-111111111111",
+  "title": "Synthetic example \u2014 not a captured chat",
+  "events": [
+    {
+      "id": "user-1",
+      "parentId": null,
+      "role": "user",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Show a code example."
+        }
+      ]
+    },
+    {
+      "id": "answer-1",
+      "parentId": "user-1",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "code",
+          "language": "typescript",
+          "text": "const greeting = \"Hello\";\n"
+        }
+      ]
+    },
+    {
+      "id": "answer-2",
+      "parentId": "user-1",
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Alternative captured answer."
+        }
+      ]
+    }
+  ],
+  "branches": [
+    {
+      "id": "main",
+      "label": "Main",
+      "leafId": "answer-1"
+    },
+    {
+      "id": "alternative",
+      "label": "Alternative",
+      "leafId": "answer-2"
+    }
+  ],
+  "assets": [],
+  "coverage": {
+    "sourceComplete": false,
+    "limitations": [
+      "Synthetic example only; no live capture performed."
+    ]
+  }
+}

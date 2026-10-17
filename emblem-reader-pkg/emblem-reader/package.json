@@ -1,0 +1,34 @@
+{
+  "name": "@emblem-nlp/chat-ui-rsi",
+  "version": "0.8.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "doctor": "node cli.ts doctor",
+    "test": "node --test compare.test.ts full-scroll.test.ts host-capture.test.ts content-audit.test.ts import-activity.test.ts validation-gate.test.ts import-tool-events.test.ts activity-branch.test.ts session.test.ts dom-evidence.test.ts generate-session.test.ts repair-disclosures.test.ts conversation.test.ts",
+    "import-activity": "node import-activity.ts",
+    "audit-content": "node content-cli.ts",
+    "capture": "node cli.ts capture-candidate",
+    "compare": "node cli.ts compare",
+    "scroll-review": "node scroll-cli.ts",
+    "capture-full-scroll": "node host-capture.ts",
+    "validate-evidence": "node validation-gate.ts",
+    "import-tool-events": "node import-tool-events.ts",
+    "session": "node session.ts",
+    "compare-dom": "node dom-evidence.ts compare",
+    "generate-session": "node generate-session.ts",
+    "repair-disclosures": "node repair-disclosures.ts",
+    "audit-readers": "python3 audit-reader.py",
+    "recover-images": "python3 recover-image-catalogue.py",
+    "test-recovery": "python3 -m unittest discover -p test_recover_image_catalogue.py",
+    "reader": "node reader.ts"
+  },
+  "dependencies": {
+    "playwright": "1.62.1",
+    "pngjs": "7.0.0",
+    "pixelmatch": "7.2.0"
+  }
+}
